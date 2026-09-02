@@ -207,7 +207,7 @@ function defaults(): StoreData {
       autoStart: true,
       dryRun: true,
       roleStrategy: "llm",
-      fixedRoles: ["trading", "factor"],
+      fixedRoles: ["trading", "news", "factor", "risk"],
       skillEnabled: {
         market_scan: true,
         news_fetch: true,
@@ -359,6 +359,12 @@ export function setSkillEnabled(skillId: string, enabled: boolean): void {
   const s = loadStore();
   s.settings.skillEnabled[skillId] = enabled;
   saveStore(s);
+}
+
+/** Skill 是否启用：未在表中或显式为 true 均视为启用（默认开） */
+export function isSkillEnabled(skillId: string): boolean {
+  const map = loadStore().settings.skillEnabled ?? {};
+  return map[skillId] !== false;
 }
 
 // ── 对话历史 ────────────────────────────────────────────────

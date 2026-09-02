@@ -33,7 +33,7 @@ import { Annotation, Send, StateGraph, START, END } from "@langchain/langgraph";
 import { allExperts, getExpert, type ExpertOpinion } from "./experts.js";
 import { connectMcp, type McpTool } from "./mcp.js";
 import { createProvider } from "./llm.js";
-import { getModel, listRoles, resolveModel, type ModelConfig } from "./store.js";
+import { getModel, getSettings, listRoles, resolveModel, type ModelConfig } from "./store.js";
 import type { Decision, TradeIntent } from "./types.js";
 
 // ── 状态定义 ──────────────────────────────────────────────
@@ -108,7 +108,7 @@ export function makeStoreLlmProvider(modelId?: string, mainAgent = false): LlmPr
 
 function mockReply(sys: string): string {
   const isPlan = sys.includes("调度模块");
-  if (isPlan) return JSON.stringify({ experts: ["trading", "factor"] });
+  if (isPlan) return JSON.stringify({ experts: allExperts().map((e) => e.id) });
   if (sys.includes("主 Agent")) {
     return JSON.stringify({
       decision: "HOLD",
@@ -141,23 +141,37 @@ function outJson(text: string): Record<string, unknown> {
 }
 
 // ── 节点：主 Agent 决定召唤谁 ─────────────────────────────
+/**
+ * 专家选择策略（来自 store.settings.roleStrategy）：
+ *   · "fixed"：用界面勾选的 fixedRoles（为空则视为「全部已启用专家」）
+ *   · "llm"  ：由主 Agent 自行决定召唤哪些专家
+ * 两种模式下，兜底都是「全部已启用专家」，避免出现 0 或 1 个专家的情况。
+ */
 async function planNode(s: State): Promise<Partial<State>> {
-  const llm = makeStoreLlmProvider(undefined, true);
-  const roles = allExperts();
-  const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些专家。
-可选：${roles.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ")}
+  const enabled = allExperts(); // 已启用的专家
+  const enabledIds = enabled.map((e) => e.id);
+  const settings = getSettings();
+
+  let ids: string[] = [];
+  if (settings.roleStrategy === "fixed") {
+    const picked = (settings.fixedRoles ?? []).filter((id) => enabledIds.includes(id));
+    ids = picked.length ? picked : enabledIds;
+  } else {
+    const llm = makeStoreLlmProvider(undefined, true);
+    const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些专家。
+可选：${enabled.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ")}
 规则：有持仓或可能开仓 → trading + factor；临近事件或消息面有影响 → news；
 持仓亏损/回撤/高敞口 → risk。没必要别全召。
 只输出 JSON：{"experts":["trading","factor"]}`;
-  const raw = await llm.decide(sys, s.sharedContext);
-  let ids: string[] = [];
-  try {
-    ids = ((outJson(raw).experts as string[]) ?? []).filter((x) => !!getExpert(x));
-  } catch {
-    ids = [];
+    try {
+      const raw = await llm.decide(sys, s.sharedContext);
+      ids = ((outJson(raw).experts as string[]) ?? []).filter((x) => enabledIds.includes(x));
+    } catch {
+      ids = [];
+    }
   }
-  if (!ids.length) ids = ["trading"];
-  return { expertPlan: ids, logs: [`召唤专家: ${ids.join(", ")}`] };
+  if (!ids.length) ids = enabledIds; // 兜底：全部已启用专家
+  return { expertPlan: ids, logs: [`召唤专家(${settings.roleStrategy}): ${ids.join(", ")}`] };
 }
 
 /** 条件边：按 plan 动态扇出 */

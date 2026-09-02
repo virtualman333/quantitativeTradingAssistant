@@ -22,7 +22,7 @@
 import type { LlmProvider } from "./llm.js";
 import { SKILLS, getSkill, skillCatalog } from "./skills.js";
 import type { McpTool } from "./mcp.js";
-import { listRoles, type RoleConfig } from "./store.js";
+import { listRoles, isSkillEnabled, type RoleConfig } from "./store.js";
 
 export interface ExpertOpinion {
   expert: string;
@@ -93,8 +93,10 @@ async function invoke(
   expert: Omit<Expert, "run">,
   ctx: ExpertContext
 ): Promise<ExpertOpinion> {
-  // 组装本专家可用能力
-  const mySkills = expert.skills.map((id) => getSkill(id)).filter(Boolean);
+  // 组装本专家可用能力（尊重 store 里的 Skill 开关）
+  const mySkills = expert.skills
+    .map((id) => getSkill(id))
+    .filter((s) => s && isSkillEnabled(s.id));
   const skillList = mySkills.length
     ? mySkills.map((s) => `- ${s!.id}（${s!.name}）：${s!.description}\n  参数：${s!.args}`).join("\n")
     : "（无）";

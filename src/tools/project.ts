@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import type { Tool } from "./types.js";
 import { PROJECT_ROOT, AGENT_ROOT, relOf } from "./paths.js";
+import { isSkillEnabled } from "../store.js";
 
 /** 调用项目 Skill（行情扫描 / 消息采集 / 双源验证 / clOrdId / 查章程） */
 export const runSkillTool: Tool = {
@@ -24,6 +25,8 @@ export const runSkillTool: Tool = {
   run: async (a, ctx) => {
     const id = String(a.id ?? "");
     if (!id) return { ok: false, output: "", error: "缺少 skill id" };
+    if (!isSkillEnabled(id))
+      return { ok: false, output: "", error: `Skill「${id}」已被界面关闭，拒绝调用。` };
     try {
       const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "skills.js").replace(/\\/g, "/"));
       const skill = (mod.SKILLS || []).find((s: any) => s.id === id);
