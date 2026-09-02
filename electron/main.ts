@@ -203,18 +203,16 @@ async function getStatus() {
 
 // ── 窗口 ────────────────────────────────────────────────────
 /**
- * preload 只认 .js：
- *  - `electron .` 时 __dirname=dist/electron，旁边就有 preload.js
- *  - `tsx electron/main.ts` 时 __dirname=electron（只有 preload.ts），
- *    此时回退到 dist/electron/preload.js，否则界面拿不到 window.api，
- *    所有操作都会静默失败（表现为「保存没反应」）。
+ * preload 只认 CJS：正规产物是 dist/preload/preload.js（tsconfig.preload.json 编译，
+ * postbuild 打上 {"type":"commonjs"} 标记）。
+ * 必须优先选它：dist/electron 下曾遗留过旧版 preload（旧配置编译的，缺新 API），
+ * 优先选同目录文件会导致「portfolioSummarize is not a function」这类缺方法报错。
  */
 function resolvePreload(): string {
-  const cands = [
-    path.join(HERE, "preload.js"),
-    path.join(AGENT_ROOT, "dist", "preload", "preload.js"),
-  ];
-  return cands.find((p) => fs.existsSync(p)) ?? path.join(AGENT_ROOT, "dist", "preload", "preload.js");
+  const canonical = path.join(AGENT_ROOT, "dist", "preload", "preload.js");
+  const legacy = path.join(HERE, "preload.js");
+  if (fs.existsSync(canonical)) return canonical;
+  return fs.existsSync(legacy) ? legacy : canonical;
 }
 
 function createWindow() {

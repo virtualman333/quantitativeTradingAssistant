@@ -35,3 +35,12 @@ if (fs.existsSync(legacy)) {
     console.log("[postbuild] removed legacy dist/electron/package.json (commonjs)");
   }
 }
+
+// 清理历史遗留：旧配置曾把 preload 编进 dist/electron，内容过时会缺新 API
+// （如 portfolioSummarize），且 resolvePreload 一旦回退到它就会「方法不存在」。
+const legacyPreload = path.join(root, "dist", "electron", "preload.js");
+if (fs.existsSync(legacyPreload)) {
+  fs.rmSync(legacyPreload, { force: true });
+  fs.rmSync(legacyPreload + ".map", { force: true });
+  console.log("[postbuild] removed legacy dist/electron/preload.js (stale, use dist/preload)");
+}
