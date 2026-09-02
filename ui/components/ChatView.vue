@@ -17,6 +17,7 @@ const input = ref("");
 const streaming = ref(false);
 const curText = ref("");
 const curCalls = ref([]);
+const curReasoning = ref("");
 const lastError = ref("");
 const bodyEl = ref(null);
 const disabled = ref(new Set());
@@ -58,17 +59,19 @@ async function loadHistory() {
 function finish(aborted) {
   if (!streaming.value) return;
   streaming.value = false;
-  if (curText.value.trim() || curCalls.value.length) {
+  if (curText.value.trim() || curCalls.value.length || curReasoning.value.trim()) {
     msgs.value.push({
       id: uid(),
       role: "assistant",
       content: curText.value,
       calls: curCalls.value.map((c) => ({ ...c })),
+      reasoning: curReasoning.value,
       ts: nowTs(),
     });
   }
   curText.value = "";
   curCalls.value = [];
+  curReasoning.value = "";
   scroll();
 }
 
@@ -91,6 +94,10 @@ function onEvent(ev) {
   switch (ev.type) {
     case "delta":
       curText.value += ev.text || "";
+      scroll();
+      break;
+    case "reasoning":
+      curReasoning.value += ev.text || "";
       scroll();
       break;
     case "tool_start":
@@ -227,6 +234,10 @@ onBeforeUnmount(() => {
         <div class="bubble">
           <div class="who">{{ m.role === "user" ? "我" : "助手" }}<span v-if="m.ts"> · {{ m.ts }}</span></div>
           <div class="text" v-html="renderText(m.content)"></div>
+          <details v-if="m.reasoning" class="reason">
+            <summary>思考过程（{{ m.reasoning.length }} 字）</summary>
+            <div class="reason-text">{{ m.reasoning }}</div>
+          </details>
           <div class="calls" v-if="m.calls && m.calls.length">
             <details v-for="(c, i) in m.calls" :key="i" :class="['call', c.status]">
               <summary>
@@ -245,6 +256,10 @@ onBeforeUnmount(() => {
         <div class="avatar">AI</div>
         <div class="bubble">
           <div class="who">助手</div>
+          <details v-if="curReasoning" class="reason">
+            <summary>思考过程（{{ curReasoning.length }} 字）</summary>
+            <div class="reason-text">{{ curReasoning }}</div>
+          </details>
           <div v-if="curText" class="text" v-html="renderText(curText)"></div>
           <div v-else class="thinking">思考中<span class="cursor"></span></div>
           <div class="calls" v-if="curCalls.length">
@@ -292,3 +307,9 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.reason { margin: 6px 0; border-left: 2px solid var(--c-border); padding-left: 8px; }
+.reason summary { cursor: pointer; font-size: 12px; color: var(--c-text-dim); }
+.reason-text { margin-top: 4px; white-space: pre-wrap; font-size: 12.5px; color: var(--c-text-dim); line-height: 1.6; }
+</style>

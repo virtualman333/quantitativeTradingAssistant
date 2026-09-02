@@ -20,6 +20,7 @@ import SkillsView from "./components/SkillsView.vue";
 import LogView from "./components/LogView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import PositionsView from "./components/PositionsView.vue";
+import TraceView from "./components/TraceView.vue";
 
 const tab = ref("dash");
 
@@ -34,6 +35,7 @@ const ICONS = {
   mcp: svg('<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/>'),
   skills: svg('<polygon points="13 2 3 14 11 14 10 22 21 10 13 10 13 2"/>'),
   log: svg('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'),
+  obs: svg('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>'),
   cfg: svg('<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'),
   pos: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1.3"/><circle cx="3.5" cy="12" r="1.3"/><circle cx="3.5" cy="18" r="1.3"/>'),
 };
@@ -41,6 +43,7 @@ const ICONS = {
 const tabs = [
   { k: "dash", t: "总览" },
   { k: "chat", t: "对话" },
+  { k: "obs", t: "观测" },
   { k: "models", t: "模型" },
   { k: "roles", t: "角色" },
   { k: "mcp", t: "MCP" },
@@ -50,7 +53,7 @@ const tabs = [
   { k: "pos", t: "持仓" },
 ];
 const views = {
-  dash: DashboardView, chat: ChatView, models: ModelsView, roles: RolesView,
+  dash: DashboardView, chat: ChatView, obs: TraceView, models: ModelsView, roles: RolesView,
   mcp: McpView, skills: SkillsView, log: LogView, cfg: SettingsView, pos: PositionsView,
 };
 const currentView = computed(() => views[tab.value] || DashboardView);

@@ -55,6 +55,12 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("chat:event", h);
     return () => ipcRenderer.removeListener("chat:event", h);
   },
+  // 全局 LLM 调用观测（对话 + 持仓的每一次 LLM 行为）
+  onLlmTrace: (cb: (e: unknown) => void) => {
+    const h = (_e: unknown, ev: unknown) => cb(ev);
+    ipcRenderer.on("llm:trace", h);
+    return () => ipcRenderer.removeListener("llm:trace", h);
+  },
   // agent
   startAgent: () => safeInvoke("agent:start"),
   stopAgent: () => safeInvoke("agent:stop"),

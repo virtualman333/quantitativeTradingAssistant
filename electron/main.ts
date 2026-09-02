@@ -373,6 +373,61 @@ let chatAbort: AbortController | null = null;
 let portfolioAbort: AbortController | null = null;
 const pendingConfirms = new Map<string, (v: boolean) => void>();
 
+// ── 全局 LLM 调用观测（拒绝黑盒）：对话/持仓的 LLM 行为统一广播到「观测」页签 ──
+const traceReasoning: Record<string, string> = { chat: "", portfolio: "" };
+function emitTrace(e: unknown) {
+  win?.webContents.send("llm:trace", e);
+}
+function traceTs(): string {
+  const d = new Date();
+  const p = (n: number, l = 2) => String(n).padStart(l, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+function flushTraceReasoning(source: string) {
+  const buf = traceReasoning[source] || "";
+  if (buf) {
+    emitTrace({ ts: traceTs(), source, kind: "reasoning", text: buf });
+    traceReasoning[source] = "";
+  }
+}
+/** 业务事件同时转发到全局观测流；原 send 照常（对话/持仓页签继续渲染） */
+function wrapTrace(source: string, send: (ev: unknown) => void) {
+  return (ev: any) => {
+    send(ev);
+    if (!ev || !ev.type) return;
+    switch (ev.type) {
+      case "round":
+        flushTraceReasoning(source);
+        emitTrace({ ts: traceTs(), source, kind: "round", model: ev.model, round: ev.n, msgCount: ev.msgs });
+        break;
+      case "reasoning":
+        traceReasoning[source] += ev.text || "";
+        break;
+      case "tool_start":
+        flushTraceReasoning(source);
+        emitTrace({ ts: traceTs(), source, kind: "tool_call", name: ev.name, args: ev.args });
+        break;
+      case "tool_result":
+        emitTrace({ ts: traceTs(), source, kind: "tool_result", name: ev.name, ok: !!ev.ok, output: (ev.output || "").slice(0, 2000), error: ev.error });
+        break;
+      case "confirm":
+        emitTrace({ ts: traceTs(), source, kind: "confirm", name: ev.title });
+        break;
+      case "done":
+        flushTraceReasoning(source);
+        emitTrace({ ts: traceTs(), source, kind: "done", aborted: !!ev.aborted, rounds: ev.rounds });
+        break;
+      case "error":
+        flushTraceReasoning(source);
+        emitTrace({ ts: traceTs(), source, kind: "error", message: ev.message });
+        break;
+      case "info":
+        emitTrace({ ts: traceTs(), source, kind: "info", message: ev.message });
+        break;
+    }
+  };
+}
+
 ipcMain.handle("chat:confirm", (_e, id: string, ok: boolean) => {
   const r = pendingConfirms.get(id);
   if (r) {
@@ -402,7 +457,7 @@ ipcMain.handle("portfolio:summarize", async (_e, p: { modelId?: string }) => {
     const ac = new AbortController();
     portfolioAbort = ac;
     const send = (ev: unknown) => win?.webContents.send("portfolio:event", ev);
-    await mod.summarizePortfolio({ modelId: p?.modelId, signal: ac.signal, onEvent: send });
+    await mod.summarizePortfolio({ modelId: p?.modelId, signal: ac.signal, onEvent: wrapTrace("portfolio", send) });
     return { ok: true };
   } catch (e) {
     const msg = String((e as Error)?.message || e);
@@ -464,8 +519,7 @@ ipcMain.handle(
         modelId: p?.modelId,
         enabledTools: p?.enabledTools ?? [],
         signal: ac.signal,
-        onEvent: (ev: any) => {
-          send(ev);
+        onEvent: wrapTrace("chat", (ev: any) => {
           if (ev?.type === "delta") answer += ev.text ?? "";
           else if (ev?.type === "tool_start") callMap.set(ev.callId, { name: ev.name, args: ev.args });
           else if (ev?.type === "tool_result") {
@@ -475,7 +529,7 @@ ipcMain.handle(
             c.error = ev.error;
             callMap.set(ev.callId, c);
           }
-        },
+        }),
         confirm,
       });
 

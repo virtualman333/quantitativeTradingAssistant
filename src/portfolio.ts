@@ -20,7 +20,9 @@ export type PortfolioEvent =
   | { type: "tool_start"; callId: string; name: string; args: unknown }
   | { type: "tool_result"; callId: string; name: string; ok: boolean; output: string; error?: string }
   | { type: "done"; schema?: PortfolioSnapshot; notes?: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "round"; n: number; model: string; msgs: number }
+  | { type: "reasoning"; text: string };
 
 /** 统一 schema 的人/LLM 可读描述（塞进 system prompt） */
 const SCHEMA_SPEC = `统一 schema（LLM 输出必须贴合）：
@@ -138,6 +140,7 @@ export async function summarizePortfolio(opts: SummarizeOptions): Promise<void> 
     while (round < MAX_ROUNDS) {
       if (signal?.aborted) break;
       round++;
+      onEvent({ type: "round", n: round, model: cfg.id, msgs: msgs.length });
 
       let text = "";
       let calls: ToolCall[] = [];
@@ -147,6 +150,8 @@ export async function summarizePortfolio(opts: SummarizeOptions): Promise<void> 
         if (ch.type === "delta") {
           text += ch.text;
           onEvent({ type: "delta", text: ch.text });
+        } else if (ch.type === "reasoning") {
+          onEvent({ type: "reasoning", text: ch.text });
         } else if (ch.type === "tool_calls") {
           calls = ch.calls;
         } else if (ch.type === "error") {

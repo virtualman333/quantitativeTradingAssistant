@@ -27,7 +27,9 @@ export type ChatEvent =
   | ({ type: "confirm" } & ChatConfirmRequest)
   | { type: "done"; aborted?: boolean; rounds?: number }
   | { type: "error"; message: string }
-  | { type: "info"; message: string };
+  | { type: "info"; message: string }
+  | { type: "round"; n: number; model: string; msgs: number }
+  | { type: "reasoning"; text: string };
 
 export interface ChatOptions {
   /** 历史消息（最后一条应为 user） */
@@ -108,6 +110,7 @@ export async function runChat(opts: ChatOptions): Promise<ChatRunResult> {
   while (round < maxRounds) {
     if (signal?.aborted) break;
     round++;
+    onEvent({ type: "round", n: round, model: cfg.id, msgs: msgs.length });
 
     let text = "";
     let calls: ToolCall[] = [];
@@ -117,6 +120,8 @@ export async function runChat(opts: ChatOptions): Promise<ChatRunResult> {
       if (chunk.type === "delta") {
         text += chunk.text;
         onEvent({ type: "delta", text: chunk.text });
+      } else if (chunk.type === "reasoning") {
+        onEvent({ type: "reasoning", text: chunk.text });
       } else if (chunk.type === "tool_calls") {
         calls = chunk.calls;
       } else if (chunk.type === "error") {
