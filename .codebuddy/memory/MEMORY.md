@@ -30,6 +30,9 @@
 - 运行：`LLM_PROVIDER=mock pnpm run once`（联调）；deepseek 需 DEEPSEEK_API_KEY；`pnpm dev` 常驻；`pnpm ui` = build + electron。**dry-run 是模式不是单轮；只有 --once 才跑一轮退出。**
 - 输出：每轮写 state/round_input_R*.json 再调 archive_round.py 落库；日志 logs/agent/YYYY-MM-DD.log；轮次时间格式必须 `YYYY-MM-DD HH:MM:SS`（archive_round.py strptime 严格解析，toLocaleString 会 ValueError）。
 
+## 观测链路（2026-09-03 定）
+- 观测页 = 三来源：chat / portfolio（主进程内 wrapTrace 直发）+ agent（子进程轮次）。子进程经 `src/trace.ts` 向 stdout 写 `__TRACE__` 前缀 JSON 行（仅 AGENT_UI=1 时，spawnAgent 注入），electron/main.ts 的 `pipeAgentStdout()` 做**行缓冲**解析后广播 `llm:trace`。新增 LLM 调用点若要进观测，调用 trace()/traceRound() 即可；CLI 独立跑时 trace 静默，不污染 stdout。
+
 ## 多交易所持仓查看架构（2026-09-03 定）
 - 持仓查看 = **LLM 调各交易所 MCP server 的只读工具** → 归并成统一 schema（`src/types.ts` 的 `UnifiedAccount/UnifiedPosition/UnifiedOrder/PortfolioSnapshot`）。UI 不再为某交易所写死字段；扩展多所 = 在 MCP 页加一个 server，不动 UI/引擎。
 - 适配层即各交易所自己的 MCP server；agent 不写 per-exchange 代码。展示"两者都要"：结构化表格 + LLM 文字解读/风险。
