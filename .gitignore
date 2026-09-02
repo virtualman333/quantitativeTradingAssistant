@@ -10,4 +10,4 @@ data/store.json
 electron/config.json
 
 # 提交信息临时文件（PowerShell 下中文 -m 容易被编码破坏，改用 -F 文件时产生）
-.gitmsg.txt
+.gitmsg*.txt
