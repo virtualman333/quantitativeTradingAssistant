@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM"],
+    "outDir": "dist/preload",
+    "rootDir": "electron",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  // preload 运行在渲染进程沙箱里，只能是 CommonJS；
+  // 单独输出到 dist/preload，并用 package.json 声明 commonjs（见 scripts/postbuild.mjs）。
+  "include": ["electron/preload.ts"]
+}

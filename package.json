@@ -6,13 +6,14 @@
   "type": "module",
   "main": "dist/electron/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"const f=require('fs'),p=require('path');f.mkdirSync('dist/ui',{recursive:true});f.copyFileSync('ui/index.html','dist/ui/index.html')\"",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.electron.json && tsc -p tsconfig.preload.json && node scripts/postbuild.mjs && vite build",
     "dev": "tsx src/main.ts",
     "start": "node dist/src/main.js",
     "once": "tsx src/main.ts --once",
     "dry": "tsx src/main.ts --once --dry-run",
     "ui": "npm run build && electron .",
-    "ui:dev": "tsx electron/main.ts",
+    "ui:vite": "vite",
+    "ui:dev": "node scripts/dev-ui.mjs",
     "dist": "npm run build && electron-builder --win --x64"
   },
   "dependencies": {
@@ -21,15 +22,17 @@
     "@langchain/mcp-adapters": "^1.1.4",
     "@langchain/openai": "^1.5.11",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "vue": "^3.5.42",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^5.2.4",
     "electron": "^44.1.0",
     "electron-builder": "^26.15.3",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vite": "^5.4.21",
+    "vue": "^3.5.42"
   },
   "engines": {
     "node": ">=20"
@@ -64,10 +67,5 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
   }
 }

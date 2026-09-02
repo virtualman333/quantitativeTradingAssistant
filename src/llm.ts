@@ -145,6 +145,305 @@ export function createProvider(cfg: ModelConfig): LlmProvider {
  * 测试某个模型配置是否可用（界面「测试连接」按钮用）。
  * 返回 {ok, latencyMs, reply?, error?}
  */
+// ── 对话（流式 + 工具调用）──────────────────────────────────
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: ToolCall[];
+}
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+export interface ToolSpec {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+export type ChatChunk =
+  | { type: "delta"; text: string }
+  | { type: "tool_calls"; calls: ToolCall[] }
+  | { type: "done"; finishReason: string | null; usage?: unknown }
+  | { type: "error"; message: string };
+
+/** 把 SSE 字节流按行切出 data: 段 */
+async function* sseLines(body: ReadableStream<Uint8Array>, signal?: AbortSignal) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      if (signal?.aborted) return;
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i: number;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line.startsWith("data:")) yield line.slice(5).trim();
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function* openaiChat(
+  cfg: ModelConfig,
+  messages: ChatMessage[],
+  tools: ToolSpec[],
+  signal?: AbortSignal
+): AsyncGenerator<ChatChunk> {
+  const base = (cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    messages,
+    temperature: cfg.temperature ?? 0.3,
+    max_tokens: cfg.maxTokens ?? 3000,
+    stream: true,
+  };
+  if (tools.length) body.tools = tools;
+
+  let r: Response;
+  try {
+    r = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) return;
+    yield { type: "error", message: `网络错误：${String(e)}` };
+    return;
+  }
+  if (!r.ok || !r.body) {
+    const t = await r.text().catch(() => "");
+    yield { type: "error", message: `${cfg.name} HTTP ${r.status}: ${t.slice(0, 400)}` };
+    return;
+  }
+
+  // 工具调用是按 index 分片的，需累积
+  const calls: Record<number, { id: string; name: string; args: string }> = {};
+  let finishReason: string | null = null;
+
+  for await (const data of sseLines(r.body, signal)) {
+    if (data === "[DONE]") break;
+    let j: any;
+    try {
+      j = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    const choice = j?.choices?.[0];
+    if (!choice) continue;
+    const d = choice.delta || {};
+    if (typeof d.content === "string" && d.content) yield { type: "delta", text: d.content };
+    for (const tc of d.tool_calls || []) {
+      const idx = tc.index ?? 0;
+      const cur = calls[idx] ?? (calls[idx] = { id: "", name: "", args: "" });
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name = tc.function.name;
+      if (tc.function?.arguments) cur.args += tc.function.arguments;
+    }
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+  }
+
+  const list = Object.values(calls).filter((c) => c.name);
+  if (list.length) {
+    yield {
+      type: "tool_calls",
+      calls: list.map((c, i) => ({
+        id: c.id || `call_${i}_${Date.now()}`,
+        type: "function" as const,
+        function: { name: c.name, arguments: c.args || "{}" },
+      })),
+    };
+  }
+  yield { type: "done", finishReason };
+}
+
+/** Anthropic 的 messages 需要 content block 形式，这里做一次转换 */
+function toAnthropicMessages(messages: ChatMessage[]): { system: string; msgs: any[] } {
+  let system = "";
+  const msgs: any[] = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      system += (system ? "\n\n" : "") + m.content;
+      continue;
+    }
+    if (m.role === "tool") {
+      msgs.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: m.tool_call_id, content: m.content }],
+      });
+      continue;
+    }
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      const blocks: any[] = [];
+      if (m.content) blocks.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        let input: unknown = {};
+        try {
+          input = JSON.parse(tc.function.arguments || "{}");
+        } catch {
+          input = {};
+        }
+        blocks.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
+      }
+      msgs.push({ role: "assistant", content: blocks });
+      continue;
+    }
+    msgs.push({ role: m.role, content: m.content });
+  }
+  return { system, msgs };
+}
+
+async function* anthropicChat(
+  cfg: ModelConfig,
+  messages: ChatMessage[],
+  tools: ToolSpec[],
+  signal?: AbortSignal
+): AsyncGenerator<ChatChunk> {
+  const base = (cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
+  const { system, msgs } = toAnthropicMessages(messages);
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    max_tokens: cfg.maxTokens ?? 3000,
+    temperature: cfg.temperature ?? 0.3,
+    system,
+    messages: msgs,
+    stream: true,
+  };
+  if (tools.length) {
+    body.tools = tools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters,
+    }));
+  }
+
+  let r: Response;
+  try {
+    r = await fetch(`${base}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": cfg.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) return;
+    yield { type: "error", message: `网络错误：${String(e)}` };
+    return;
+  }
+  if (!r.ok || !r.body) {
+    const t = await r.text().catch(() => "");
+    yield { type: "error", message: `${cfg.name} HTTP ${r.status}: ${t.slice(0, 400)}` };
+    return;
+  }
+
+  const blocks: Record<number, { type: string; id?: string; name?: string; text: string; json: string }> = {};
+  let finishReason: string | null = null;
+
+  for await (const data of sseLines(r.body, signal)) {
+    let j: any;
+    try {
+      j = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    switch (j.type) {
+      case "content_block_start": {
+        const b = j.content_block || {};
+        blocks[j.index] = { type: b.type, id: b.id, name: b.name, text: b.text || "", json: "" };
+        break;
+      }
+      case "content_block_delta": {
+        const b = blocks[j.index] ?? (blocks[j.index] = { type: "text", text: "", json: "" });
+        if (j.delta?.type === "text_delta") {
+          b.text += j.delta.text || "";
+          yield { type: "delta", text: j.delta.text || "" };
+        } else if (j.delta?.type === "input_json_delta") {
+          b.json += j.delta.partial_json || "";
+        }
+        break;
+      }
+      case "message_delta":
+        if (j.delta?.stop_reason) finishReason = j.delta.stop_reason;
+        break;
+      case "error":
+        yield { type: "error", message: String(j.error?.message || "Anthropic 流错误") };
+        break;
+      default:
+        break;
+    }
+  }
+
+  const list = Object.values(blocks).filter((b) => b.type === "tool_use" && b.name);
+  if (list.length) {
+    yield {
+      type: "tool_calls",
+      calls: list.map((b, i) => ({
+        id: b.id || `toolu_${i}_${Date.now()}`,
+        type: "function" as const,
+        // Anthropic 的 input 是对象，转回 OpenAI 风格的字符串参数
+        function: { name: b.name as string, arguments: b.json || "{}" },
+      })),
+    };
+  }
+  yield { type: "done", finishReason };
+}
+
+async function* mockChat(messages: ChatMessage[], tools: ToolSpec[]): AsyncGenerator<ChatChunk> {
+  const last = [...messages].reverse().find((m) => m.role === "user");
+  const hasTools = tools.length > 0;
+  const text = [
+    "（mock 模型，不会真实调用）",
+    "",
+    `收到：${String(last?.content ?? "").slice(0, 200)}`,
+    "",
+    hasTools
+      ? `当前已挂载 ${tools.length} 个工具：${tools.map((t) => t.function.name).join("、")}。\n切换到真实模型（模型页添加 API Key 并设为默认）后，我就能真正调用它们。`
+      : "当前没有可用工具。",
+  ].join("\n");
+  for (const part of text.match(/[\s\S]{1,12}/g) || []) {
+    yield { type: "delta", text: part };
+  }
+  yield { type: "done", finishReason: "stop" };
+}
+
+/**
+ * 统一对话入口：流式产出文本增量，需要工具时产出 tool_calls。
+ * 不抛异常：错误以 chunk 形式返回，调用方决定如何展示。
+ */
+export async function* streamChat(
+  cfg: ModelConfig,
+  messages: ChatMessage[],
+  tools: ToolSpec[] = [],
+  signal?: AbortSignal
+): AsyncGenerator<ChatChunk> {
+  if (cfg.provider === "mock") {
+    yield* mockChat(messages, tools);
+    return;
+  }
+  if (cfg.provider === "anthropic") {
+    yield* anthropicChat(cfg, messages, tools, signal);
+    return;
+  }
+  yield* openaiChat(cfg, messages, tools, signal);
+}
+
 export async function testModel(cfg: ModelConfig): Promise<{
   ok: boolean;
   latencyMs: number;

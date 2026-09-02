@@ -14,6 +14,7 @@
     "sourceMap": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "electron/**/*.ts"],
+  // electron/ 用 tsconfig.electron.json 单独编译为 CommonJS（preload 必须是 CJS）
+  "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "ui"]
 }

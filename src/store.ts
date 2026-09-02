@@ -76,9 +76,33 @@ export interface McpServerCfg {
   createdAt: string;
 }
 
+/** 对话里的一次工具调用记录（界面展示用） */
+export interface ChatCallRecord {
+  name: string;
+  args: unknown;
+  ok: boolean;
+  output: string;
+  error?: string;
+}
+
+/** 持久化的一轮对话（system 不存，每次运行重新生成） */
+export interface ChatTurn {
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: unknown[];
+  calls?: ChatCallRecord[];
+  ts?: string;
+}
+
 export interface AppSettings {
   /** 默认模型（主 Agent 与各角色未单独指定时用） */
   defaultModelId: string;
+  /** 对话页专用模型，空=用默认模型 */
+  chatModelId?: string;
+  /** 危险工具（写文件/执行命令）是否必须弹窗确认，默认 true */
+  requireToolConfirm?: boolean;
   /** 主 Agent 拍板专用模型，空=用 defaultModelId */
   mainAgentModelId?: string;
   intervalMin: number;
@@ -99,6 +123,8 @@ export interface StoreData {
   settings: AppSettings;
   /** 最近轮次索引（详情仍存 logs/rounds.jsonl） */
   recentRounds: { roundId: string; time: string; decision: string; equity?: number }[];
+  /** 对话历史（界面「对话」页） */
+  chat: { history: ChatTurn[] };
 }
 
 // ── 默认值 ──────────────────────────────────────────────────
@@ -175,6 +201,8 @@ function defaults(): StoreData {
     ],
     settings: {
       defaultModelId: mockId,
+      chatModelId: undefined,
+      requireToolConfirm: true,
       intervalMin: 5,
       autoStart: true,
       dryRun: true,
@@ -190,6 +218,7 @@ function defaults(): StoreData {
       },
     },
     recentRounds: [],
+    chat: { history: [] },
   };
 }
 
@@ -210,6 +239,7 @@ export function loadStore(): StoreData {
         models: raw.models?.length ? raw.models : d.models,
         roles: raw.roles?.length ? raw.roles : d.roles,
         mcpServers: raw.mcpServers?.length ? raw.mcpServers : d.mcpServers,
+        chat: { history: Array.isArray(raw.chat?.history) ? raw.chat.history.slice(-200) : [] },
       };
       return cache;
     }
@@ -328,6 +358,26 @@ export function deleteMcpServer(id: string): boolean {
 export function setSkillEnabled(skillId: string, enabled: boolean): void {
   const s = loadStore();
   s.settings.skillEnabled[skillId] = enabled;
+  saveStore(s);
+}
+
+// ── 对话历史 ────────────────────────────────────────────────
+const CHAT_KEEP = 200;
+
+export function getChatHistory(): ChatTurn[] {
+  return loadStore().chat?.history ?? [];
+}
+
+/** 保存对话历史（只留最近 CHAT_KEEP 条，丢弃 system 以便每次重算系统提示） */
+export function saveChatHistory(list: ChatTurn[]): void {
+  const s = loadStore();
+  s.chat = { history: (list || []).filter((m) => m.role !== "system").slice(-CHAT_KEEP) };
+  saveStore(s);
+}
+
+export function clearChatHistory(): void {
+  const s = loadStore();
+  s.chat = { history: [] };
   saveStore(s);
 }
 

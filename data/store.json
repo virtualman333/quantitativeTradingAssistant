@@ -11,16 +11,6 @@
       "enabled": true,
       "note": "本地模拟，用于验证链路，不消耗 token",
       "createdAt": "2026-09-02T14:24:00.388Z"
-    },
-    {
-      "id": "model_deepseek",
-      "name": "DeepSeek-V3",
-      "provider": "openai-compatible",
-      "baseURL": "https://api.deepseek.com",
-      "apiKey": "sk-fake-for-test",
-      "model": "deepseek-chat",
-      "enabled": true,
-      "createdAt": "2026-09-02T14:24:00.393Z"
     }
   ],
   "roles": [
@@ -52,8 +42,7 @@
       ],
       "mcpServers": [],
       "enabled": true,
-      "createdAt": "2026-09-02T14:24:00.389Z",
-      "modelId": "model_deepseek"
+      "createdAt": "2026-09-02T14:24:00.389Z"
     },
     {
       "id": "factor",
@@ -81,18 +70,6 @@
       ],
       "enabled": true,
       "createdAt": "2026-09-02T14:24:00.389Z"
-    },
-    {
-      "id": "onchain",
-      "name": "链上数据专家",
-      "duty": "分析链上资金流与巨鲸动向",
-      "systemPrompt": "你是链上数据专家。",
-      "skills": [
-        "read_charter"
-      ],
-      "mcpServers": [],
-      "enabled": true,
-      "createdAt": "2026-09-02T14:24:00.397Z"
     }
   ],
   "mcpServers": [
@@ -109,7 +86,7 @@
     }
   ],
   "settings": {
-    "defaultModelId": "model_deepseek",
+    "defaultModelId": "model_mock",
     "intervalMin": 5,
     "autoStart": true,
     "dryRun": true,
@@ -127,12 +104,5 @@
       "read_charter": true
     }
   },
-  "recentRounds": [
-    {
-      "roundId": "R000099",
-      "time": "2026-09-02 22:20:00",
-      "decision": "HOLD",
-      "equity": 79187.39
-    }
-  ]
+  "recentRounds": []
 }

@@ -14,16 +14,19 @@ import fs from "node:fs";
 import { spawn, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// 本文件编译为 ESM（preload 才需要 CJS），因此没有内置 __dirname，自行推导。
+// ESM 是关键：主进程要用 `await import("file://...")` 加载 dist/src 下的模块，
+// CJS 的 require 解析不了 file:// URL（会报 Cannot find module）。
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /** 定位项目根：向上找含 package.json + src 的目录（兼容开发与编译两种位置） */
 function findAgentRoot(): string {
-  let d = __dirname;
+  let d = HERE;
   for (let i = 0; i < 4; i++) {
     if (fs.existsSync(path.join(d, "package.json")) && fs.existsSync(path.join(d, "src"))) return d;
     d = path.dirname(d);
   }
-  return path.resolve(__dirname, "..", "..");
+  return path.resolve(HERE, "..", "..");
 }
 const AGENT_ROOT = findAgentRoot();
 const PROJECT_ROOT = path.resolve(AGENT_ROOT, "..");
@@ -76,12 +79,24 @@ function spawnAgent(extraArgs: string[], onExit?: (code: number | null) => void)
   });
 }
 
+/** 调试用：OKX_AUTOSTART=0 时即使设置里开着也不自动拉起 agent（避免排查界面时触发真实轮次） */
+function autoStartEnabled(): boolean {
+  if (process.env.OKX_AUTOSTART === "0") return false;
+  try {
+    return !!loadSettingsSync()?.autoStart;
+  } catch {
+    return false;
+  }
+}
+
 function startAgent() {
   if (agentProc) return { ok: false, msg: "已在运行" };
   const st = loadSettingsSync();
-  if (st?.dryRun) pushLog("演练模式开启：不会下真实单");
+  // 演练模式必须作为 --dry-run 传给子进程，否则只是打印一行日志、实际仍会下单
+  const dry = st?.dryRun !== false;
+  if (dry) pushLog("演练模式开启：不会下真实单");
 
-  agentProc = spawnAgent([]);
+  agentProc = spawnAgent(dry ? ["--dry-run"] : []);
   agentProc.stdout?.on("data", (d: Buffer) =>
     d.toString().split(/\r?\n/).filter(Boolean).forEach(pushLog)
   );
@@ -158,21 +173,56 @@ async function getStatus() {
 }
 
 // ── 窗口 ────────────────────────────────────────────────────
+/**
+ * preload 只认 .js：
+ *  - `electron .` 时 __dirname=dist/electron，旁边就有 preload.js
+ *  - `tsx electron/main.ts` 时 __dirname=electron（只有 preload.ts），
+ *    此时回退到 dist/electron/preload.js，否则界面拿不到 window.api，
+ *    所有操作都会静默失败（表现为「保存没反应」）。
+ */
+function resolvePreload(): string {
+  const cands = [
+    path.join(HERE, "preload.js"),
+    path.join(AGENT_ROOT, "dist", "preload", "preload.js"),
+  ];
+  return cands.find((p) => fs.existsSync(p)) ?? path.join(AGENT_ROOT, "dist", "preload", "preload.js");
+}
+
 function createWindow() {
+  const preload = resolvePreload();
+  if (!fs.existsSync(preload)) {
+    pushLog(`❌ 找不到 preload: ${preload}（请先 npm run build）`);
+  }
   win = new BrowserWindow({
     width: 1340,
     height: 900,
     title: "OKX 交易 Agent",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload,
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  const uiFile = path.join(AGENT_ROOT, "ui", "index.html");
-  if (fs.existsSync(uiFile)) win.loadFile(uiFile);
-  else pushLog(`❌ 找不到界面文件: ${uiFile}`);
+  // 界面来源：dev server（npm run ui:dev）> 构建产物（dist/ui）> 报错
+  const devUrl = process.env.UI_DEV === "1" ? "http://localhost:5173" : "";
+  const distUi = path.join(AGENT_ROOT, "dist", "ui", "index.html");
+  if (devUrl) {
+    win.loadURL(devUrl);
+    pushLog("开发模式：加载 Vite dev server");
+  } else if (fs.existsSync(distUi)) {
+    win.loadFile(distUi);
+  } else {
+    pushLog(`❌ 找不到界面产物: ${distUi}（请先 npm run build，或用 npm run ui:dev）`);
+  }
+
+  // 渲染进程的报错与未捕获异常回流到日志，避免界面白屏却无从查起
+  win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    if (level >= 2) pushLog(`[UI:${level === 3 ? "error" : "warn"}] ${message} @${sourceId}:${line}`);
+  });
+  win.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    pushLog(`❌ 界面加载失败(${code}) ${desc} ${url}`);
+  });
 
   win.on("closed", () => {
     win = null;
@@ -250,7 +300,7 @@ ipcMain.handle("agent:start", () => startAgent());
 ipcMain.handle("agent:stop", () => stopAgent());
 ipcMain.handle("agent:runOnce", () => {
   const st = loadSettingsSync();
-  const args = ["--once"];
+  const args = ["--once", ...(st?.dryRun ? ["--dry-run"] : [])];
   return new Promise((resolve) => {
     const p = spawnAgent(args);
     let out = "";
@@ -281,12 +331,137 @@ ipcMain.handle("dialog:error", (_e, msg: string) => {
   return { ok: true };
 });
 
+// ── IPC：工具与对话 ────────────────────────────────────────
+async function loadDist<T = any>(rel: string): Promise<T> {
+  const p = path.join(AGENT_ROOT, "dist", "src", rel);
+  if (!fs.existsSync(p)) throw new Error(`缺少编译产物 dist/src/${rel}，请先执行 npm run build`);
+  return (await import("file://" + p.replace(/\\/g, "/"))) as T;
+}
+
+ipcMain.handle("tools:list", async () => {
+  try {
+    const mod = await loadDist<any>("tools/index.js");
+    return mod.toolCatalog();
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("chat:history", () => withStore((s) => s.getChatHistory()));
+ipcMain.handle("chat:clear", () => withStore((s) => s.clearChatHistory()));
+
+let chatAbort: AbortController | null = null;
+const pendingConfirms = new Map<string, (v: boolean) => void>();
+
+ipcMain.handle("chat:confirm", (_e, id: string, ok: boolean) => {
+  const r = pendingConfirms.get(id);
+  if (r) {
+    pendingConfirms.delete(id);
+    r(!!ok);
+  }
+  return { ok: !!r };
+});
+
+ipcMain.handle("chat:abort", () => {
+  chatAbort?.abort();
+  chatAbort = null;
+  return { ok: true };
+});
+
+ipcMain.handle(
+  "chat:send",
+  async (_e, p: { text?: string; modelId?: string; enabledTools?: string[] }) => {
+    const text = String(p?.text ?? "").trim();
+    if (!text) return { ok: false, error: "消息为空" };
+    if (chatAbort) return { ok: false, error: "已有对话在进行中，请先停止" };
+
+    try {
+      const mod = await loadDist<any>("chat.js");
+      const settings = await withStore((s) => s.getSettings());
+      const history: any[] = await withStore((s) => s.getChatHistory());
+
+      const ac = new AbortController();
+      chatAbort = ac;
+      const send = (ev: unknown) => win?.webContents.send("chat:event", ev);
+
+      type CallRec = { name: string; args?: unknown; ok?: boolean; output?: string; error?: string };
+      let answer = "";
+      const callMap = new Map<string, CallRec>();
+
+      const confirm = async (req: { id: string; title: string; message: string }) => {
+        // 设置里关掉确认则自动放行（用户自担风险）
+        if (settings?.requireToolConfirm === false) return true;
+        send({ type: "confirm", ...req });
+        return new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            if (pendingConfirms.has(req.id)) {
+              pendingConfirms.delete(req.id);
+              resolve(false);
+            }
+          }, 180_000);
+          pendingConfirms.set(req.id, (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          });
+        });
+      };
+
+      const res = await mod.runChat({
+        history: [
+          ...history.map((m) => ({
+            role: m.role,
+            content: m.content ?? "",
+            ...(m.name ? { name: m.name } : {}),
+            ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+          })),
+          { role: "user", content: text },
+        ],
+        modelId: p?.modelId,
+        enabledTools: p?.enabledTools ?? [],
+        signal: ac.signal,
+        onEvent: (ev: any) => {
+          send(ev);
+          if (ev?.type === "delta") answer += ev.text ?? "";
+          else if (ev?.type === "tool_start") callMap.set(ev.callId, { name: ev.name, args: ev.args });
+          else if (ev?.type === "tool_result") {
+            const c: CallRec = callMap.get(ev.callId) || { name: ev.name };
+            c.ok = !!ev.ok;
+            c.output = ev.output ?? "";
+            c.error = ev.error;
+            callMap.set(ev.callId, c);
+          }
+        },
+        confirm,
+      });
+
+      // 只把 user / assistant 落盘（system 每次重算，tool 中间消息不存）
+      const calls = [...callMap.values()].filter((c) => c.name);
+      const now = new Date().toISOString();
+      await withStore((s) =>
+        s.saveChatHistory([
+          ...history,
+          { role: "user", content: text, ts: now },
+          ...(answer || calls.length ? [{ role: "assistant", content: answer, calls, ts: now }] : []),
+        ])
+      );
+
+      return { ok: true, aborted: !!res?.aborted, error: res?.error };
+    } catch (e) {
+      const msg = String((e as Error)?.message || e);
+      win?.webContents.send("chat:event", { type: "error", message: msg });
+      return { ok: false, error: msg };
+    } finally {
+      chatAbort = null;
+    }
+  }
+);
+
 // ── 生命周期 ────────────────────────────────────────────────
 app.whenReady().then(() => {
   createWindow();
   pushLog("界面就绪");
   const st = loadSettingsSync();
-  const auto = st?.autoStart !== false;
+  const auto = autoStartEnabled();
   const dry = st?.dryRun !== false;
   if (auto) {
     pushLog("自动启动服务中…");

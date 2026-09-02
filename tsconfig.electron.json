@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "outDir": "dist/electron",
+    "rootDir": "electron",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  // 主进程必须编译为 ESM：它要用 `await import("file://...")` 动态加载 dist/src/*.js
+  // （CJS 的 require 解析不了 file:// URL，会报 Cannot find module）。
+  // preload 则由 tsconfig.preload.json 单独编译为 CommonJS。
+  "include": ["electron/main.ts"]
+}

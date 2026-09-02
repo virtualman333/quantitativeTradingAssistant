@@ -1,3 +1,4 @@
+# pnpm 新版不再读 package.json 的 pnpm.onlyBuiltDependencies，改到这里
 allowBuilds:
-  electron-winstaller: set this to true or false
-  esbuild: set this to true or false
+  esbuild: true
+  electron-winstaller: false

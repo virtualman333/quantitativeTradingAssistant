@@ -1,0 +1,131 @@
+:root {
+  --bg: #0e1116; --panel: #161b22; --panel2: #1c2129; --border: #2d333b; --text: #e6edf3;
+  --dim: #8b949e; --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body {
+  background: var(--bg); color: var(--text);
+  font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+::-webkit-scrollbar { width: 9px; height: 9px }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px }
+::-webkit-scrollbar-thumb:hover { background: #3d444d }
+::-webkit-scrollbar-track { background: transparent }
+
+/* ── 布局 ───────────────────────────────── */
+.hd { display: flex; align-items: center; gap: 12px; padding: 11px 18px; background: var(--panel); border-bottom: 1px solid var(--border) }
+.hd h1 { font-size: 15px; font-weight: 600 }
+.badge { padding: 3px 10px; border-radius: 11px; font-size: 12px; font-weight: 600 }
+.run { background: rgba(63,185,80,.16); color: var(--green); border: 1px solid rgba(63,185,80,.4) }
+.stop { background: rgba(139,148,158,.14); color: var(--dim); border: 1px solid var(--border) }
+.spacer { flex: 1 }
+.tabs { display: flex; gap: 2px; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap }
+.tab { padding: 9px 15px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; font-size: 13px; user-select: none }
+.tab:hover { color: var(--text) }
+.tab.active { color: var(--text); border-bottom-color: var(--blue) }
+main { padding: 15px 18px; height: calc(100vh - 98px); overflow: auto }
+
+/* ── 基础控件 ───────────────────────────── */
+button {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue) }
+button.primary { background: rgba(88,166,255,.14); border-color: rgba(88,166,255,.45); color: var(--blue) }
+button.danger { color: var(--red); border-color: rgba(248,81,73,.4) }
+button.danger:hover:not(:disabled) { background: rgba(248,81,73,.12) }
+button.sm { padding: 3px 9px; font-size: 11px }
+button:disabled { opacity: .45; cursor: not-allowed }
+input, select, textarea {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  padding: 5px 9px; border-radius: 5px; font-size: 12px; flex: 1; min-width: 130px;
+}
+textarea { min-height: 170px; font: 11px/1.6 Consolas, monospace; resize: vertical; width: 100% }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--blue) }
+input[type=checkbox] { width: auto; flex: none; min-width: auto; cursor: pointer }
+label { width: 88px; color: var(--dim); font-size: 12px; flex-shrink: 0 }
+.row { display: flex; gap: 10px; align-items: center; margin-bottom: 9px; flex-wrap: wrap }
+.hint { color: var(--dim); font-size: 11px }
+
+/* ── 卡片 / 面板 / 表格 ─────────────────── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 11px; margin-bottom: 14px }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px }
+.card .k { color: var(--dim); font-size: 11px }
+.card .v { font-size: 18px; font-weight: 600; margin-top: 2px; word-break: break-all }
+.up { color: var(--green) } .down { color: var(--red) }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 13px }
+.panel h2 { font-size: 13px; padding: 9px 14px; border-bottom: 1px solid var(--border); color: var(--dim); font-weight: 600; display: flex; align-items: center; gap: 10px }
+.panel h2 .spacer { flex: 1 }
+.panel .body { padding: 11px 14px }
+table { width: 100%; border-collapse: collapse; font-size: 12px }
+th, td { padding: 6px 9px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top }
+th { color: var(--dim); font-weight: 500; font-size: 11px }
+tr:hover td { background: rgba(255,255,255,.02) }
+.wrap { max-width: 220px; word-break: break-all }
+.nowrap { white-space: nowrap }
+.empty { color: var(--dim); padding: 14px; text-align: center; font-size: 12px }
+.pre { white-space: pre-wrap; font-size: 12px; line-height: 1.75 }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; margin-right: 3px; white-space: nowrap }
+.t-buy { background: rgba(63,185,80,.15); color: var(--green) }
+.t-sell { background: rgba(248,81,73,.15); color: var(--red) }
+.t-hold { background: rgba(139,148,158,.15); color: var(--dim) }
+.t-on { background: rgba(63,185,80,.15); color: var(--green) }
+.t-off { background: rgba(139,148,158,.12); color: var(--dim) }
+.alert { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.35); color: var(--yellow); padding: 8px 12px; border-radius: 6px; margin-bottom: 11px; font-size: 12px }
+.alert.err { background: rgba(248,81,73,.1); border-color: rgba(248,81,73,.4); color: var(--red) }
+.chk { display: flex; gap: 5px; align-items: center; flex-wrap: wrap }
+.chk label { width: auto; margin-right: 8px }
+#log { background: #0a0d12; border: 1px solid var(--border); border-radius: 6px; padding: 9px; height: 320px; overflow: auto; font: 11px/1.6 Consolas, monospace; white-space: pre-wrap; color: #b9c3ce }
+
+/* ── 模态 ───────────────────────────────── */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; z-index: 99 }
+.modal .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; width: 660px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column }
+.modal .box.wide { width: 780px }
+.modal h3 { font-size: 14px; padding: 13px 16px; border-bottom: 1px solid var(--border) }
+.modal .body { padding: 14px 16px; overflow: auto; flex: 1 }
+.modal .foot { padding: 11px 16px; border-top: 1px solid var(--border); display: flex; gap: 9px; justify-content: flex-end }
+.modal .field-err { color: var(--red); font-size: 11px; margin: -4px 0 8px 98px }
+
+/* ── Toast ──────────────────────────────── */
+.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; max-width: 460px }
+.toast {
+  background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--blue);
+  border-radius: 6px; padding: 9px 12px; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  word-break: break-word; animation: slidein .16s ease-out;
+}
+.toast.ok { border-left-color: var(--green) }
+.toast.err { border-left-color: var(--red); max-height: 240px; overflow: auto; white-space: pre-wrap }
+.toast.warn { border-left-color: var(--yellow) }
+@keyframes slidein { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+
+/* ── 对话 ───────────────────────────────── */
+.chat { display: flex; flex-direction: column; height: calc(100vh - 98px) }
+.chat-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px 8px 0 0 }
+.chat-body { flex: 1; overflow: auto; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-top: none }
+.chat-foot { border: 1px solid var(--border); border-top: none; border-radius: 0 0 8px 8px; background: var(--panel); padding: 10px 12px }
+.msg { display: flex; gap: 10px; margin-bottom: 14px }
+.msg .avatar { width: 24px; height: 24px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; flex: none; background: var(--panel2); border: 1px solid var(--border) }
+.msg.user .avatar { background: rgba(88,166,255,.16); color: var(--blue); border-color: rgba(88,166,255,.4) }
+.msg.assistant .avatar { background: rgba(63,185,80,.14); color: var(--green); border-color: rgba(63,185,80,.35) }
+.msg .bubble { flex: 1; min-width: 0 }
+.msg .who { font-size: 11px; color: var(--dim); margin-bottom: 3px }
+.msg .text { white-space: pre-wrap; word-break: break-word; line-height: 1.7 }
+.msg .text code { background: #0a0d12; padding: 1px 5px; border-radius: 4px; font: 11px/1.5 Consolas, monospace }
+.msg .text pre { background: #0a0d12; border: 1px solid var(--border); border-radius: 6px; padding: 9px; overflow: auto; margin: 7px 0; font: 11px/1.6 Consolas, monospace; white-space: pre-wrap }
+.msg.user .text { color: var(--text) }
+.calls { margin: 8px 0; display: flex; flex-direction: column; gap: 6px }
+.call { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); overflow: hidden }
+.call > summary { cursor: pointer; padding: 6px 10px; font-size: 11px; color: var(--dim); list-style: none; display: flex; align-items: center; gap: 8px }
+.call > summary::-webkit-details-marker { display: none }
+.call > summary:hover { color: var(--text) }
+.call .io { padding: 8px 10px; border-top: 1px solid var(--border); font: 11px/1.6 Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; color: #b9c3ce }
+.call.running > summary { color: var(--yellow) }
+.call.err > summary { color: var(--red) }
+.thinking { color: var(--dim); font-size: 12px }
+.cursor { display: inline-block; width: 7px; height: 13px; background: var(--green); vertical-align: -2px; animation: blink 1s steps(2) infinite }
+@keyframes blink { 50% { opacity: 0 } }
+.composer { display: flex; gap: 8px; align-items: flex-end }
+.composer textarea { min-height: 62px; max-height: 190px }
+.toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; align-items: center }
+.chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 11px; font-size: 11px; color: var(--dim); cursor: pointer; user-select: none }
+.chip.on { border-color: rgba(88,166,255,.5); color: var(--blue); background: rgba(88,166,255,.1) }
