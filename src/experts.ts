@@ -23,6 +23,7 @@ import type { LlmProvider } from "./llm.js";
 import { SKILLS, getSkill, skillCatalog } from "./skills.js";
 import type { McpTool } from "./mcp.js";
 import { listRoles, isSkillEnabled, type RoleConfig } from "./store.js";
+import { trace, traceRound } from "./trace.js";
 
 export interface ExpertOpinion {
   expert: string;
@@ -117,19 +118,24 @@ ${OUTPUT_CONTRACT}`;
 
   let user = ctx.sharedContext + (ctx.focus ? `\n【主 Agent 聚焦问题】${ctx.focus}` : "");
   const toolCalls: string[] = [];
+  const modelName = (llm as { model?: string })?.model;
 
   for (let i = 0; i <= MAX_TOOL_CALLS; i++) {
+    traceRound(`${expert.name}·第 ${i + 1} 次调用`, modelName);
     const raw = await llm.decide(sys, user + `\n${OUTPUT_CONTRACT}`);
     const call = parseToolCall(raw);
 
     if (call && i < MAX_TOOL_CALLS) {
       let result: string;
+      let failed = false;
       const skill = mySkills.find((s) => s!.id === call.tool);
       const mcp = ctx.mcpTools?.find((t) => t.name === call.tool);
 
+      trace({ source: "agent", kind: "tool_call", name: call.tool, args: call.args });
       if (skill) {
         const r = await skill.run(call.args);
         result = r.ok ? r.output.slice(0, 6000) : `失败: ${r.error}`;
+        failed = !r.ok;
         toolCalls.push(`skill:${call.tool}`);
       } else if (mcp) {
         try {
@@ -138,12 +144,15 @@ ${OUTPUT_CONTRACT}`;
           toolCalls.push(`mcp:${call.tool}`);
         } catch (e) {
           result = `MCP 调用失败: ${String(e).slice(0, 300)}`;
+          failed = true;
         }
       } else {
         result = `未知工具 "${call.tool}"。可用：${mySkills.map((s) => s!.id).join(", ")}${
           ctx.mcpTools?.length ? ", " + ctx.mcpTools.map((t) => t.name).join(", ") : ""
         }`;
+        failed = true;
       }
+      trace({ source: "agent", kind: "tool_result", name: call.tool, ok: !failed, output: result.slice(0, 2000) });
       user += `\n\n【工具 ${call.tool} 返回】\n${result}\n（已用 ${toolCalls.length}/${MAX_TOOL_CALLS} 次工具调用）`;
       continue;
     }

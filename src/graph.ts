@@ -33,6 +33,7 @@ import { Annotation, Send, StateGraph, START, END } from "@langchain/langgraph";
 import { allExperts, getExpert, type ExpertOpinion } from "./experts.js";
 import { connectMcp, type McpTool } from "./mcp.js";
 import { createProvider } from "./llm.js";
+import { trace, traceRound } from "./trace.js";
 import { getModel, getSettings, listRoles, resolveModel, type ModelConfig } from "./store.js";
 import type { Decision, TradeIntent } from "./types.js";
 
@@ -71,6 +72,8 @@ export type State = typeof AgentState.State;
 /** 专家需要的极简 provider 接口（与 llm.ts 的 LlmProvider 形状一致） */
 export interface LlmProviderLike {
   decide(systemPrompt: string, userPrompt: string): Promise<string>;
+  /** 模型显示名（观测页展示用，mock 兜底无） */
+  model?: string;
 }
 
 /**
@@ -90,10 +93,12 @@ export function makeStoreLlmProvider(modelId?: string, mainAgent = false): LlmPr
   }
   const p = createProvider(cfg);
   return {
+    model: cfg.name,
     decide: async (sys, user) => {
       try {
         return await p.decide(sys, user);
       } catch (e) {
+        trace({ source: "agent", kind: "error", message: `模型 ${cfg!.name} 调用失败: ${String(e).slice(0, 180)}` });
         return JSON.stringify({
           stance: "abstain",
           confidence: 0,
@@ -164,9 +169,11 @@ async function planNode(s: State): Promise<Partial<State>> {
 持仓亏损/回撤/高敞口 → risk。没必要别全召。
 只输出 JSON：{"experts":["trading","factor"]}`;
     try {
+      traceRound("调度·决定召唤专家", llm.model);
       const raw = await llm.decide(sys, s.sharedContext);
       ids = ((outJson(raw).experts as string[]) ?? []).filter((x) => enabledIds.includes(x));
     } catch {
+      trace({ source: "agent", kind: "error", message: "调度输出解析失败，回退全部专家" });
       ids = [];
     }
   }
@@ -247,6 +254,7 @@ async function adjudgeNode(s: State): Promise<Partial<State>> {
         conflicts.push(`${active[i].expert}(${active[i].stance}) vs ${active[j].expert}(${active[j].stance})`);
 
   try {
+    traceRound("主Agent·拍板", llm.model);
     const raw = await llm.decide(sys, user);
     const j = outJson(raw);
     const d: Decision = {
@@ -266,6 +274,7 @@ async function adjudgeNode(s: State): Promise<Partial<State>> {
       logs: [`主Agent=${d.decision} ${d.summary.slice(0, 140)}`],
     };
   } catch (e) {
+    trace({ source: "agent", kind: "error", message: `拍板失败: ${String(e).slice(0, 150)}` });
     return {
       decision: null,
       conflicts,

@@ -9,7 +9,7 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { api, hasBridge } from "../lib/api.js";
 
 const entries = ref([]);
-const filter = ref("all"); // all | chat | portfolio
+const filter = ref("all"); // all | chat | portfolio | agent
 const autoScroll = ref(true);
 const bodyEl = ref(null);
 const cap = 3000;
@@ -26,7 +26,7 @@ const KIND = {
   error: "错误",
   info: "信息",
 };
-const SRC = { chat: "对话", portfolio: "持仓" };
+const SRC = { chat: "对话", portfolio: "持仓", agent: "轮次" };
 
 const shown = computed(() =>
   filter.value === "all" ? entries.value : entries.value.filter((e) => e.source === filter.value)
@@ -89,6 +89,7 @@ onBeforeUnmount(() => {
         <button :class="['seg-btn', filter === 'all' && 'on']" @click="filter = 'all'">全部</button>
         <button :class="['seg-btn', filter === 'chat' && 'on']" @click="filter = 'chat'">对话</button>
         <button :class="['seg-btn', filter === 'portfolio' && 'on']" @click="filter = 'portfolio'">持仓</button>
+        <button :class="['seg-btn', filter === 'agent' && 'on']" @click="filter = 'agent'">轮次</button>
       </div>
       <label class="chk"><input type="checkbox" v-model="autoScroll" /> 自动滚底</label>
       <button class="sm" @click="clearAll">清空</button>
@@ -96,7 +97,7 @@ onBeforeUnmount(() => {
 
     <div class="trace-body" ref="bodyEl">
       <div v-if="!shown.length" class="empty">
-        暂无记录。在「对话」里发消息、或在「持仓」点「汇总持仓」，这里会实时出现 LLM 调用轨迹。
+        暂无记录。「跑一轮」/常驻轮次的调度·专家·拍板、对话与持仓的 LLM 调用轨迹都会在这里实时出现。
       </div>
 
       <div v-for="(e, i) in shown" :key="i" :class="['row', e.kind]">
@@ -107,7 +108,7 @@ onBeforeUnmount(() => {
         <span class="main">
           <!-- 轮次：LLM 被调用 -->
           <template v-if="e.kind === 'round'">
-            第 <b>{{ e.round }}</b> 轮 · 模型 <b>{{ e.model }}</b> · 发送消息 <b>{{ e.msgCount }}</b> 条
+            <b>{{ e.label || `第 ${e.round} 轮` }}</b> · 模型 <b>{{ e.model }}</b><span v-if="e.msgCount"> · 发送消息 {{ e.msgCount }} 条</span>
           </template>
           <template v-else-if="e.kind === 'tool_call'">
             调用 <b class="name">{{ e.name }}</b>
@@ -156,6 +157,7 @@ onBeforeUnmount(() => {
 .src { font-size: 11px; padding: 1px 6px; border-radius: 4px; text-align: center; }
 .src.chat { background: rgba(52, 152, 219, 0.15); color: #4aa3e0; }
 .src.portfolio { background: rgba(155, 89, 182, 0.15); color: #b07dd0; }
+.src.agent { background: rgba(46, 204, 113, 0.15); color: #3fbf72; }
 .k { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--c-bg-soft); color: var(--c-text-dim); text-align: center; }
 .k.round { background: rgba(46, 204, 113, 0.15); color: #3fbf72; }
 .k.tool_call { background: rgba(241, 196, 15, 0.15); color: #d9a90a; }

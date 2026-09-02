@@ -76,11 +76,41 @@ function spawnAgent(extraArgs: string[], onExit?: (code: number | null) => void)
   pushLog(`启动: ${path.basename(cmd)} ${args.join(" ")}`);
   return spawn(cmd, args, {
     cwd: AGENT_ROOT,
-    env: { ...(process.env as Record<string, string>), PYTHONIOENCODING: "utf-8" },
+    env: { ...(process.env as Record<string, string>), AGENT_UI: "1", PYTHONIOENCODING: "utf-8" },
     windowsHide: true,
     shell: isWin, // Windows .cmd 垫片必须 shell:true，否则 EINVAL（实测踩过）
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/**
+ * 子进程 stdout 行缓冲解析：
+ *   `__TRACE__{json}` 行 → 广播 llm:trace 到「观测」页签（agent 轮次的 LLM/工具调用轨迹）
+ *   其余行 → 日志（agent:log）
+ * 行缓冲是因为 data 事件可能把一条 JSON 行劈成两半，直接按 chunk split 会解析失败。
+ */
+function pipeAgentStdout(p: ChildProcess, onPlain?: (line: string) => void) {
+  let buf = "";
+  p.stdout?.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const lines = buf.split(/\r?\n/);
+    buf = lines.pop() ?? "";
+    for (const line of lines.filter(Boolean)) {
+      if (line.startsWith("__TRACE__")) {
+        try {
+          const ev = JSON.parse(line.slice("__TRACE__".length));
+          emitTrace({ ts: traceTs(), ...(ev as Record<string, unknown>) });
+        } catch {
+          /* 坏行忽略 */
+        }
+      } else {
+        (onPlain ?? pushLog)(line);
+      }
+    }
+  });
+  p.stderr?.on("data", (d: Buffer) =>
+    d.toString().split(/\r?\n/).filter(Boolean).forEach((l) => pushLog(`[stderr] ${l}`))
+  );
 }
 
 /** 调试用：OKX_AUTOSTART=0 时即使设置里开着也不自动拉起 agent（避免排查界面时触发真实轮次） */
@@ -101,12 +131,7 @@ function startAgent() {
   if (dry) pushLog("演练模式开启：不会下真实单");
 
   agentProc = spawnAgent(dry ? ["--dry-run"] : []);
-  agentProc.stdout?.on("data", (d: Buffer) =>
-    d.toString().split(/\r?\n/).filter(Boolean).forEach(pushLog)
-  );
-  agentProc.stderr?.on("data", (d: Buffer) =>
-    d.toString().split(/\r?\n/).filter(Boolean).forEach((l) => pushLog(`[stderr] ${l}`))
-  );
+  pipeAgentStdout(agentProc);
   agentProc.on("exit", (code) => {
     pushLog(`服务退出 code=${code}`);
     agentProc = null;
@@ -312,14 +337,10 @@ function runOnceAgent(): Promise<{ ok: boolean; code?: number | null; out?: stri
   return new Promise((resolve) => {
     const p = spawnAgent(args);
     let out = "";
-    p.stdout?.on("data", (d: Buffer) => {
-      const s = d.toString();
-      out += s;
-      s.split(/\r?\n/).filter(Boolean).forEach(pushLog);
+    pipeAgentStdout(p, (line) => {
+      out += line + "\n";
+      pushLog(line);
     });
-    p.stderr?.on("data", (d: Buffer) =>
-      d.toString().split(/\r?\n/).filter(Boolean).forEach((l) => pushLog(`[stderr] ${l}`))
-    );
     p.on("exit", (code) => resolve({ ok: code === 0, code, out: out.slice(-3000) }));
     p.on("error", (e) => resolve({ ok: false, error: e.message }));
   });
