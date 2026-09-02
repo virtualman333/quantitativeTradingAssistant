@@ -139,8 +139,8 @@ export interface RawAccount {
   algoOrders: Record<string, unknown>[];
 }
 
-/** 读取 demo 账户（权益取 USDT details[].eq） */
-export async function fetchAccount(): Promise<RawAccount> {
+/** 读取账户（默认 demo；传 "live" 为只读监控，符合 L1-3）。权益取 USDT details[].eq */
+export async function fetchAccount(profile: "demo" | "live" = "demo"): Promise<RawAccount> {
   const out: RawAccount = { equityUsdt: null, availableUsdt: null, positions: [], algoOrders: [] };
 
   // mcpCall 返回的 data 其实是 j.result，结构：{tool,ok,data:{endpoint,requestTime,data:[...]}}
@@ -155,7 +155,7 @@ export async function fetchAccount(): Promise<RawAccount> {
     return [];
   };
 
-  const bal = await mcpCall("demo", "account_get_balance", { ccy: "USDT" });
+  const bal = await mcpCall(profile, "account_get_balance", { ccy: "USDT" });
   for (const row of rowsOf(bal)) {
     const details = row.details;
     if (!Array.isArray(details)) continue;
@@ -168,10 +168,10 @@ export async function fetchAccount(): Promise<RawAccount> {
     }
   }
 
-  const pos = await mcpCall("demo", "swap_get_positions", {});
+  const pos = await mcpCall(profile, "swap_get_positions", {});
   out.positions = rowsOf(pos);
 
-  const algo = await mcpCall("demo", "swap_get_algo_orders", { status: "pending" });
+  const algo = await mcpCall(profile, "swap_get_algo_orders", { status: "pending" });
   out.algoOrders = rowsOf(algo);
 
   return out;

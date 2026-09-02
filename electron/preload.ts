@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld("api", {
   // 设置
   settingsGet: () => safeInvoke("settings:get"),
   settingsUpdate: (p: unknown) => safeInvoke("settings:update", p),
+  // 实时账户/持仓查看
+  accountGet: (profile?: string) => safeInvoke("account:get", profile),
   storeReset: () => safeInvoke("store:reset"),
   // 工具与对话
   toolsList: () => safeInvoke("tools:list"),

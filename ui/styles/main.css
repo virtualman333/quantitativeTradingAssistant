@@ -184,6 +184,9 @@ input[type=checkbox] + label { cursor: pointer }
 label { width: 96px; color: var(--dim); font-size: 12px; flex: none }
 .row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap }
 .hint { color: var(--dim); font-size: 11px; line-height: 1.7 }
+/* 视图顶部操作行（持仓页等）：左切换、右对齐刷新/时间 */
+.head-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap }
+.head-row .spacer { flex: 1 }
 code { font-family: Consolas, "Cascadia Code", monospace }
 
 /* ── 卡片 / 面板 ─────────────────────────── */

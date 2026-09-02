@@ -326,6 +326,16 @@ function runOnceAgent(): Promise<{ ok: boolean; code?: number | null; out?: stri
 }
 ipcMain.handle("agent:runOnce", () => runOnceAgent());
 ipcMain.handle("status:get", () => getStatus());
+// 实时账户/持仓查看（读操作：demo 或 live 只读，符合 L1-3）
+ipcMain.handle("account:get", async (_e, profile = "demo") => {
+  try {
+    const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "okx.js").replace(/\\/g, "/"));
+    const data = await mod.fetchAccount(profile === "live" ? "live" : "demo");
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+});
 ipcMain.handle("logs:get", () => logBuffer.slice(-500));
 ipcMain.handle("open:folder", (_e, which: string) => {
   shell.openPath(which === "logs" ? path.join(PROJECT_ROOT, "logs") : path.join(PROJECT_ROOT, "state"));
