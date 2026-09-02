@@ -97,7 +97,10 @@ async function summarize() {
   streamText.value = "";
   try {
     const r = await api.portfolioSummarize({});
-    if (!r || !r.ok) errMsg.value = (r && r.error) || "启动汇总失败";
+    if (!r || !r.ok) {
+      errMsg.value = (r && r.error) || "启动汇总失败";
+      streaming.value = false; // 启动失败也要复位，否则按钮永远卡在「停止」
+    }
   } catch (e) {
     errMsg.value = String((e && e.message) || e);
     streaming.value = false;
