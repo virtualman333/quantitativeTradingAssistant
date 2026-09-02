@@ -27,6 +27,14 @@ function extractJson(text: string): string {
 }
 
 /**
+ * 默认 token 预算。
+ * 推理模型（Hy3 等）会把预算大量消耗在思考链上：实测同一条风控 prompt，
+ * max_tokens=2000 时思考链占满、正文为 0。所以默认值给得足够宽，
+ * 界面里仍可按模型单独覆盖。
+ */
+const DEFAULT_MAX_TOKENS = 16000;
+
+/**
  * 只支持流式协议的网关（如 copilot.tencent.com 会返回
  * 400 / 11101 "Non-stream chat request is currently not supported"）：
  * 首次探测到后记下模型 id，后续该模型直接走流式，不再浪费一次失败请求。
@@ -45,60 +53,127 @@ class OpenAICompatProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
+  /** 发一次请求，把正文、思考链、结束原因统一取回来（流式/非流式同一出口） */
+  private async callOnce(
+    msgs: ChatMessage[],
+    maxTokens: number,
+    stream: boolean
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    raw: string;
+    content: string;
+    reasoning: string;
+    finish: string;
+  }> {
+    const base = (this.cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
+    const body: Record<string, unknown> = {
+      model: this.cfg.model,
+      temperature: this.cfg.temperature ?? 0.2,
+      max_tokens: maxTokens,
+      messages: msgs,
+    };
+    if (stream) body.stream = true;
+
+    const r = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
+      body: JSON.stringify(body),
+    });
+
+    // ── 非流式：直接解 JSON ──
+    if (!stream) {
+      const raw = await r.text().catch(() => "");
+      if (!r.ok) return { ok: false, status: r.status, raw, content: "", reasoning: "", finish: "" };
+      let content = "";
+      let reasoning = "";
+      let finish = "";
+      try {
+        const j = JSON.parse(raw) as {
+          choices?: {
+            message?: { content?: string; reasoning_content?: string };
+            finish_reason?: string | null;
+          }[];
+        };
+        const c = j.choices?.[0];
+        content = c?.message?.content ?? "";
+        reasoning = c?.message?.reasoning_content ?? "";
+        finish = c?.finish_reason ?? "";
+      } catch {
+        /* 非 JSON 响应按空正文处理，交给上层报错 */
+      }
+      return { ok: true, status: r.status, raw, content, reasoning, finish };
+    }
+
+    // ── 流式：消费 SSE ──
+    if (!r.ok || !r.body) {
+      const raw = await r.text().catch(() => "");
+      return { ok: false, status: r.status, raw, content: "", reasoning: "", finish: "" };
+    }
+    let content = "";
+    let reasoning = "";
+    let finish = "";
+    for await (const data of sseLines(r.body)) {
+      if (data === "[DONE]") break;
+      let j: any;
+      try {
+        j = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const ch = j?.choices?.[0];
+      const d = ch?.delta || {};
+      if (typeof d.content === "string") content += d.content;
+      if (typeof d.reasoning_content === "string") reasoning += d.reasoning_content;
+      if (ch?.finish_reason) finish = ch.finish_reason;
+    }
+    return { ok: true, status: r.status, raw: "", content, reasoning, finish };
+  }
+
   /**
-   * 非流式取一次完整结果。
-   * 大多数网关非流式更省事，但对「只吃流式」的网关会自动回退（decide 层已处理）。
+   * 取一次完整结果。上层（专家/调度/主 Agent/测试连接）无需关心协议细节，
+   * 这里兜住两类网关差异：
+   *   1. 只吃流式的网关：非流式 400 / 11101 → 自动改走流式；
+   *   2. 推理模型：思考链占用 max_tokens，正文被截断 → 自动翻倍预算重试。
    */
   async decide(sys: string, user: string): Promise<string> {
     const msgs: ChatMessage[] = [
       { role: "system", content: sys },
       { role: "user", content: user },
     ];
+    const budget = this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
 
-    let rejectedBody = "";
+    // ① 非流式优先（更快更省）；已知只吃流式的网关直接跳过
     if (!streamOnlyModels.has(this.cfg.id)) {
-      const base = (this.cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
-      const r = await fetch(`${base}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.cfg.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: this.cfg.model,
-          temperature: this.cfg.temperature ?? 0.2,
-          max_tokens: this.cfg.maxTokens ?? 2000,
-          messages: msgs,
-        }),
-      });
+      const r = await this.callOnce(msgs, budget, false);
       if (r.ok) {
-        const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-        return extractJson(j.choices?.[0]?.message?.content ?? "");
+        // 正文非空即交付；空正文只有「被预算截断」才需要重试，其余照常返回
+        if (r.content || r.finish !== "length") return extractJson(r.content);
+      } else if (!isNonStreamRejected(r.status, r.raw)) {
+        // 非「拒绝非流式」的错误原样抛出，避免掩盖鉴权/参数等真实问题
+        throw new Error(`${this.cfg.name} HTTP ${r.status}: ${r.raw.slice(0, 300)}`);
+      } else {
+        streamOnlyModels.add(this.cfg.id);
       }
-      const t = await r.text().catch(() => "");
-      // 不是「拒绝非流式」就按原样抛错，避免掩盖真正的鉴权/参数问题
-      if (!isNonStreamRejected(r.status, t)) {
-        throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
-      }
-      streamOnlyModels.add(this.cfg.id);
-      rejectedBody = t.slice(0, 120);
     }
 
-    // 回退：用流式请求把内容拼回来，调用方无感知
-    let text = "";
-    let streamErr = "";
-    for await (const c of openaiChat(this.cfg, msgs, [])) {
-      if (c.type === "delta") text += c.text;
-      else if (c.type === "error") streamErr = c.message;
+    // ② 流式；正文若仍被预算截断，翻倍再试一次
+    let tokens = budget;
+    let last: { reasoning: string; finish: string } = { reasoning: "", finish: "" };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await this.callOnce(msgs, tokens, true);
+      if (!r.ok) throw new Error(`${this.cfg.name} HTTP ${r.status}: ${r.raw.slice(0, 300)}`);
+      last = r;
+      if (r.content) return extractJson(r.content);
+      if (r.finish !== "length") {
+        throw new Error(`${this.cfg.name} 返回空正文（finish=${r.finish || "未知"}）`);
+      }
+      tokens *= 2;
     }
-    if (!text) {
-      throw new Error(
-        streamErr
-          ? `${this.cfg.name} 流式调用失败：${streamErr.slice(0, 200)}`
-          : `${this.cfg.name} 返回为空（非流式被拒：${rejectedBody}）`
-      );
-    }
-    return extractJson(text);
+    throw new Error(
+      `${this.cfg.name} 正文被 token 预算截断：max_tokens=${budget}→${tokens} 仍只产出思考过程（${last.reasoning.length} 字）。` +
+        `请在「设置-模型」把该模型的 maxTokens 调大`
+    );
   }
 }
 
@@ -120,7 +195,7 @@ class AnthropicProvider implements LlmProvider {
       },
       body: JSON.stringify({
         model: this.cfg.model,
-        max_tokens: this.cfg.maxTokens ?? 2000,
+        max_tokens: this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: this.cfg.temperature ?? 0.2,
         system: sys,
         messages: [{ role: "user", content: user }],
@@ -205,6 +280,8 @@ export interface ToolSpec {
 }
 export type ChatChunk =
   | { type: "delta"; text: string }
+  /** 推理模型（如 Hy3）的思考链：与正文分开，避免污染输出，仅用于诊断 */
+  | { type: "reasoning"; text: string }
   | { type: "tool_calls"; calls: ToolCall[] }
   | { type: "done"; finishReason: string | null; usage?: unknown }
   | { type: "error"; message: string };
@@ -240,14 +317,15 @@ async function* openaiChat(
   cfg: ModelConfig,
   messages: ChatMessage[],
   tools: ToolSpec[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): AsyncGenerator<ChatChunk> {
   const base = (cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
   const body: Record<string, unknown> = {
     model: cfg.model,
     messages,
     temperature: cfg.temperature ?? 0.3,
-    max_tokens: cfg.maxTokens ?? 3000,
+    max_tokens: maxTokens ?? cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
     stream: true,
   };
   if (tools.length) body.tools = tools;
@@ -287,6 +365,10 @@ async function* openaiChat(
     if (!choice) continue;
     const d = choice.delta || {};
     if (typeof d.content === "string" && d.content) yield { type: "delta", text: d.content };
+    // 推理模型的思考链单独成流，正文与思考不会被混在一起
+    if (typeof d.reasoning_content === "string" && d.reasoning_content) {
+      yield { type: "reasoning", text: d.reasoning_content };
+    }
     for (const tc of d.tool_calls || []) {
       const idx = tc.index ?? 0;
       const cur = calls[idx] ?? (calls[idx] = { id: "", name: "", args: "" });
@@ -357,7 +439,7 @@ async function* anthropicChat(
   const { system, msgs } = toAnthropicMessages(messages);
   const body: Record<string, unknown> = {
     model: cfg.model,
-    max_tokens: cfg.maxTokens ?? 3000,
+    max_tokens: cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
     temperature: cfg.temperature ?? 0.3,
     system,
     messages: msgs,
