@@ -4,3 +4,7 @@ release/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# 运行期配置：含模型 API Key，绝不入库（缺失时代码会自动生成默认配置）
+data/store.json
+electron/config.json

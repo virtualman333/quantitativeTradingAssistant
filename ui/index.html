@@ -2,12 +2,19 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
   <title>OKX 交易 Agent</title>
 </head>
 <body>
-  <div id="app"></div>
+  <!-- 首屏骨架：脚本加载期间不闪白屏，Vue 挂载后整块替换 -->
+  <div id="app">
+    <div class="boot">
+      <div class="logo"></div>
+      <div class="t">正在加载界面…</div>
+    </div>
+  </div>
   <script type="module" src="/main.js"></script>
 </body>
 </html>

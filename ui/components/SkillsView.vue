@@ -28,21 +28,25 @@ async function toggle(s, on) {
     <h2>技能（Skill）</h2>
     <div class="body">
       <table v-if="store.skills.length">
-        <tr><th>名称</th><th>参数</th><th>说明</th><th>权限</th><th>启用</th></tr>
-        <tr v-for="s in store.skills" :key="s.id">
-          <td>{{ s.name }}<br><span class="hint">{{ s.id }}</span></td>
-          <td class="wrap hint">{{ s.args }}</td>
-          <td class="wrap">{{ s.description }}</td>
-          <td><span :class="['tag', s.readOnly ? 't-on' : 't-off']">{{ s.readOnly ? "只读" : "写" }}</span></td>
-          <td>
-            <input
-              type="checkbox"
-              :checked="s.enabled"
-              :disabled="busy === s.id"
-              @change="toggle(s, $event.target.checked)"
-            />
-          </td>
-        </tr>
+        <thead>
+          <tr><th>名称</th><th>参数</th><th>说明</th><th>权限</th><th>启用</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in store.skills" :key="s.id">
+            <td><b>{{ s.name }}</b><br><span class="hint"><code>{{ s.id }}</code></span></td>
+            <td class="wrap"><code class="hint">{{ s.args }}</code></td>
+            <td class="wrap">{{ s.description }}</td>
+            <td><span :class="['tag', s.readOnly ? 't-on' : 't-warn']">{{ s.readOnly ? "只读" : "可写" }}</span></td>
+            <td>
+              <input
+                type="checkbox"
+                :checked="s.enabled"
+                :disabled="busy === s.id"
+                @change="toggle(s, $event.target.checked)"
+              />
+            </td>
+          </tr>
+        </tbody>
       </table>
       <div v-else class="empty">暂无 Skill</div>
       <div class="hint" style="margin-top:9px">

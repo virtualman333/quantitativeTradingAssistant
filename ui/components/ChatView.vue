@@ -24,6 +24,17 @@ const modelId = ref("");
 
 let offEvent = null;
 
+/** 空态引导：点一下直接填进输入框，省得手打 */
+const SUGGESTS = [
+  { t: "读一下 agent/src/graph.ts，说明图的编排", d: "读取文件并解释" },
+  { t: "搜一下代码里在哪里生成 clOrdId", d: "在项目中全文搜索" },
+  { t: "查一下当前账户状态与最近一轮决策", d: "调用 get_status / list_rounds" },
+  { t: "列出项目根目录结构", d: "列目录" },
+];
+function useSuggest(text) {
+  input.value = text;
+}
+
 const enabledTools = computed(() => store.tools.map((t) => t.name).filter((n) => !disabled.value.has(n)));
 const canSend = computed(() => !streaming.value && !!input.value.trim() && hasBridge);
 
@@ -161,6 +172,11 @@ function toggleTool(name) {
   disabled.value = s;
 }
 
+/** on=true 全启用；on=false 只留一个都不启用 */
+function allTools(on) {
+  disabled.value = on ? new Set() : new Set(store.tools.map((t) => t.name));
+}
+
 function onKeydown(e) {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -187,7 +203,7 @@ onBeforeUnmount(() => {
       <b>对话</b>
       <span class="hint">可让我读代码、查文件、搜资料、跑命令；写文件与执行命令会先确认</span>
       <span class="spacer"></span>
-      <select v-model="modelId" style="max-width:210px">
+      <select v-model="modelId" style="max-width:210px;flex:none">
         <option value="">跟随默认模型</option>
         <option v-for="m in store.models" :key="m.id" :value="m.id">{{ m.name }}</option>
       </select>
@@ -195,12 +211,15 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="chat-body" ref="bodyEl">
-      <div v-if="!msgs.length && !streaming" class="empty" style="padding:36px;line-height:2">
-        还没有对话。可以试试：<br>
-        · 读一下 <code>agent/src/graph.ts</code>，说明图的编排<br>
-        · 搜一下代码里在哪里生成 clOrdId<br>
-        · 查一下当前账户与最近一轮决策<br>
-        · 列出仓库根目录结构
+      <div v-if="!msgs.length && !streaming" class="empty">
+        <div style="font-size:13px;color:var(--text-2);margin-bottom:2px">还没有对话</div>
+        <div class="hint">下面这些可以直接点，我会自动填入输入框</div>
+        <div class="suggest">
+          <div v-for="s in SUGGESTS" :key="s.t" class="suggest-item" @click="useSuggest(s.t)">
+            <div class="t">{{ s.t }}</div>
+            <div class="d">{{ s.d }}</div>
+          </div>
+        </div>
       </div>
 
       <div v-for="m in msgs" :key="m.id" :class="['msg', m.role]">
@@ -211,9 +230,10 @@ onBeforeUnmount(() => {
           <div class="calls" v-if="m.calls && m.calls.length">
             <details v-for="(c, i) in m.calls" :key="i" :class="['call', c.status]">
               <summary>
-                <span>{{ c.status === "running" ? "⏳" : c.status === "err" ? "❌" : "✅" }}</span>
-                <b>{{ c.name }}</b>
-                <span class="hint">{{ briefArgs(c.args) }}</span>
+                <span class="arrow">▶</span>
+                <span class="dot"></span>
+                <b class="name">{{ c.name }}</b>
+                <span class="args">{{ briefArgs(c.args) }}</span>
               </summary>
               <div class="io">{{ c.output || c.error || "（无输出）" }}</div>
             </details>
@@ -230,9 +250,10 @@ onBeforeUnmount(() => {
           <div class="calls" v-if="curCalls.length">
             <details v-for="(c, i) in curCalls" :key="i" :class="['call', c.status]" open>
               <summary>
-                <span>{{ c.status === "running" ? "⏳" : c.status === "err" ? "❌" : "✅" }}</span>
-                <b>{{ c.name }}</b>
-                <span class="hint">{{ briefArgs(c.args) }}</span>
+                <span class="arrow">▶</span>
+                <span class="dot"></span>
+                <b class="name">{{ c.name }}</b>
+                <span class="args">{{ briefArgs(c.args) }}</span>
               </summary>
               <div class="io">{{ c.output || c.error || "（执行中…）" }}</div>
             </details>
@@ -245,15 +266,18 @@ onBeforeUnmount(() => {
 
     <div class="chat-foot">
       <div class="toolbar">
-        <span class="hint">工具：</span>
+        <span class="hint">工具</span>
         <span
           v-for="t in store.tools"
           :key="t.name"
-          :class="['chip', !disabled.has(t.name) && 'on']"
+          :class="['chip', !disabled.has(t.name) && 'on', t.danger && 'danger']"
           :title="t.description + (t.danger ? '（危险，执行前需确认）' : '')"
           @click="toggleTool(t.name)"
         >{{ t.name }}</span>
         <span v-if="!store.tools.length" class="hint">（未加载到工具，请先 npm run build）</span>
+        <span class="spacer"></span>
+        <button class="sm" @click="allTools(true)">全选</button>
+        <button class="sm" @click="allTools(false)">全不选</button>
       </div>
       <div class="composer">
         <textarea

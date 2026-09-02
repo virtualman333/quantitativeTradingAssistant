@@ -149,15 +149,22 @@ function toggleRole(id) {
     </div>
   </div>
 
-  <div class="row">
-    <button class="primary" :disabled="saving" @click="save">{{ saving ? "保存中…" : "保存" }}</button>
-    <button @click="api.openStore()">打开数据文件</button>
-    <button @click="api.openFolder('state')">state 目录</button>
-    <button @click="api.openFolder('logs')">日志目录</button>
-    <button class="danger" @click="reset">恢复默认</button>
-  </div>
-  <div class="hint" style="margin-top:8px">
-    所有配置保存在 agent/data/store.json（本机，不上传）。关闭「执行前确认」后，
-    对话中的写文件与 bash 命令将不再弹窗，请自行承担风险。
+  <div class="panel">
+    <h2>保存与数据</h2>
+    <div class="body">
+      <div class="row" style="margin-bottom:0">
+        <div class="btn-group">
+          <button class="primary" :disabled="saving" @click="save">{{ saving ? "保存中…" : "保存" }}</button>
+          <button @click="api.openStore()">打开数据文件</button>
+          <button @click="api.openFolder('state')">state 目录</button>
+          <button @click="api.openFolder('logs')">日志目录</button>
+          <button class="danger" @click="reset">恢复默认</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:10px">
+        所有配置保存在 agent/data/store.json（本机，不上传）。关闭「执行前确认」后，
+        对话中的写文件与 bash 命令将不再弹窗，请自行承担风险。
+      </div>
+    </div>
   </div>
 </template>

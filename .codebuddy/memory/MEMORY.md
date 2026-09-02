@@ -21,6 +21,9 @@
   - `experts.ts`：内置 4 专家（trading/news/factor/risk），ReAct 简化版工具循环（≤4 次），支持从 store 动态角色覆盖。
   - `graph.ts`：LangGraph 图，Send 动态扇出专家，Annotation.Reducer 合并 opinions；execute/archive 为占位节点（实际在 main.ts）。
   - `electron/main.ts`：启动即拉起 agent 子进程（tsx src/main.ts），UI 直接可用；config.json 在 agent/electron/（旧简单配置）与 store.json（新，多模型）并存，注意两者未完全打通。
+- **前端（2026-09-02 重写）**：Vite + Vue3 SFC 构建模式（`ui/`：main.js、App.vue、store/index.js、lib/{api,feedback,format}.js、components/*.vue、styles/main.css），产物 dist/ui 由 Electron 用 file:// 加载（vite base 必须 "./"）。`npm run ui:dev` = Vite dev server(5173) + Electron（UI_DEV=1）。
+- **对话与工具**：src/chat.ts（ReAct 循环，事件 delta/tool_start/tool_result/confirm/done/error）+ src/tools/*（read_file/write_file/list_dir/search_files/web_search/web_fetch/get_status/list_rounds/run_skill/run_round/bash，路径沙箱 PROJECT_ROOT，write/bash/run_round 需确认）。llm.ts 的 streamChat 统一 OpenAI function-calling 与 Anthropic tool_use。
+- **编译分三套**（勿合并）：tsconfig.json → src ESM；tsconfig.electron.json → electron/main.ts **ESM NodeNext**（主进程需 `await import("file://")` 动态加载 dist/src，CJS require 解析不了 file://）；tsconfig.preload.json → electron/preload.ts **CommonJS** 输出到 dist/preload（贴 `{"type":"commonjs"}`，见 scripts/postbuild.mjs）。preload 一旦是 ESM 就加载失败 → window.api 缺失 → 界面所有操作静默失效。
 - 运行：`LLM_PROVIDER=mock pnpm run once`（联调）；deepseek 需 DEEPSEEK_API_KEY；`pnpm dev` 常驻；`pnpm ui` = build + electron。**dry-run 是模式不是单轮；只有 --once 才跑一轮退出。**
 - 输出：每轮写 state/round_input_R*.json 再调 archive_round.py 落库；日志 logs/agent/YYYY-MM-DD.log；轮次时间格式必须 `YYYY-MM-DD HH:MM:SS`（archive_round.py strptime 严格解析，toLocaleString 会 ValueError）。
 

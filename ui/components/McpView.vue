@@ -111,20 +111,26 @@ async function test(m) {
     </h2>
     <div class="body">
       <table v-if="store.mcps.length">
-        <tr><th>名称</th><th>类型</th><th>命令 / URL</th><th>状态</th><th>操作</th></tr>
-        <tr v-for="m in store.mcps" :key="m.id">
-          <td>{{ m.name }}</td>
-          <td>{{ m.url ? "HTTP" : "stdio" }}</td>
-          <td class="wrap">{{ m.url || ((m.command || "") + " " + (m.args || []).join(" ")) }}</td>
-          <td><span :class="['tag', m.enabled ? 't-on' : 't-off']">{{ m.enabled ? "启用" : "停用" }}</span></td>
-          <td class="nowrap">
-            <button class="sm" :disabled="testing === m.id" @click="test(m)">
-              {{ testing === m.id ? "测试中" : "测试" }}
-            </button>
-            <button class="sm" @click="openEdit(m)">编辑</button>
-            <button class="sm danger" @click="remove(m)">删</button>
-          </td>
-        </tr>
+        <thead>
+          <tr><th>名称</th><th>类型</th><th>命令 / URL</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="m in store.mcps" :key="m.id">
+            <td><b>{{ m.name }}</b></td>
+            <td><span :class="['tag', m.url ? 't-info' : 't-hold']">{{ m.url ? "HTTP" : "stdio" }}</span></td>
+            <td class="wrap"><code>{{ m.url || ((m.command || "") + " " + (m.args || []).join(" ")) }}</code></td>
+            <td><span :class="['tag', m.enabled ? 't-on' : 't-off']">{{ m.enabled ? "启用" : "停用" }}</span></td>
+            <td class="nowrap">
+              <div class="btn-group">
+                <button class="sm" :disabled="testing === m.id" @click="test(m)">
+                  {{ testing === m.id ? "测试中" : "测试" }}
+                </button>
+                <button class="sm" @click="openEdit(m)">编辑</button>
+                <button class="sm danger" @click="remove(m)">删除</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
       </table>
       <div v-else class="empty">暂无 MCP Server</div>
     </div>

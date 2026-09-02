@@ -158,33 +158,39 @@ async function setMain(m) {
     </h2>
     <div class="body">
       <table v-if="store.models.length">
-        <tr><th>名称</th><th>类型</th><th>模型</th><th>Base URL</th><th>状态</th><th>操作</th></tr>
+        <thead>
+          <tr><th>名称</th><th>类型</th><th>模型</th><th>Base URL</th><th>状态</th><th>操作</th></tr>
+        </thead>
         <template v-for="g in groups" :key="g.key">
-          <tr v-for="(m, i) in g.models" :key="m.id">
-            <td>
-              {{ m.name }}
-              <span v-if="m.id === store.settings?.defaultModelId" class="tag t-on">默认</span>
-              <span v-if="m.id === store.settings?.mainAgentModelId" class="tag t-on">主Agent</span>
-            </td>
-            <td class="hint">{{ i === 0 ? g.provider : "" }}</td>
-            <td>{{ m.model }}</td>
-            <td class="wrap hint">{{ i === 0 ? g.baseURL || "—" : "同上" }}</td>
-            <td><span :class="['tag', m.enabled ? 't-on' : 't-off']">{{ m.enabled ? "启用" : "停用" }}</span></td>
-            <td class="nowrap">
-              <button class="sm" @click="setDefault(m)">设默认</button>
-              <button class="sm" @click="setMain(m)">设主Agent</button>
-              <button class="sm" :disabled="testing === m.id" @click="test(m)">
-                {{ testing === m.id ? "测试中" : "测试" }}
-              </button>
-              <button
-                class="sm"
-                title="同一提供商下再加一个模型：复用类型 / Base URL / 密钥，只需填名称与模型名"
-                @click="cloneOf(m)"
-              >同商加模型</button>
-              <button class="sm" @click="openEdit(m)">编辑</button>
-              <button class="sm danger" @click="remove(m)">删</button>
-            </td>
-          </tr>
+          <tbody>
+            <tr v-for="(m, i) in g.models" :key="m.id">
+              <td>
+                <b>{{ m.name }}</b>
+                <span v-if="m.id === store.settings?.defaultModelId" class="tag t-info">默认</span>
+                <span v-if="m.id === store.settings?.mainAgentModelId" class="tag t-on">主Agent</span>
+              </td>
+              <td class="hint">{{ i === 0 ? g.provider : "" }}</td>
+              <td><code>{{ m.model }}</code></td>
+              <td class="wrap hint">{{ i === 0 ? g.baseURL || "—" : "同上" }}</td>
+              <td><span :class="['tag', m.enabled ? 't-on' : 't-off']">{{ m.enabled ? "启用" : "停用" }}</span></td>
+              <td class="nowrap">
+                <div class="btn-group">
+                  <button class="sm" @click="setDefault(m)">设默认</button>
+                  <button class="sm" @click="setMain(m)">设主Agent</button>
+                  <button class="sm" :disabled="testing === m.id" @click="test(m)">
+                    {{ testing === m.id ? "测试中" : "测试" }}
+                  </button>
+                  <button
+                    class="sm"
+                    title="同一提供商下再加一个模型：复用类型 / Base URL / 密钥，只需填名称与模型名"
+                    @click="cloneOf(m)"
+                  >同商加模型</button>
+                  <button class="sm" @click="openEdit(m)">编辑</button>
+                  <button class="sm danger" @click="remove(m)">删除</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
         </template>
       </table>
       <div v-else class="empty">暂无模型</div>

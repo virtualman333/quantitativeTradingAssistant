@@ -1,131 +1,444 @@
+/**
+ * main.css —— 全局样式（暗色仪表盘风格）
+ *
+ * 结构：变量 → 骨架 → 控件 → 面板/表格 → 模态/Toast → 对话
+ * 颜色只在此处定义，组件里不写死色值。
+ */
+
+/* ── 设计变量 ─────────────────────────────── */
 :root {
-  --bg: #0e1116; --panel: #161b22; --panel2: #1c2129; --border: #2d333b; --text: #e6edf3;
-  --dim: #8b949e; --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+  /* 层次：越靠上的面越亮，用亮度表达层级 */
+  --bg: #0b0e14;
+  --surface: #12171f;
+  --surface-2: #171d27;
+  --surface-3: #1d242f;
+  --border: #232b38;
+  --border-strong: #303a4a;
+
+  --text: #e6edf3;
+  --text-2: #b6c0cc;
+  --dim: #8b949e;
+  --dim-2: #6b747e;
+
+  --blue: #4c8dff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --purple: #a371f7;
+
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r: 10px;
+  --r-lg: 14px;
+  --sh-1: 0 1px 2px rgba(0, 0, 0, .3);
+  --sh-2: 0 8px 24px rgba(0, 0, 0, .45);
+  --sh-3: 0 18px 48px rgba(0, 0, 0, .58);
+  --ring: 0 0 0 2px rgba(76, 141, 255, .35);
+  --ease: .16s cubic-bezier(.4, 0, .2, 1);
 }
+
 * { box-sizing: border-box; margin: 0; padding: 0 }
+
+html, body, #app { height: 100% }
+
 body {
-  background: var(--bg); color: var(--text);
-  font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.6 -apple-system, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
-::-webkit-scrollbar { width: 9px; height: 9px }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px }
-::-webkit-scrollbar-thumb:hover { background: #3d444d }
+
+/* 数字等宽，交易数据才不会跳动 */
+.card .v, table td, .call .io, #log { font-variant-numeric: tabular-nums }
+
+::-webkit-scrollbar { width: 10px; height: 10px }
+::-webkit-scrollbar-thumb { background: #2b333f; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box }
+::-webkit-scrollbar-thumb:hover { background: #3a4553; background-clip: padding-box }
 ::-webkit-scrollbar-track { background: transparent }
+::selection { background: rgba(76, 141, 255, .32) }
 
-/* ── 布局 ───────────────────────────────── */
-.hd { display: flex; align-items: center; gap: 12px; padding: 11px 18px; background: var(--panel); border-bottom: 1px solid var(--border) }
-.hd h1 { font-size: 15px; font-weight: 600 }
-.badge { padding: 3px 10px; border-radius: 11px; font-size: 12px; font-weight: 600 }
-.run { background: rgba(63,185,80,.16); color: var(--green); border: 1px solid rgba(63,185,80,.4) }
-.stop { background: rgba(139,148,158,.14); color: var(--dim); border: 1px solid var(--border) }
+/* ── 应用骨架 ─────────────────────────────── */
+/* 顶栏 / 页签 / 内容三行式，高度用 flex 分配，
+   不再写死 calc(100vh - 98px)：页签换行或字体变化时不会错位 */
+#app { display: flex; flex-direction: column; overflow: hidden }
+
+main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px 26px;
+}
+
+/* ── 顶栏 ─────────────────────────────────── */
+.hd {
+  display: flex; align-items: center; gap: 12px; flex: none;
+  height: 54px; padding: 0 20px;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 9px; flex: none }
+.brand .logo {
+  width: 26px; height: 26px; border-radius: 7px; flex: none;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  box-shadow: 0 2px 8px rgba(76, 141, 255, .4);
+}
+.hd h1 { font-size: 14px; font-weight: 600; letter-spacing: .2px; white-space: nowrap }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor }
+.run { background: rgba(63, 185, 80, .14); color: var(--green); border: 1px solid rgba(63, 185, 80, .38) }
+.run::before { animation: pulse 2s ease-in-out infinite }
+.stop { background: rgba(139, 148, 158, .12); color: var(--dim); border: 1px solid var(--border) }
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+
+.model-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 240px;
+  padding: 3px 10px; border-radius: 20px; font-size: 11px;
+  background: var(--surface-3); border: 1px solid var(--border); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .spacer { flex: 1 }
-.tabs { display: flex; gap: 2px; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap }
-.tab { padding: 9px 15px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; font-size: 13px; user-select: none }
-.tab:hover { color: var(--text) }
-.tab.active { color: var(--text); border-bottom-color: var(--blue) }
-main { padding: 15px 18px; height: calc(100vh - 98px); overflow: auto }
 
-/* ── 基础控件 ───────────────────────────── */
+.btn-group { display: flex; flex: none }
+.btn-group button { border-radius: 0; margin-left: -1px }
+.btn-group button:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); margin-left: 0 }
+.btn-group button:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0 }
+.btn-group button:hover:not(:disabled) { z-index: 1 }
+
+/* ── 页签 ─────────────────────────────────── */
+.tabs {
+  display: flex; gap: 4px; flex: none;
+  height: 42px; padding: 0 14px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  overflow-x: auto; scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none }
+.tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 100%; padding: 0 13px; cursor: pointer; user-select: none;
+  color: var(--dim); font-size: 12.5px; white-space: nowrap;
+  border-bottom: 2px solid transparent; border-radius: var(--r-sm) var(--r-sm) 0 0;
+  transition: color var(--ease), background var(--ease);
+}
+.tab:hover { color: var(--text); background: rgba(255, 255, 255, .03) }
+.tab.active { color: var(--text); border-bottom-color: var(--blue); background: rgba(76, 141, 255, .08) }
+.tab-ico { display: inline-flex; opacity: .8 }
+.tab.active .tab-ico { opacity: 1; color: var(--blue) }
+.tab-ico svg { width: 15px; height: 15px; display: block }
+
+/* ── 基础控件 ─────────────────────────────── */
 button {
-  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-  padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  height: 28px; padding: 0 12px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  cursor: pointer; font-size: 12px; font-family: inherit; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  transition: background var(--ease), border-color var(--ease), color var(--ease), transform var(--ease);
 }
-button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue) }
-button.primary { background: rgba(88,166,255,.14); border-color: rgba(88,166,255,.45); color: var(--blue) }
-button.danger { color: var(--red); border-color: rgba(248,81,73,.4) }
-button.danger:hover:not(:disabled) { background: rgba(248,81,73,.12) }
-button.sm { padding: 3px 9px; font-size: 11px }
-button:disabled { opacity: .45; cursor: not-allowed }
+button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: rgba(76, 141, 255, .08) }
+button:active:not(:disabled) { transform: translateY(1px) }
+button.primary { background: rgba(76, 141, 255, .16); border-color: rgba(76, 141, 255, .45); color: var(--blue) }
+button.primary:hover:not(:disabled) { background: rgba(76, 141, 255, .26) }
+button.danger { color: var(--red); border-color: rgba(248, 81, 73, .38) }
+button.danger:hover:not(:disabled) { background: rgba(248, 81, 73, .14) }
+button.sm { height: 24px; padding: 0 9px; font-size: 11px; border-radius: var(--r-xs) }
+button:disabled { opacity: .42; cursor: not-allowed }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; box-shadow: var(--ring) }
+
 input, select, textarea {
-  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
-  padding: 5px 9px; border-radius: 5px; font-size: 12px; flex: 1; min-width: 130px;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  padding: 0 9px; height: 28px; border-radius: var(--r-sm);
+  font-size: 12px; font-family: inherit; flex: 1; min-width: 130px;
+  transition: border-color var(--ease), background var(--ease);
 }
-textarea { min-height: 170px; font: 11px/1.6 Consolas, monospace; resize: vertical; width: 100% }
-input:focus, select:focus, textarea:focus { outline: none; border-color: var(--blue) }
-input[type=checkbox] { width: auto; flex: none; min-width: auto; cursor: pointer }
-label { width: 88px; color: var(--dim); font-size: 12px; flex-shrink: 0 }
-.row { display: flex; gap: 10px; align-items: center; margin-bottom: 9px; flex-wrap: wrap }
-.hint { color: var(--dim); font-size: 11px }
+input:hover, select:hover, textarea:hover { border-color: var(--border-strong) }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--blue); background: var(--surface-3) }
+input::placeholder, textarea::placeholder { color: var(--dim-2) }
+textarea { min-height: 170px; height: auto; padding: 7px 9px; font: 11px/1.7 Consolas, "Cascadia Code", monospace; resize: vertical; width: 100% }
+select { cursor: pointer; padding-right: 4px }
+option { background: var(--surface-2) }
 
-/* ── 卡片 / 面板 / 表格 ─────────────────── */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 11px; margin-bottom: 14px }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px }
-.card .k { color: var(--dim); font-size: 11px }
-.card .v { font-size: 18px; font-weight: 600; margin-top: 2px; word-break: break-all }
+/* 原生复选框在深色下是白底，观感割裂，这里自绘 */
+input[type=checkbox] {
+  appearance: none; -webkit-appearance: none;
+  width: 15px; height: 15px; flex: none; min-width: 15px; padding: 0;
+  border: 1px solid var(--border-strong); border-radius: var(--r-xs);
+  background: var(--surface-2); cursor: pointer; position: relative;
+  transition: background var(--ease), border-color var(--ease);
+}
+input[type=checkbox]:hover { border-color: var(--blue) }
+input[type=checkbox]:checked { background: var(--blue); border-color: var(--blue) }
+input[type=checkbox]:checked::after {
+  content: ""; position: absolute; left: 4px; top: 1px;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(43deg);
+}
+input[type=checkbox]:disabled { opacity: .5; cursor: not-allowed }
+input[type=checkbox] + label { cursor: pointer }
+
+label { width: 96px; color: var(--dim); font-size: 12px; flex: none }
+.row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap }
+.hint { color: var(--dim); font-size: 11px; line-height: 1.7 }
+code { font-family: Consolas, "Cascadia Code", monospace }
+
+/* ── 卡片 / 面板 ─────────────────────────── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; margin-bottom: 16px }
+.card {
+  position: relative; overflow: hidden;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border); border-radius: var(--r);
+  padding: 12px 14px; transition: border-color var(--ease), transform var(--ease);
+}
+.card::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: linear-gradient(180deg, var(--blue), transparent); opacity: .55;
+}
+.card:hover { border-color: var(--border-strong); transform: translateY(-1px) }
+.card .k { color: var(--dim); font-size: 11px; letter-spacing: .3px }
+.card .v { font-size: 19px; font-weight: 600; margin-top: 3px; word-break: break-all; line-height: 1.35 }
 .up { color: var(--green) } .down { color: var(--red) }
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 13px }
-.panel h2 { font-size: 13px; padding: 9px 14px; border-bottom: 1px solid var(--border); color: var(--dim); font-weight: 600; display: flex; align-items: center; gap: 10px }
-.panel h2 .spacer { flex: 1 }
-.panel .body { padding: 11px 14px }
-table { width: 100%; border-collapse: collapse; font-size: 12px }
-th, td { padding: 6px 9px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top }
-th { color: var(--dim); font-weight: 500; font-size: 11px }
-tr:hover td { background: rgba(255,255,255,.02) }
-.wrap { max-width: 220px; word-break: break-all }
-.nowrap { white-space: nowrap }
-.empty { color: var(--dim); padding: 14px; text-align: center; font-size: 12px }
-.pre { white-space: pre-wrap; font-size: 12px; line-height: 1.75 }
-.tag { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; margin-right: 3px; white-space: nowrap }
-.t-buy { background: rgba(63,185,80,.15); color: var(--green) }
-.t-sell { background: rgba(248,81,73,.15); color: var(--red) }
-.t-hold { background: rgba(139,148,158,.15); color: var(--dim) }
-.t-on { background: rgba(63,185,80,.15); color: var(--green) }
-.t-off { background: rgba(139,148,158,.12); color: var(--dim) }
-.alert { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.35); color: var(--yellow); padding: 8px 12px; border-radius: 6px; margin-bottom: 11px; font-size: 12px }
-.alert.err { background: rgba(248,81,73,.1); border-color: rgba(248,81,73,.4); color: var(--red) }
-.chk { display: flex; gap: 5px; align-items: center; flex-wrap: wrap }
-.chk label { width: auto; margin-right: 8px }
-#log { background: #0a0d12; border: 1px solid var(--border); border-radius: 6px; padding: 9px; height: 320px; overflow: auto; font: 11px/1.6 Consolas, monospace; white-space: pre-wrap; color: #b9c3ce }
 
-/* ── 模态 ───────────────────────────────── */
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; z-index: 99 }
-.modal .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; width: 660px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column }
-.modal .box.wide { width: 780px }
-.modal h3 { font-size: 14px; padding: 13px 16px; border-bottom: 1px solid var(--border) }
-.modal .body { padding: 14px 16px; overflow: auto; flex: 1 }
-.modal .foot { padding: 11px 16px; border-top: 1px solid var(--border); display: flex; gap: 9px; justify-content: flex-end }
-.modal .field-err { color: var(--red); font-size: 11px; margin: -4px 0 8px 98px }
-
-/* ── Toast ──────────────────────────────── */
-.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; max-width: 460px }
-.toast {
-  background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--blue);
-  border-radius: 6px; padding: 9px 12px; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.4);
-  word-break: break-word; animation: slidein .16s ease-out;
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); margin-bottom: 14px; overflow: hidden; box-shadow: var(--sh-1);
 }
-.toast.ok { border-left-color: var(--green) }
-.toast.err { border-left-color: var(--red); max-height: 240px; overflow: auto; white-space: pre-wrap }
-.toast.warn { border-left-color: var(--yellow) }
-@keyframes slidein { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+.panel h2 {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  padding: 10px 14px; background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.panel h2::before {
+  content: ""; width: 3px; height: 13px; border-radius: 2px;
+  background: var(--blue); flex: none; opacity: .8;
+}
+.panel h2 .spacer { flex: 1 }
+.panel .body { padding: 12px 14px }
+.panel-actions { display: flex; gap: 6px; align-items: center }
 
-/* ── 对话 ───────────────────────────────── */
-.chat { display: flex; flex-direction: column; height: calc(100vh - 98px) }
-.chat-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px 8px 0 0 }
-.chat-body { flex: 1; overflow: auto; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-top: none }
-.chat-foot { border: 1px solid var(--border); border-top: none; border-radius: 0 0 8px 8px; background: var(--panel); padding: 10px 12px }
-.msg { display: flex; gap: 10px; margin-bottom: 14px }
-.msg .avatar { width: 24px; height: 24px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; flex: none; background: var(--panel2); border: 1px solid var(--border) }
-.msg.user .avatar { background: rgba(88,166,255,.16); color: var(--blue); border-color: rgba(88,166,255,.4) }
-.msg.assistant .avatar { background: rgba(63,185,80,.14); color: var(--green); border-color: rgba(63,185,80,.35) }
-.msg .bubble { flex: 1; min-width: 0 }
-.msg .who { font-size: 11px; color: var(--dim); margin-bottom: 3px }
-.msg .text { white-space: pre-wrap; word-break: break-word; line-height: 1.7 }
-.msg .text code { background: #0a0d12; padding: 1px 5px; border-radius: 4px; font: 11px/1.5 Consolas, monospace }
-.msg .text pre { background: #0a0d12; border: 1px solid var(--border); border-radius: 6px; padding: 9px; overflow: auto; margin: 7px 0; font: 11px/1.6 Consolas, monospace; white-space: pre-wrap }
-.msg.user .text { color: var(--text) }
-.calls { margin: 8px 0; display: flex; flex-direction: column; gap: 6px }
-.call { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); overflow: hidden }
-.call > summary { cursor: pointer; padding: 6px 10px; font-size: 11px; color: var(--dim); list-style: none; display: flex; align-items: center; gap: 8px }
+/* ── 表格 ─────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 12px }
+thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--surface-3); color: var(--dim);
+  font-weight: 500; font-size: 11px; letter-spacing: .3px;
+  text-align: left; padding: 7px 10px;
+  border-bottom: 1px solid var(--border-strong); white-space: nowrap;
+}
+tbody td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle }
+tbody tr:last-child td { border-bottom: none }
+tbody tr { transition: background var(--ease) }
+tbody tr:hover { background: rgba(76, 141, 255, .05) }
+td.nowrap, .nowrap { white-space: nowrap }
+.wrap { max-width: 240px; word-break: break-all; color: var(--text-2) }
+
+.empty {
+  padding: 26px 16px; text-align: center; color: var(--dim); font-size: 12px;
+  border: 1px dashed var(--border-strong); border-radius: var(--r);
+  background: rgba(255, 255, 255, .012);
+}
+.pre { white-space: pre-wrap; font-size: 12px; line-height: 1.8; color: var(--text-2) }
+
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: var(--r-xs);
+  font-size: 11px; margin-right: 3px; white-space: nowrap; border: 1px solid transparent;
+}
+.t-buy { background: rgba(63, 185, 80, .14); color: var(--green); border-color: rgba(63, 185, 80, .3) }
+.t-sell { background: rgba(248, 81, 73, .14); color: var(--red); border-color: rgba(248, 81, 73, .3) }
+.t-hold { background: rgba(139, 148, 158, .14); color: var(--dim); border-color: var(--border) }
+.t-on { background: rgba(63, 185, 80, .14); color: var(--green); border-color: rgba(63, 185, 80, .3) }
+.t-off { background: rgba(139, 148, 158, .12); color: var(--dim); border-color: var(--border) }
+.t-info { background: rgba(76, 141, 255, .14); color: var(--blue); border-color: rgba(76, 141, 255, .3) }
+.t-warn { background: rgba(210, 153, 34, .14); color: var(--yellow); border-color: rgba(210, 153, 34, .32) }
+
+.alert {
+  display: flex; align-items: flex-start; gap: 8px;
+  background: rgba(210, 153, 34, .09); border: 1px solid rgba(210, 153, 34, .32);
+  color: var(--yellow); padding: 9px 12px; border-radius: var(--r-sm);
+  margin-bottom: 12px; font-size: 12px; line-height: 1.6;
+}
+.alert.err { background: rgba(248, 81, 73, .09); border-color: rgba(248, 81, 73, .35); color: var(--red) }
+.alert.info { background: rgba(76, 141, 255, .09); border-color: rgba(76, 141, 255, .3); color: var(--blue) }
+.alert .spacer { flex: 1 }
+
+.chk { display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
+.chk > span {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px 2px 6px; border: 1px solid var(--border);
+  border-radius: 20px; background: var(--surface-2);
+}
+.chk label { width: auto; color: var(--text-2); font-size: 11.5px }
+
+#log {
+  background: #080b10; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 10px 12px; height: 100%; min-height: 260px; overflow: auto;
+  font: 11px/1.7 Consolas, "Cascadia Code", monospace;
+  white-space: pre-wrap; word-break: break-all; color: #a9b4c0;
+}
+/* 日志页要撑满剩余高度：内容区临时变 flex 列，日志框吃掉多余空间 */
+main:has(.log-page) { display: flex; flex-direction: column; overflow: hidden }
+.log-page { flex: 1; min-height: 0; display: flex; flex-direction: column }
+.log-page .body { flex: 1; min-height: 0; display: flex }
+.log-page .body + .body { flex: none }
+.log-page #log { flex: 1; width: 100% }
+
+/* ── 模态 ─────────────────────────────────── */
+.modal {
+  position: fixed; inset: 0; background: rgba(3, 5, 8, .66);
+  display: flex; align-items: center; justify-content: center; z-index: 99;
+  animation: fadein .14s ease-out;
+}
+.modal .box {
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+  width: 660px; max-width: 92vw; max-height: 86vh;
+  display: flex; flex-direction: column; box-shadow: var(--sh-3);
+  animation: popin .16s cubic-bezier(.2, .9, .3, 1.2);
+}
+.modal .box.wide { width: 780px }
+.modal h3 { font-size: 13.5px; font-weight: 600; padding: 14px 16px; border-bottom: 1px solid var(--border) }
+.modal .body { padding: 14px 16px; overflow: auto; flex: 1 }
+.modal .foot {
+  padding: 11px 16px; border-top: 1px solid var(--border);
+  display: flex; gap: 9px; justify-content: flex-end; background: var(--surface-2);
+}
+.modal .field-err {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+  color: var(--red); background: rgba(248, 81, 73, .1); border: 1px solid rgba(248, 81, 73, .3);
+  border-radius: var(--r-sm); padding: 6px 10px; font-size: 11.5px;
+}
+@keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+@keyframes popin { from { opacity: 0; transform: scale(.97) translateY(6px) } to { opacity: 1; transform: none } }
+
+/* ── Toast ────────────────────────────────── */
+.toasts {
+  position: fixed; right: 18px; bottom: 18px; z-index: 200;
+  display: flex; flex-direction: column; gap: 8px; max-width: 460px;
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--blue); border-radius: var(--r-sm);
+  padding: 9px 12px; font-size: 12px; line-height: 1.55;
+  box-shadow: var(--sh-2); word-break: break-word;
+  animation: slidein .18s cubic-bezier(.2, .9, .3, 1.1);
+}
+.toast::before { content: "ℹ"; flex: none; font-size: 13px; line-height: 1.35; opacity: .9 }
+.toast.ok { border-left-color: var(--green) }
+.toast.ok::before { content: "✓"; color: var(--green) }
+.toast.err { border-left-color: var(--red); max-height: 240px; overflow: auto; white-space: pre-wrap }
+.toast.err::before { content: "✕"; color: var(--red) }
+.toast.warn { border-left-color: var(--yellow) }
+.toast.warn::before { content: "!"; color: var(--yellow) }
+@keyframes slidein { from { opacity: 0; transform: translateX(14px) } to { opacity: 1; transform: none } }
+
+/* ── 对话 ─────────────────────────────────── */
+.chat { display: flex; flex-direction: column; height: 100%; overflow: hidden }
+.chat-head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 8px 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--r) var(--r) 0 0;
+}
+.chat-head b { font-size: 12.5px }
+.chat-body {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 16px 18px; background: var(--bg);
+  border: 1px solid var(--border); border-top: none;
+}
+.chat-foot {
+  flex: none; padding: 10px 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-top: none; border-radius: 0 0 var(--r) var(--r);
+}
+.chat-foot textarea { border-radius: var(--r-sm) }
+
+.msg { display: flex; gap: 10px; margin-bottom: 16px }
+.msg .avatar {
+  width: 26px; height: 26px; border-radius: 7px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; border: 1px solid var(--border); background: var(--surface-2);
+}
+.msg.user { flex-direction: row-reverse }
+.msg.user .avatar { background: rgba(76, 141, 255, .18); color: var(--blue); border-color: rgba(76, 141, 255, .4) }
+.msg.assistant .avatar { background: rgba(63, 185, 80, .14); color: var(--green); border-color: rgba(63, 185, 80, .35) }
+.msg .bubble { flex: 1; min-width: 0; max-width: 88% }
+.msg .who { font-size: 11px; color: var(--dim-2); margin-bottom: 4px }
+.msg.user .who { text-align: right }
+.msg .text { white-space: pre-wrap; word-break: break-word; line-height: 1.75 }
+.msg .text code { background: #080b10; padding: 1px 5px; border-radius: var(--r-xs); font-size: 11px }
+.msg .text pre {
+  background: #080b10; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 10px 12px; overflow: auto; margin: 8px 0;
+  font: 11px/1.65 Consolas, "Cascadia Code", monospace; white-space: pre-wrap;
+}
+/* 用户消息用气泡，助手消息保持无框：长答案更好读 */
+.msg.user .text {
+  display: inline-block; max-width: 100%;
+  background: rgba(76, 141, 255, .13); border: 1px solid rgba(76, 141, 255, .26);
+  border-radius: 12px 12px 4px 12px; padding: 7px 12px;
+}
+.msg.user .bubble { display: flex; flex-direction: column; align-items: flex-end }
+
+.calls { margin: 9px 0; display: flex; flex-direction: column; gap: 6px }
+.call { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); overflow: hidden }
+.call > summary {
+  cursor: pointer; padding: 6px 10px; font-size: 11.5px; color: var(--text-2);
+  list-style: none; display: flex; align-items: center; gap: 8px; user-select: none;
+}
 .call > summary::-webkit-details-marker { display: none }
-.call > summary:hover { color: var(--text) }
-.call .io { padding: 8px 10px; border-top: 1px solid var(--border); font: 11px/1.6 Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; color: #b9c3ce }
-.call.running > summary { color: var(--yellow) }
-.call.err > summary { color: var(--red) }
-.thinking { color: var(--dim); font-size: 12px }
-.cursor { display: inline-block; width: 7px; height: 13px; background: var(--green); vertical-align: -2px; animation: blink 1s steps(2) infinite }
+.call > summary:hover { background: rgba(255, 255, 255, .03) }
+.call .arrow { flex: none; transition: transform var(--ease); color: var(--dim-2); font-size: 9px }
+.call[open] .arrow { transform: rotate(90deg) }
+.call .name { font-weight: 600; color: var(--text) }
+.call .args { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0 }
+.call .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--dim) }
+.call.running .dot { background: var(--yellow); box-shadow: 0 0 0 3px rgba(210, 153, 34, .16); animation: pulse 1.4s infinite }
+.call.ok .dot { background: var(--green) }
+.call.err .dot { background: var(--red) }
+.call .io {
+  padding: 9px 11px; border-top: 1px solid var(--border); background: #080b10;
+  font: 11px/1.65 Consolas, "Cascadia Code", monospace;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 260px; overflow: auto; color: #a9b4c0;
+}
+
+.thinking { color: var(--dim); font-size: 12px; display: inline-flex; align-items: center; gap: 6px }
+.cursor { display: inline-block; width: 7px; height: 13px; background: var(--green); animation: blink 1s steps(2) infinite }
 @keyframes blink { 50% { opacity: 0 } }
+
 .composer { display: flex; gap: 8px; align-items: flex-end }
 .composer textarea { min-height: 62px; max-height: 190px }
+.composer button { height: 62px; padding: 0 20px }
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; align-items: center }
-.chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 11px; font-size: 11px; color: var(--dim); cursor: pointer; user-select: none }
-.chip.on { border-color: rgba(88,166,255,.5); color: var(--blue); background: rgba(88,166,255,.1) }
+.chip {
+  padding: 2px 9px; border: 1px solid var(--border); border-radius: 20px;
+  font-size: 11px; color: var(--dim); cursor: pointer; user-select: none;
+  transition: all var(--ease);
+}
+.chip:hover { border-color: var(--border-strong); color: var(--text-2) }
+.chip.on { border-color: rgba(76, 141, 255, .5); color: var(--blue); background: rgba(76, 141, 255, .11) }
+/* 危险工具（写文件 / bash / 跑一轮）：启用时用黄色，提醒执行前会弹确认 */
+.chip.danger { border-style: dashed }
+.chip.danger.on { border-style: solid; border-color: rgba(210, 153, 34, .55); color: var(--yellow); background: rgba(210, 153, 34, .12) }
+
+/* 空态引导：点击即填入输入框 */
+.suggest { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 6px }
+.suggest-item {
+  text-align: left; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--surface); padding: 11px 13px; cursor: pointer;
+  transition: border-color var(--ease), transform var(--ease), background var(--ease);
+}
+.suggest-item:hover { border-color: var(--blue); background: var(--surface-2); transform: translateY(-1px) }
+.suggest-item .t { font-size: 12px; font-weight: 600; margin-bottom: 3px }
+.suggest-item .d { font-size: 11px; color: var(--dim); line-height: 1.6 }
+
+/* ── 启动骨架（Vue 挂载前不白屏） ─────────── */
+.boot { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px }
+.boot .logo {
+  width: 40px; height: 40px; border-radius: 11px;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.boot .t { color: var(--dim); font-size: 12px; letter-spacing: .5px }

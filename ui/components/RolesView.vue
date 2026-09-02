@@ -91,19 +91,31 @@ function toggleIn(list, id) {
     </h2>
     <div class="body">
       <table v-if="store.roles.length">
-        <tr><th>名称</th><th>ID</th><th>专用模型</th><th>Skill</th><th>MCP</th><th>状态</th><th>操作</th></tr>
-        <tr v-for="r in store.roles" :key="r.id">
-          <td>{{ r.name }}</td>
-          <td class="hint">{{ r.id }}</td>
-          <td>{{ modelName(r.modelId) }}</td>
-          <td class="wrap">{{ (r.skills || []).join(", ") || "—" }}</td>
-          <td class="wrap">{{ (r.mcpServers || []).join(", ") || "—" }}</td>
-          <td><span :class="['tag', r.enabled ? 't-on' : 't-off']">{{ r.enabled ? "启用" : "停用" }}</span></td>
-          <td class="nowrap">
-            <button class="sm" @click="openEdit(r)">编辑</button>
-            <button class="sm danger" @click="remove(r)">删</button>
-          </td>
-        </tr>
+        <thead>
+          <tr><th>名称</th><th>ID</th><th>专用模型</th><th>Skill</th><th>MCP</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in store.roles" :key="r.id">
+            <td><b>{{ r.name }}</b></td>
+            <td class="hint"><code>{{ r.id }}</code></td>
+            <td class="nowrap">{{ modelName(r.modelId) }}</td>
+            <td>
+              <span v-for="s in (r.skills || [])" :key="s" class="tag t-info">{{ s }}</span>
+              <span v-if="!(r.skills || []).length" class="hint">—</span>
+            </td>
+            <td>
+              <span v-for="s in (r.mcpServers || [])" :key="s" class="tag t-hold">{{ s }}</span>
+              <span v-if="!(r.mcpServers || []).length" class="hint">—</span>
+            </td>
+            <td><span :class="['tag', r.enabled ? 't-on' : 't-off']">{{ r.enabled ? "启用" : "停用" }}</span></td>
+            <td class="nowrap">
+              <div class="btn-group">
+                <button class="sm" @click="openEdit(r)">编辑</button>
+                <button class="sm danger" @click="remove(r)">删除</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
       </table>
       <div v-else class="empty">暂无角色</div>
       <div class="hint" style="margin-top:9px">
