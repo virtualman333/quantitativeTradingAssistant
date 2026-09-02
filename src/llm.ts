@@ -26,6 +26,18 @@ function extractJson(text: string): string {
   return s === -1 || e === -1 ? body : body.slice(s, e + 1);
 }
 
+/**
+ * 只支持流式协议的网关（如 copilot.tencent.com 会返回
+ * 400 / 11101 "Non-stream chat request is currently not supported"）：
+ * 首次探测到后记下模型 id，后续该模型直接走流式，不再浪费一次失败请求。
+ */
+const streamOnlyModels = new Set<string>();
+
+/** 判断响应是否属于「网关拒绝非流式请求」 */
+function isNonStreamRejected(status: number, body: string): boolean {
+  return status === 400 && /non-?stream|11101|only\s+stream|只支持流式|仅支持流式/i.test(body);
+}
+
 // ── OpenAI 兼容（覆盖 DeepSeek / OpenAI / 各类中转 / 本地 vLLM） ──
 class OpenAICompatProvider implements LlmProvider {
   readonly name = "openai-compatible";
@@ -33,31 +45,60 @@ class OpenAICompatProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
+  /**
+   * 非流式取一次完整结果。
+   * 大多数网关非流式更省事，但对「只吃流式」的网关会自动回退（decide 层已处理）。
+   */
   async decide(sys: string, user: string): Promise<string> {
-    const base = (this.cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
-    const r = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.cfg.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.cfg.model,
-        temperature: this.cfg.temperature ?? 0.2,
-        max_tokens: this.cfg.maxTokens ?? 2000,
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-    if (!r.ok) {
+    const msgs: ChatMessage[] = [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ];
+
+    let rejectedBody = "";
+    if (!streamOnlyModels.has(this.cfg.id)) {
+      const base = (this.cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
+      const r = await fetch(`${base}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.cfg.model,
+          temperature: this.cfg.temperature ?? 0.2,
+          max_tokens: this.cfg.maxTokens ?? 2000,
+          messages: msgs,
+        }),
+      });
+      if (r.ok) {
+        const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+        return extractJson(j.choices?.[0]?.message?.content ?? "");
+      }
       const t = await r.text().catch(() => "");
-      throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
+      // 不是「拒绝非流式」就按原样抛错，避免掩盖真正的鉴权/参数问题
+      if (!isNonStreamRejected(r.status, t)) {
+        throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
+      }
+      streamOnlyModels.add(this.cfg.id);
+      rejectedBody = t.slice(0, 120);
     }
-    const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-    const c = j.choices?.[0]?.message?.content ?? "";
-    return extractJson(c);
+
+    // 回退：用流式请求把内容拼回来，调用方无感知
+    let text = "";
+    let streamErr = "";
+    for await (const c of openaiChat(this.cfg, msgs, [])) {
+      if (c.type === "delta") text += c.text;
+      else if (c.type === "error") streamErr = c.message;
+    }
+    if (!text) {
+      throw new Error(
+        streamErr
+          ? `${this.cfg.name} 流式调用失败：${streamErr.slice(0, 200)}`
+          : `${this.cfg.name} 返回为空（非流式被拒：${rejectedBody}）`
+      );
+    }
+    return extractJson(text);
   }
 }
 
