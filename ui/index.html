@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>OKX 交易 Agent</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2129; --border:#2d333b;
+    --text:#e6edf3; --dim:#8b949e; --green:#3fb950; --red:#f85149;
+    --yellow:#d29922; --blue:#58a6ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:13px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;background:var(--panel);border-bottom:1px solid var(--border)}
+  header h1{font-size:15px;font-weight:600}
+  .badge{padding:3px 10px;border-radius:11px;font-size:12px;font-weight:600}
+  .run{background:rgba(63,185,80,.16);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+  .stop{background:rgba(139,148,158,.14);color:var(--dim);border:1px solid var(--border)}
+  .spacer{flex:1}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+  button:hover{border-color:var(--blue);color:var(--blue)}
+  button.primary{background:rgba(88,166,255,.14);border-color:rgba(88,166,255,.45);color:var(--blue)}
+  button.danger{color:var(--red);border-color:rgba(248,81,73,.4)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .tabs{display:flex;gap:2px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--border)}
+  .tab{padding:9px 16px;cursor:pointer;color:var(--dim);border-bottom:2px solid transparent;font-size:13px}
+  .tab.active{color:var(--text);border-bottom-color:var(--blue)}
+  main{padding:16px 18px;height:calc(100vh - 96px);overflow:auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+  .card .k{color:var(--dim);font-size:11px;letter-spacing:.4px}
+  .card .v{font-size:19px;font-weight:600;margin-top:3px}
+  .up{color:var(--green)} .down{color:var(--red)}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;margin-bottom:14px}
+  .panel h2{font-size:13px;padding:10px 14px;border-bottom:1px solid var(--border);color:var(--dim);font-weight:600}
+  .panel .body{padding:12px 14px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--border)}
+  th{color:var(--dim);font-weight:500;font-size:11px}
+  #log{background:#0a0d12;border:1px solid var(--border);border-radius:6px;padding:10px;
+    height:330px;overflow:auto;font:11px/1.65 Consolas,Monaco,monospace;white-space:pre-wrap;color:#b9c3ce}
+  .row{display:flex;gap:12px;align-items:center;margin-bottom:11px;flex-wrap:wrap}
+  label{width:96px;color:var(--dim);font-size:12px;flex-shrink:0}
+  input,select{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    padding:6px 10px;border-radius:5px;font-size:12px;flex:1;min-width:160px;max-width:420px}
+  input:focus,select:focus{outline:none;border-color:var(--blue)}
+  .hint{color:var(--dim);font-size:11px;margin-top:3px}
+  .chk{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .chk label{width:auto}
+  .chk input{width:auto;flex:none;min-width:auto}
+  .alert{background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.35);
+    color:var(--yellow);padding:9px 12px;border-radius:6px;margin-bottom:12px;font-size:12px}
+  .empty{color:var(--dim);padding:16px;text-align:center;font-size:12px}
+  .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px}
+  .t-buy{background:rgba(63,185,80,.15);color:var(--green)}
+  .t-sell{background:rgba(248,81,73,.15);color:var(--red)}
+  .t-hold{background:rgba(139,148,158,.15);color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <h1>OKX 交易 Agent</h1>
+  <span id="status" class="badge stop">未运行</span>
+  <span class="spacer"></span>
+  <button id="btnOnce">跑一轮</button>
+  <button id="btnStart" class="primary">启动服务</button>
+  <button id="btnStop" class="danger" disabled>停止</button>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-t="dash">总览</div>
+  <div class="tab" data-t="log">日志</div>
+  <div class="tab" data-t="cfg">设置</div>
+</div>
+
+<main>
+  <!-- 总览 -->
+  <div id="dash">
+    <div id="alerts"></div>
+    <div class="cards" id="cards"></div>
+
+    <div class="panel">
+      <h2>持仓</h2>
+      <div class="body"><div id="positions"></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>最近决策</h2>
+      <div class="body"><div id="decision"></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>专家观点</h2>
+      <div class="body"><div id="experts"></div></div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div id="logview" style="display:none">
+    <div class="row">
+      <button id="btnClear">清空</button>
+      <span class="hint">实时显示 agent 服务输出</span>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <!-- 设置 -->
+  <div id="cfgview" style="display:none">
+    <div class="panel">
+      <h2>模型配置</h2>
+      <div class="body">
+        <div class="row"><label>服务商</label>
+          <select id="cProvider">
+            <option value="mock">mock（联调，不联网不耗token）</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="anthropic">Anthropic / Claude</option>
+            <option value="openai">OpenAI（含中转）</option>
+          </select>
+        </div>
+        <div class="row"><label>API Key</label>
+          <input id="cKey" type="password" placeholder="填写后即可真实决策" />
+        </div>
+        <div class="row"><label>模型</label>
+          <input id="cModel" placeholder="留空用默认" />
+        </div>
+        <div class="hint">Key 只保存在本机 agent/electron/config.json，不上传。</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>运行参数</h2>
+      <div class="body">
+        <div class="row"><label>轮次间隔</label>
+          <input id="cInterval" type="number" min="1" max="120" />
+          <span class="hint">分钟</span>
+        </div>
+        <div class="row"><label>常用专家</label>
+          <div class="chk" id="cExperts"></div>
+        </div>
+        <div class="row"><label></label>
+          <div class="chk">
+            <input type="checkbox" id="cAuto" /><label for="cAuto">启动时自动运行服务</label>
+            <input type="checkbox" id="cDry" /><label for="cDry">演练模式（不下真实单）</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btnSave" class="primary">保存配置</button>
+      <button id="btnOpenState">打开 state 目录</button>
+      <button id="btnOpenLogs">打开日志目录</button>
+    </div>
+    <div class="hint" style="margin-top:8px">演练模式开启时不会真正下单，适合先观察决策质量。</div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = window.api;
+let cfg = null;
+
+// ── 标签切换 ──
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const k = t.dataset.t;
+    $('#dash').style.display = k === 'dash' ? '' : 'none';
+    $('#logview').style.display = k === 'log' ? '' : 'none';
+    $('#cfgview').style.display = k === 'cfg' ? '' : 'none';
+  };
+});
+
+const fmt = (n, d = 2) => (n == null || isNaN(n)) ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
+const cls = n => n > 0 ? 'up' : n < 0 ? 'down' : '';
+
+// ── 渲染总览 ──
+async function refresh() {
+  try {
+    const s = await api.getStatus();
+    const rt = s.runtime || {};
+    const rd = s.latestRound || {};
+
+    $('#status').textContent = s.agentRunning ? '运行中' : '未运行';
+    $('#status').className = 'badge ' + (s.agentRunning ? 'run' : 'stop');
+    $('#btnStart').disabled = s.agentRunning;
+    $('#btnStop').disabled = !s.agentRunning;
+
+    // 告警
+    let al = '';
+    if (s.pending && s.pending.length)
+      al += `<div class="alert">⏸ 有 ${s.pending.length} 笔决策等待人工确认：${s.pending.join('、')}</div>`;
+    if (cfg && cfg.llmProvider === 'mock')
+      al += `<div class="alert">当前为 mock 模式，不会真正调用模型。到「设置」填 API Key 后即可真实决策。</div>`;
+    $('#alerts').innerHTML = al;
+
+    // 卡片
+    const pos = rd.positions || [];
+    const upl = pos.reduce((a, p) => a + (Number(p.upl) || 0), 0);
+    $('#cards').innerHTML = `
+      <div class="card"><div class="k">权益 (USDT)</div><div class="v">${fmt(rd.equity_usdt)}</div></div>
+      <div class="card"><div class="k">可用</div><div class="v">${fmt(rd.available_usdt)}</div></div>
+      <div class="card"><div class="k">持仓浮盈</div><div class="v ${cls(upl)}">${upl >= 0 ? '+' : ''}${fmt(upl)}</div></div>
+      <div class="card"><div class="k">持仓数</div><div class="v">${pos.length}</div></div>
+      <div class="card"><div class="k">最近轮次</div><div class="v">${rd.round_id || rt.last_round_id || '—'}</div></div>
+      <div class="card"><div class="k">本日止损</div><div class="v">${rt.day_sl_count || 0}</div></div>`;
+
+    // 持仓表
+    $('#positions').innerHTML = pos.length ? `
+      <table><tr><th>标的</th><th>方向</th><th>张数</th><th>开仓价</th><th>标记价</th><th>杠杆</th><th>浮盈</th></tr>
+      ${pos.map(p => `<tr>
+        <td>${p.instrument}</td>
+        <td><span class="tag ${p.side === 'long' ? 't-buy' : 't-sell'}">${p.side === 'long' ? '多' : '空'}</span></td>
+        <td>${p.size_contracts}</td><td>${fmt(p.entry)}</td><td>${fmt(p.mark)}</td>
+        <td>${p.leverage}x</td>
+        <td class="${cls(p.upl)}">${p.upl >= 0 ? '+' : ''}${fmt(p.upl)}</td></tr>`).join('')}
+      </table>` : '<div class="empty">暂无持仓</div>';
+
+    // 决策
+    $('#decision').innerHTML = rd.decision
+      ? `<div style="white-space:pre-wrap;font-size:12px;line-height:1.75">${escapeHtml(rd.decision)}</div>`
+      : '<div class="empty">暂无决策记录</div>';
+
+    // 专家
+    const ex = rd.experts || [];
+    $('#experts').innerHTML = ex.length ? `
+      <table><tr><th>专家</th><th>立场</th><th>结论</th></tr>
+      ${ex.map(e => `<tr><td>${e.expert}</td>
+        <td><span class="tag ${stanceCls(e.stance)}">${stanceTxt(e.stance)}</span></td>
+        <td>${escapeHtml((e.summary || '').slice(0, 220))}</td></tr>`).join('')}
+      </table>` : '<div class="empty">暂无专家观点（需配置真实模型后产生）</div>';
+
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+const escapeHtml = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const stanceCls = s => s === 'bullish' ? 't-buy' : s === 'bearish' ? 't-sell' : 't-hold';
+const stanceTxt = s => ({bullish:'看多', bearish:'看空', neutral:'中性', abstain:'弃权'}[s] || s);
+
+// ── 按钮 ──
+$('#btnStart').onclick = async () => { await api.startAgent(); setTimeout(refresh, 600); };
+$('#btnStop').onclick  = async () => { await api.stopAgent();  setTimeout(refresh, 400); };
+$('#btnOnce').onclick  = async () => {
+  $('#btnOnce').disabled = true; $('#btnOnce').textContent = '运行中…';
+  try { await api.runOnce(); } finally {
+    $('#btnOnce').disabled = false; $('#btnOnce').textContent = '跑一轮';
+    refresh();
+  }
+};
+$('#btnClear').onclick = () => { $('#log').textContent = ''; };
+$('#btnOpenState').onclick = () => api.openFolder('state');
+$('#btnOpenLogs').onclick  = () => api.openFolder('logs');
+
+$('#btnSave').onclick = async () => {
+  cfg.llmProvider = $('#cProvider').value;
+  cfg.apiKey = $('#cKey').value;
+  cfg.model = $('#cModel').value;
+  cfg.intervalMin = Number($('#cInterval').value) || 5;
+  cfg.autoStart = $('#cAuto').checked;
+  cfg.dryRun = $('#cDry').checked;
+  cfg.experts = [...document.querySelectorAll('#cExperts input:checked')].map(i => i.value);
+  await api.setConfig(cfg);
+  alert('已保存。重启服务后生效。');
+};
+
+// ── 初始化 ──
+async function init() {
+  cfg = await api.getConfig();
+  $('#cProvider').value = cfg.llmProvider;
+  $('#cKey').value = cfg.apiKey || '';
+  $('#cModel').value = cfg.model || '';
+  $('#cInterval').value = cfg.intervalMin;
+  $('#cAuto').checked = !!cfg.autoStart;
+  $('#cDry').checked = !!cfg.dryRun;
+
+  $('#cExperts').innerHTML = ['trading','news','factor','risk'].map(e =>
+    `<input type="checkbox" id="ex_${e}" value="${e}" ${(cfg.experts||[]).includes(e)?'checked':''}>
+     <label for="ex_${e}">${e}</label>`).join('');
+
+  (await api.getLogs()).forEach(l => appendLog(l));
+  api.onLog(appendLog);
+  api.onStatus(() => refresh());
+  refresh();
+  setInterval(refresh, 8000);
+}
+
+function appendLog(line) {
+  const el = $('#log');
+  el.textContent += line + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+init();
+</script>
+</body>
+</html>

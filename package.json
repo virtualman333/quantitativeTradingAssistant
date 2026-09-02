@@ -4,22 +4,63 @@
   "private": true,
   "description": "OKX 自主交易专用 Agent（TS 常驻进程，5 分钟自驱决策，不依赖聊天会话）",
   "type": "module",
+  "main": "dist/electron/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"const f=require('fs'),p=require('path');f.mkdirSync('dist/ui',{recursive:true});f.copyFileSync('ui/index.html','dist/ui/index.html')\"",
     "dev": "tsx src/main.ts",
-    "start": "node dist/main.js",
+    "start": "node dist/src/main.js",
     "once": "tsx src/main.ts --once",
-    "dry": "tsx src/main.ts --once --dry-run"
+    "dry": "tsx src/main.ts --once --dry-run",
+    "ui": "npm run build && electron .",
+    "ui:dev": "tsx electron/main.ts",
+    "dist": "npm run build && electron-builder --win --x64"
   },
   "dependencies": {
-    "zod": "^3.24.1"
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.13",
+    "@langchain/mcp-adapters": "^1.1.4",
+    "@langchain/openai": "^1.5.11",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "electron": "^44.1.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
   "engines": {
     "node": ">=20"
+  },
+  "build": {
+    "appId": "com.local.okx-trader-agent",
+    "productName": "OKX交易Agent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "ui/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "../scripts", "to": "scripts" },
+      { "from": "../AGENT_TRADING_RULES.md", "to": "AGENT_TRADING_RULES.md" }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": ""
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

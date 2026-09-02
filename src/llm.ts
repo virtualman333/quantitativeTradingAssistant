@@ -1,230 +1,162 @@
 /**
- * llm.ts —— 可插拔 LLM 适配器
+ * llm.ts —— 多模型适配层
  *
- * 用户选择：「先写框架，key 后续配」。
- * 因此这里定义统一接口 + 三个 provider 实现，key 全部从环境变量读取。
- * 配好 key 后无需改代码，设置 LLM_PROVIDER 即可切换。
+ * 支持（用户需求 1、2）：
+ *   1. 自定义 LLM 接口：任意 OpenAI 兼容端点（DeepSeek/OpenAI/通义/ moonshot/
+ *      本地 vLLM / Ollama 中转 / 各类网关）+ Anthropic 原生 + mock
+ *   2. 多模型配置并存，可在界面增删改
+ *   3. 模型切换：全局默认模型、主 Agent 专用模型、每个角色单独指定模型
  *
- * 环境变量：
- *   LLM_PROVIDER=deepseek|anthropic|openai|mock   （默认 mock）
- *   DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY
- *   LLM_MODEL=<可选，覆盖默认模型>
- *
- * mock 模式：不联网，用于联调流程（取数→决策→Guard→执行）而不消耗 token。
- *            mock 会输出一个保守的 HOLD 决策，便于验证链路。
+ * 统一的 provider 接口只有 decide(system, user) => string，
+ * 上层（专家/主 Agent）不关心底层是哪个厂。
  */
-import type { Decision } from "./types.js";
+import type { ModelConfig } from "./store.js";
 
 export interface LlmProvider {
   readonly name: string;
+  readonly modelId: string;
   decide(systemPrompt: string, userPrompt: string): Promise<string>;
 }
 
-/** 决策系统提示词骨架（章程要点由上层注入） */
-export const SYSTEM_PROMPT_SKELETON = `你是 OKX 永续合约自主交易系统的决策引擎。
-
-【唯一目标】账户长期稳定盈利。不交易是一种合法决策，但"不交易"同样需要理由。
-
-【输出格式】只输出一个 JSON 对象，不要任何解释文字、不要 markdown 代码块：
-{
-  "decision": "OPEN" | "HOLD" | "CLOSE" | "STANDBY",
-  "riskTier": "BASE" | "AGG" | "DEF",
-  "summary": "人读摘要（100-300字）",
-  "intents": [
-    {
-      "inst": "BTC-USDT-SWAP",
-      "action": "hold" | "long" | "short" | "close",
-      "riskPct": 0.012,
-      "slDist": 712.3,
-      "tpRR": 2.0,
-      "reason": "决策理由（必填，不少于5字）",
-      "deviations": [
-        {"baseline":"...","actual":"...","rationale":"...","falsifier":"...","riskDelta":"..."}
-      ]
-    }
-  ]
-}
-
-【硬性要求】
-- riskPct 不得超过 0.025（2.5%），超过会被系统拒绝。
-- 开仓必须给出 slDist（止损距离，价格单位），否则被拒绝。
-- 偏离章程基准时，deviations 五项必须齐全，尤其 falsifier（可证伪预判）。
-- 只能交易 BTC-USDT-SWAP 与 ETH-USDT-SWAP。
-`;
-
 function extractJson(text: string): string {
-  // 容错：LLM 有时会包 ```json 代码块
   const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const body = m ? m[1] : text;
   const s = body.indexOf("{");
   const e = body.lastIndexOf("}");
-  if (s === -1 || e === -1) throw new Error("LLM 输出中未找到 JSON");
-  return body.slice(s, e + 1);
+  return s === -1 || e === -1 ? body : body.slice(s, e + 1);
 }
 
-abstract class BaseProvider implements LlmProvider {
-  abstract readonly name: string;
-  protected abstract call(sys: string, user: string): Promise<string>;
-  async decide(systemPrompt: string, userPrompt: string): Promise<string> {
-    const raw = await this.call(systemPrompt, userPrompt);
-    return extractJson(raw);
+// ── OpenAI 兼容（覆盖 DeepSeek / OpenAI / 各类中转 / 本地 vLLM） ──
+class OpenAICompatProvider implements LlmProvider {
+  readonly name = "openai-compatible";
+  constructor(private cfg: ModelConfig) {}
+  get modelId() {
+    return this.cfg.id;
   }
-}
-
-/** DeepSeek（OpenAI 兼容协议） */
-class DeepSeekProvider extends BaseProvider {
-  readonly name = "deepseek";
-  private get key() {
-    return process.env.DEEPSEEK_API_KEY ?? "";
-  }
-  private get model() {
-    return process.env.LLM_MODEL ?? "deepseek-chat";
-  }
-  async call(sys: string, user: string): Promise<string> {
-    if (!this.key) throw new Error("DEEPSEEK_API_KEY 未设置");
-    const r = await fetch("https://api.deepseek.com/chat/completions", {
+  async decide(sys: string, user: string): Promise<string> {
+    const base = (this.cfg.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
+    const r = await fetch(`${base}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${this.key}`,
+        Authorization: `Bearer ${this.cfg.apiKey}`,
       },
       body: JSON.stringify({
-        model: this.model,
-        temperature: 0.2,
+        model: this.cfg.model,
+        temperature: this.cfg.temperature ?? 0.2,
+        max_tokens: this.cfg.maxTokens ?? 2000,
         messages: [
           { role: "system", content: sys },
           { role: "user", content: user },
         ],
       }),
     });
-    if (!r.ok) throw new Error(`DeepSeek HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
+    }
     const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-    return j.choices?.[0]?.message?.content ?? "";
+    const c = j.choices?.[0]?.message?.content ?? "";
+    return extractJson(c);
   }
 }
 
-/** Anthropic Claude */
-class AnthropicProvider extends BaseProvider {
+// ── Anthropic 原生 ──
+class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
-  private get key() {
-    return process.env.ANTHROPIC_API_KEY ?? "";
+  constructor(private cfg: ModelConfig) {}
+  get modelId() {
+    return this.cfg.id;
   }
-  private get model() {
-    return process.env.LLM_MODEL ?? "claude-sonnet-4-20250514";
-  }
-  async call(sys: string, user: string): Promise<string> {
-    if (!this.key) throw new Error("ANTHROPIC_API_KEY 未设置");
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
+  async decide(sys: string, user: string): Promise<string> {
+    const base = (this.cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
+    const r = await fetch(`${base}/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": this.key,
+        "x-api-key": this.cfg.apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: this.model,
-        max_tokens: 2000,
+        model: this.cfg.model,
+        max_tokens: this.cfg.maxTokens ?? 2000,
+        temperature: this.cfg.temperature ?? 0.2,
         system: sys,
         messages: [{ role: "user", content: user }],
       }),
     });
-    if (!r.ok) throw new Error(`Anthropic HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
+    }
     const j = (await r.json()) as { content?: { text?: string }[] };
-    return j.content?.[0]?.text ?? "";
+    return extractJson(j.content?.[0]?.text ?? "");
   }
 }
 
-/** OpenAI 兼容（含各类中转） */
-class OpenAIProvider extends BaseProvider {
-  readonly name = "openai";
-  private get key() {
-    return process.env.OPENAI_API_KEY ?? "";
-  }
-  private get model() {
-    return process.env.LLM_MODEL ?? "gpt-4o-mini";
-  }
-  private get base() {
-    return process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
-  }
-  async call(sys: string, user: string): Promise<string> {
-    if (!this.key) throw new Error("OPENAI_API_KEY 未设置");
-    const r = await fetch(`${this.base}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.key}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-    if (!r.ok) throw new Error(`OpenAI HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-    return j.choices?.[0]?.message?.content ?? "";
-  }
-}
-
-/** Mock：不联网，用于联调流程 */
+// ── mock（联调，不联网） ──
 class MockProvider implements LlmProvider {
   readonly name = "mock";
-  async decide(): Promise<string> {
+  constructor(private cfg: ModelConfig) {}
+  get modelId() {
+    return this.cfg.id;
+  }
+  async decide(sys: string): Promise<string> {
+    if (sys.includes("调度模块")) {
+      return JSON.stringify({ experts: ["trading", "factor"] });
+    }
+    if (sys.includes("主 Agent")) {
+      return JSON.stringify({
+        decision: "HOLD",
+        riskTier: "BASE",
+        summary: "[mock] 未配置真实模型。请在「设置-模型」添加 API Key 后切换，即可真实决策。",
+        conflicts: [],
+        intents: [
+          { inst: "BTC-USDT-SWAP", action: "hold", reason: "[mock] 无真实模型" },
+          { inst: "ETH-USDT-SWAP", action: "hold", reason: "[mock] 无真实模型" },
+        ],
+        needsApproval: false,
+      });
+    }
     return JSON.stringify({
-      decision: "HOLD",
-      riskTier: "BASE",
-      summary: "[mock] 未配置 LLM key，保守观望。配置 key 后本模块将输出真实决策。",
-      intents: [
-        {
-          inst: "BTC-USDT-SWAP",
-          action: "hold",
-          reason: "[mock] 无 LLM key，默认观望",
-        },
-        {
-          inst: "ETH-USDT-SWAP",
-          action: "hold",
-          reason: "[mock] 无 LLM key，默认观望",
-        },
-      ],
+      stance: "abstain",
+      confidence: 0,
+      summary: "[mock] 未配置真实模型，专家弃权",
+      advice: {},
+      flags: ["mock 模式"],
     });
   }
 }
 
-export function createLlmProvider(): LlmProvider {
-  const which = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
-  switch (which) {
-    case "deepseek":
-      return new DeepSeekProvider();
+/** 按模型配置创建 provider */
+export function createProvider(cfg: ModelConfig): LlmProvider {
+  switch (cfg.provider) {
     case "anthropic":
-      return new AnthropicProvider();
-    case "openai":
-      return new OpenAIProvider();
+      return new AnthropicProvider(cfg);
     case "mock":
+      return new MockProvider(cfg);
+    case "openai-compatible":
     default:
-      return new MockProvider();
+      return new OpenAICompatProvider(cfg);
   }
 }
 
-/** 解析 LLM 输出为 Decision，失败返回 null */
-export function parseDecision(jsonText: string, roundId: string): Decision | null {
+/**
+ * 测试某个模型配置是否可用（界面「测试连接」按钮用）。
+ * 返回 {ok, latencyMs, reply?, error?}
+ */
+export async function testModel(cfg: ModelConfig): Promise<{
+  ok: boolean;
+  latencyMs: number;
+  reply?: string;
+  error?: string;
+}> {
+  const t0 = Date.now();
   try {
-    const j = JSON.parse(jsonText) as Partial<Decision>;
-    if (!j.decision || !Array.isArray(j.intents)) return null;
-    return {
-      roundId,
-      decision: j.decision,
-      intents: j.intents,
-      summary: j.summary ?? "",
-      riskTier: j.riskTier ?? "BASE",
-      needsApproval: false,
-      rawText: jsonText,
-    };
-  } catch {
-    return null;
+    const p = createProvider(cfg);
+    const r = await p.decide("You reply with a short JSON only.", 'Reply exactly: {"ok":true}');
+    return { ok: true, latencyMs: Date.now() - t0, reply: r.slice(0, 200) };
+  } catch (e) {
+    return { ok: false, latencyMs: Date.now() - t0, error: String(e).slice(0, 300) };
   }
 }
-
-export { SYSTEM_PROMPT_SKELETON as SYSTEM_PROMPT };

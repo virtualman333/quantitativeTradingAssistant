@@ -6,7 +6,7 @@
  * 理由：这些脚本踩过的坑（Windows .cmd 垫片、返回结构 result.data.data、
  *       OCO 必填 ordType、clOrdId 禁下划线）都已固化，重写等于重踩一遍。
  */
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,8 +17,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** 项目根目录（agent/ 的上一级） */
 export const ROOT = path.resolve(__dirname, "..", "..");
 
+/**
+ * 注意：不能用 process.execPath —— 在 tsx 下它是 node.exe，拿去跑 .py 会
+ * 报 "SyntaxError: Invalid or unexpected token"（实测踩过）。
+ * 必须用真正的 python 解释器；Windows 上依次尝试 python / py / python3。
+ */
+let _pyCmd: string | null = null;
+function pyCommand(): string {
+  if (_pyCmd) return _pyCmd;
+  for (const c of ["python", "py", "python3"]) {
+    try {
+      execFileSync(c, ["-c", "import sys;sys.stdout.write('ok')"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 15_000,
+      });
+      _pyCmd = c;
+      return c;
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  _pyCmd = "python";
+  return _pyCmd;
+}
+
 export function runPy(script: string, args: string[], timeoutMs = 120_000): Promise<string> {
-  return execFileAsync(process.execPath, [path.join("scripts", script), ...args], {
+  return execFileAsync(pyCommand(), [path.join("scripts", script), ...args], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: timeoutMs,
@@ -95,12 +120,12 @@ export async function genClOrdId(
 /** 运行 market_scan.py，返回解析后的行情 JSON */
 export async function fetchMarket(): Promise<{ ok: boolean; data: unknown }> {
   try {
-    const out = await runPy("market_scan.py", ["--save", path.join("state", "snapshots")], 180_000);
+    // market_scan.py 默认直接把 JSON 打到 stdout（实测 --save 参数不符，会失败）
+    const out = await runPy("market_scan.py", [], 180_000);
     try {
       return { ok: true, data: JSON.parse(out) };
     } catch {
-      // market_scan 可能只写文件不输出 JSON，此时读最新快照
-      return { ok: true, data: {} };
+      return { ok: false, data: `market_scan 输出非 JSON: ${out.slice(0, 200)}` };
     }
   } catch (e) {
     return { ok: false, data: String(e) };
@@ -118,8 +143,20 @@ export interface RawAccount {
 export async function fetchAccount(): Promise<RawAccount> {
   const out: RawAccount = { equityUsdt: null, availableUsdt: null, positions: [], algoOrders: [] };
 
+  // mcpCall 返回的 data 其实是 j.result，结构：{tool,ok,data:{endpoint,requestTime,data:[...]}}
+  // 所以真正数组在 result.data.data —— 三层，别再数错（实测踩过）
+  const rowsOf = (r: { data: unknown }): Record<string, unknown>[] => {
+    let cur = r.data as Record<string, unknown> | unknown[] | null;
+    for (let i = 0; i < 3; i++) {
+      if (Array.isArray(cur)) return cur as Record<string, unknown>[];
+      if (!cur || typeof cur !== "object") return [];
+      cur = (cur as Record<string, unknown>).data as Record<string, unknown> | unknown[] | null;
+    }
+    return [];
+  };
+
   const bal = await mcpCall("demo", "account_get_balance", { ccy: "USDT" });
-  for (const row of unwrap(bal.data)) {
+  for (const row of rowsOf(bal)) {
     const details = row.details;
     if (!Array.isArray(details)) continue;
     for (const d of details as Record<string, unknown>[]) {
@@ -132,10 +169,10 @@ export async function fetchAccount(): Promise<RawAccount> {
   }
 
   const pos = await mcpCall("demo", "swap_get_positions", {});
-  out.positions = unwrap(pos.data);
+  out.positions = rowsOf(pos);
 
   const algo = await mcpCall("demo", "swap_get_algo_orders", { status: "pending" });
-  out.algoOrders = unwrap(algo.data);
+  out.algoOrders = rowsOf(algo);
 
   return out;
 }
@@ -218,7 +255,9 @@ export async function confirmAlgo(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const r = await mcpCall("demo", "swap_get_algo_orders", { status: "pending" });
-    for (const a of unwrap(r.data)) {
+    const d = r.data as Record<string, unknown> | null;
+    const arr = Array.isArray(d?.data) ? (d!.data as Record<string, unknown>[]) : [];
+    for (const a of arr) {
       if (a.instId === inst) return true;
     }
     await new Promise((res) => setTimeout(res, 2000));
