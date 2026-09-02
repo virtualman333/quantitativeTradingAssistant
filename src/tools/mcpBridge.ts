@@ -9,7 +9,7 @@
  * 每个交易所就是 store 里的一个 MCP server（如 okx-trade-mcp / binance-mcp），
  * 它们的字段映射由各自 server 负责，本层不关心，只负责「连上 + 过滤只读 + 交给 LLM」。
  */
-import { connectMcp, type McpTool } from "./mcp.js";
+import { connectMcp, type McpTool } from "../mcp.js";
 import type { Tool, ToolResult } from "./types.js";
 
 /**
