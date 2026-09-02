@@ -23,15 +23,22 @@
   - `electron/main.ts`：启动即拉起 agent 子进程（tsx src/main.ts），UI 直接可用；config.json 在 agent/electron/（旧简单配置）与 store.json（新，多模型）并存，注意两者未完全打通。
 - **前端（2026-09-02 重写）**：Vite + Vue3 SFC 构建模式（`ui/`：main.js、App.vue、store/index.js、lib/{api,feedback,format}.js、components/*.vue、styles/main.css），产物 dist/ui 由 Electron 用 file:// 加载（vite base 必须 "./"）。`npm run ui:dev` = Vite dev server(5173) + Electron（UI_DEV=1）。
 - **UI 约定**：所有颜色/圆角/阴影只在 `ui/styles/main.css` 的 `:root` 变量里定义，组件不写死色值；布局高度一律用 flex 分配（`#app` 列向 flex，main `flex:1;min-height:0`），禁止 `calc(100vh - 常数)` —— 页签换行时会错位。表格统一 `thead/tbody`，表头 sticky。
-- **LLM 两条调用路径，别混**：`decide()`（专家/调度/主 Agent/界面「测试连接」）是非流式请求，`streamChat()`（对话页）是流式。遇到「只支持流式」的网关（如 copilot.tencent.com/v2 的 Hy3，会返回 400 / 11101 "Non-stream chat request is currently not supported"）只有 decide 会挂。llm.ts 已内置自动回退：探测到该类响应即改走流式并记住该模型 id。
+- **LLM 两条调用路径，别混**：`decide()`（专家/调度/主 Agent/界面「测试连接」）是非流式请求，`streamChat()`（对话页）是流式。遇到「只支持流式」的网关（如 copilot.tencent.com/v2 的 Hy3，会返回 400 / 11101 "Non-stream chat request is currently not supported"）只有 decide 会挂。llm.ts 已内置自动回退：探测到该类响应即改走流式并记住该模型 id；默认 max_tokens=16000（推理模型思考链吃预算，正文被截断时翻倍重试兜底），三处 provider（OpenAI 兼容/Anthropic/Claude 原生）统一引用该常量。
 - **界面文案一律中文**（含 Electron 原生部分）：顶层菜单在 `electron/main.ts` 的 `buildMenu()`、右键菜单在 `attachContextMenu()`。Electron 的 `role` 只管行为不负责翻译，label 必须自己写中文；`app.name` 要在 app ready 前设置。
 - **对话与工具**：src/chat.ts（ReAct 循环，事件 delta/tool_start/tool_result/confirm/done/error）+ src/tools/*（read_file/write_file/list_dir/search_files/web_search/web_fetch/get_status/list_rounds/run_skill/run_round/bash，路径沙箱 PROJECT_ROOT，write/bash/run_round 需确认）。llm.ts 的 streamChat 统一 OpenAI function-calling 与 Anthropic tool_use。
 - **编译分三套**（勿合并）：tsconfig.json → src ESM；tsconfig.electron.json → electron/main.ts **ESM NodeNext**（主进程需 `await import("file://")` 动态加载 dist/src，CJS require 解析不了 file://）；tsconfig.preload.json → electron/preload.ts **CommonJS** 输出到 dist/preload（贴 `{"type":"commonjs"}`，见 scripts/postbuild.mjs）。preload 一旦是 ESM 就加载失败 → window.api 缺失 → 界面所有操作静默失效。
 - 运行：`LLM_PROVIDER=mock pnpm run once`（联调）；deepseek 需 DEEPSEEK_API_KEY；`pnpm dev` 常驻；`pnpm ui` = build + electron。**dry-run 是模式不是单轮；只有 --once 才跑一轮退出。**
 - 输出：每轮写 state/round_input_R*.json 再调 archive_round.py 落库；日志 logs/agent/YYYY-MM-DD.log；轮次时间格式必须 `YYYY-MM-DD HH:MM:SS`（archive_round.py strptime 严格解析，toLocaleString 会 ValueError）。
 
+## 多交易所持仓查看架构（2026-09-03 定）
+- 持仓查看 = **LLM 调各交易所 MCP server 的只读工具** → 归并成统一 schema（`src/types.ts` 的 `UnifiedAccount/UnifiedPosition/UnifiedOrder/PortfolioSnapshot`）。UI 不再为某交易所写死字段；扩展多所 = 在 MCP 页加一个 server，不动 UI/引擎。
+- 适配层即各交易所自己的 MCP server；agent 不写 per-exchange 代码。展示"两者都要"：结构化表格 + LLM 文字解读/风险。
+- 桥接必须**只读**：`src/tools/mcpBridge.ts` 的 `isReadOnlyMcpTool` 过滤写动词，写操作一律走 okx.ts 受控通道（守 L1-3）。新增交易所 server 时务必确认它只暴露/LLM 只调只读工具。
+- 汇总引擎 `src/portfolio.ts` 的 `summarizePortfolio()` 自带 ReAct 循环（复用 `llm.streamChat`），刻意与对话页 `chat.ts` 隔离，避免 MCP 工具污染全局对话工具集。
+
 ## 关键约定/偏好
 - 用户：完成开发任务后自动 git add + commit + push（push 因网络可能失败，本地提交即可）。
 - 用户：不要每改一点就验证/截图/编译检查；除非关键运行时错误或明确要求。
 - 章程序言规定 AI 自主决策但 L1 边界不可逾越；`agent/` 的 TS 实现即该章程的工程化版本。
+- **Electron IPC 坑**：渲染进程传给 `ipcRenderer.invoke` 的参数若为 Vue `reactive`/`ref` 代理(Proxy)，`structuredClone` 会抛 `An object could not be cloned`。已统一在 `electron/preload.ts` 的 `safeInvoke` 里对参数做 `JSON.parse(JSON.stringify())` 拍成纯对象，所有 `api.*` 调用都走它。
 - git 状态注意：agent 下 electron/、ui/、src/experts/graph/mcp/orchestrator/skills/store.ts、pnpm-lock/workspace 仍未提交（截至 2026-09-02）；package.json/main.ts/okx.ts/tsconfig.json 有修改；guard.ts 已删除（风控职责移入 orchestrator/graph 提示词 + L1 边界在类型/执行层）。

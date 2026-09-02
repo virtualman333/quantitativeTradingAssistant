@@ -42,6 +42,14 @@ contextBridge.exposeInMainWorld("api", {
   chatAbort: () => safeInvoke("chat:abort"),
   chatConfirm: (id: string, ok: boolean) => safeInvoke("chat:confirm", id, ok),
   chatClear: () => safeInvoke("chat:clear"),
+  // 持仓汇总（LLM 调 MCP 只读工具）
+  portfolioSummarize: (p?: { modelId?: string }) => safeInvoke("portfolio:summarize", p),
+  portfolioAbort: () => safeInvoke("portfolio:abort"),
+  onPortfolioEvent: (cb: (e: unknown) => void) => {
+    const h = (_e: unknown, ev: unknown) => cb(ev);
+    ipcRenderer.on("portfolio:event", h);
+    return () => ipcRenderer.removeListener("portfolio:event", h);
+  },
   onChatEvent: (cb: (e: unknown) => void) => {
     const h = (_e: unknown, ev: unknown) => cb(ev);
     ipcRenderer.on("chat:event", h);

@@ -102,3 +102,60 @@ export interface GuardResult {
   needsApproval: boolean;
   approvalReason?: string;
 }
+
+// ── 统一持仓 schema（多交易所归并，由 LLM 调 MCP 产出） ──
+// 设计：每个交易所暴露成各自的 MCP server，字段各异；LLM 调只读工具拉原始数据，
+// 归并成下面这份「交易所无关」的结构，UI 只认这份 schema，不再绑定任何单一交易所。
+
+/** 交易所无关的账户快照 */
+export interface UnifiedAccount {
+  exchange: string;          // MCP server id，如 okx-trade-mcp / binance-mcp
+  equityUsd: number | null;
+  availableUsd: number | null;
+  marginUsedUsd: number | null;
+  totalUplUsd: number | null;
+}
+
+/** 交易所无关的持仓 */
+export interface UnifiedPosition {
+  exchange: string;
+  instId: string;
+  market: "swap" | "spot" | "other";
+  side: "long" | "short" | "net";
+  size: number | null;
+  entryPrice: number | null;
+  markPrice: number | null;
+  notionalUsd: number | null;
+  upl: number | null;          // 未实现盈亏(USDT)
+  uplRatio: number | null;     // 浮盈比例 0~1
+  leverage: number | null;
+  liqPrice: number | null;
+  marginMode?: string;
+}
+
+/** 交易所无关的挂单（止损/止盈/限价等） */
+export interface UnifiedOrder {
+  exchange: string;
+  instId: string;
+  ordType: string;
+  side: "buy" | "sell" | "long" | "short" | "";
+  size: number | null;
+  slTrigger: number | null;
+  tpTrigger: number | null;
+  state: string;
+}
+
+/** 一次跨所汇总的完整结果 */
+export interface PortfolioSnapshot {
+  exchanges: string[];
+  accounts: UnifiedAccount[];
+  positions: UnifiedPosition[];
+  orders: UnifiedOrder[];
+  generatedAt: string;
+}
+
+/** LLM 汇总输出：结构化 schema + 文字解读/风险提示 */
+export interface PortfolioSummary {
+  schema: PortfolioSnapshot;
+  notes: string;
+}

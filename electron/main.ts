@@ -370,6 +370,7 @@ ipcMain.handle("chat:history", () => withStore((s) => s.getChatHistory()));
 ipcMain.handle("chat:clear", () => withStore((s) => s.clearChatHistory()));
 
 let chatAbort: AbortController | null = null;
+let portfolioAbort: AbortController | null = null;
 const pendingConfirms = new Map<string, (v: boolean) => void>();
 
 ipcMain.handle("chat:confirm", (_e, id: string, ok: boolean) => {
@@ -385,6 +386,31 @@ ipcMain.handle("chat:abort", () => {
   chatAbort?.abort();
   chatAbort = null;
   return { ok: true };
+});
+
+// ── 持仓汇总（LLM 调 MCP 只读工具 → 统一 schema，流式回传） ──
+ipcMain.handle("portfolio:abort", () => {
+  portfolioAbort?.abort();
+  portfolioAbort = null;
+  return { ok: true };
+});
+
+ipcMain.handle("portfolio:summarize", async (_e, p: { modelId?: string }) => {
+  if (portfolioAbort) return { ok: false, error: "已有持仓汇总在进行中，请先停止" };
+  try {
+    const mod = await loadDist<any>("portfolio.js");
+    const ac = new AbortController();
+    portfolioAbort = ac;
+    const send = (ev: unknown) => win?.webContents.send("portfolio:event", ev);
+    await mod.summarizePortfolio({ modelId: p?.modelId, signal: ac.signal, onEvent: send });
+    return { ok: true };
+  } catch (e) {
+    const msg = String((e as Error)?.message || e);
+    win?.webContents.send("portfolio:event", { type: "error", message: msg });
+    return { ok: false, error: msg };
+  } finally {
+    portfolioAbort = null;
+  }
 });
 
 ipcMain.handle(
