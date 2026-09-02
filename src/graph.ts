@@ -30,10 +30,10 @@
  *   · 内置 checkpoint，可断点续跑、可回放某一轮
  */
 import { Annotation, Send, StateGraph, START, END } from "@langchain/langgraph";
-import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { EXPERTS, getExpert, type ExpertOpinion } from "./experts.js";
+import { allExperts, getExpert, type ExpertOpinion } from "./experts.js";
 import { connectMcp, type McpTool } from "./mcp.js";
+import { createProvider } from "./llm.js";
+import { getModel, listRoles, resolveModel, type ModelConfig } from "./store.js";
 import type { Decision, TradeIntent } from "./types.js";
 
 // ── 状态定义 ──────────────────────────────────────────────
@@ -66,35 +66,44 @@ export const AgentState = Annotation.Root({
 
 export type State = typeof AgentState.State;
 
-/** 建 LLM：优先 DeepSeek（OpenAI 兼容），可由 env 切换 */
-export function makeChat() {
-  const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
-  const model = process.env.LLM_MODEL ?? "deepseek-chat";
-  if (provider === "mock") return null;
-  const baseURL =
-    provider === "deepseek"
-      ? "https://api.deepseek.com"
-      : process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
-  const apiKey =
-    provider === "deepseek" ? process.env.DEEPSEEK_API_KEY : process.env.OPENAI_API_KEY;
-  return new ChatOpenAI({ model, apiKey, configuration: { baseURL }, temperature: 0.2 });
-}
-
-async function ask(chat: ReturnType<typeof makeChat>, sys: string, user: string): Promise<string> {
-  if (!chat) return mockReply(sys);
-  const r = await chat.invoke([new SystemMessage(sys), new HumanMessage(user)]);
-  return typeof r.content === "string" ? r.content : JSON.stringify(r.content);
-}
+/** @deprecated 已由 makeStoreLlmProvider 取代（多模型配置来自 store） */
 
 /** 专家需要的极简 provider 接口（与 llm.ts 的 LlmProvider 形状一致） */
 export interface LlmProviderLike {
   decide(systemPrompt: string, userPrompt: string): Promise<string>;
 }
 
-/** 把 LangChain chat 包装成 LlmProviderLike，注入专家 */
-export function makeChatLlmProvider(): LlmProviderLike {
-  const chat = makeChat();
-  return { decide: (sys, user) => ask(chat, sys, user) };
+/**
+ * 基于 store 的模型配置创建 provider。
+ * modelId 为空时：主 Agent 用 settings.mainAgentModelId，其余用 defaultModelId。
+ */
+export function makeStoreLlmProvider(modelId?: string, mainAgent = false): LlmProviderLike {
+  let cfg: ModelConfig | undefined;
+  try {
+    cfg = modelId ? getModel(modelId) : resolveModel(undefined, mainAgent);
+  } catch {
+    cfg = undefined;
+  }
+  if (!cfg) {
+    // store 不可用时的兜底（不应发生）
+    return { decide: async () => JSON.stringify({ stance: "abstain", confidence: 0, summary: "无可用模型", advice: {} }) };
+  }
+  const p = createProvider(cfg);
+  return {
+    decide: async (sys, user) => {
+      try {
+        return await p.decide(sys, user);
+      } catch (e) {
+        return JSON.stringify({
+          stance: "abstain",
+          confidence: 0,
+          summary: `模型调用失败(${cfg!.name}): ${String(e).slice(0, 200)}`,
+          advice: {},
+          flags: ["模型调用失败"],
+        });
+      }
+    },
+  };
 }
 
 function mockReply(sys: string): string {
@@ -133,13 +142,14 @@ function outJson(text: string): Record<string, unknown> {
 
 // ── 节点：主 Agent 决定召唤谁 ─────────────────────────────
 async function planNode(s: State): Promise<Partial<State>> {
-  const chat = makeChat();
+  const llm = makeStoreLlmProvider(undefined, true);
+  const roles = allExperts();
   const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些专家。
-可选：${EXPERTS.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ")}
+可选：${roles.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ")}
 规则：有持仓或可能开仓 → trading + factor；临近事件或消息面有影响 → news；
 持仓亏损/回撤/高敞口 → risk。没必要别全召。
 只输出 JSON：{"experts":["trading","factor"]}`;
-  const raw = await ask(chat, sys, s.sharedContext);
+  const raw = await llm.decide(sys, s.sharedContext);
   let ids: string[] = [];
   try {
     ids = ((outJson(raw).experts as string[]) ?? []).filter((x) => !!getExpert(x));
@@ -163,7 +173,7 @@ function makeExpertNode(id: string, allMcpTools: McpTool[] = [], llm?: LlmProvid
     const myTools = allMcpTools.filter((t) => ex.mcpServers.includes(t.serverId));
     try {
       const op = await ex.run(
-        (llm ?? makeChatLlmProvider()) as never,
+        (llm ?? makeStoreLlmProvider()) as never,
         { sharedContext: s.sharedContext, mcpTools: myTools }
       );
       const tc = op.toolCalls?.length ? ` [工具:${op.toolCalls.join(",")}]` : "";
@@ -187,7 +197,7 @@ function makeExpertNode(id: string, allMcpTools: McpTool[] = [], llm?: LlmProvid
 
 // ── 节点：主 Agent 拍板 ───────────────────────────────────
 async function adjudgeNode(s: State): Promise<Partial<State>> {
-  const chat = makeChat();
+  const llm = makeStoreLlmProvider(undefined, true); // 主 Agent 用专用模型
   const sys = `你是主 Agent（最终决策者）。综合各专家观点后拍板。
 可以不采纳任何专家，但必须在 summary 说明如何处理分歧。
 冲突时参考权重：已双源验证的 A 级消息 > 技术因子 > 单源 B 级消息。
@@ -223,7 +233,7 @@ async function adjudgeNode(s: State): Promise<Partial<State>> {
         conflicts.push(`${active[i].expert}(${active[i].stance}) vs ${active[j].expert}(${active[j].stance})`);
 
   try {
-    const raw = await ask(chat, sys, user);
+    const raw = await llm.decide(sys, user);
     const j = outJson(raw);
     const d: Decision = {
       roundId: s.roundId,
@@ -276,9 +286,13 @@ async function archiveNode(s: State): Promise<Partial<State>> {
 /**
  * @param mcpTools 已连接的 MCP 工具（由 main.ts 连好后传入）。
  *                 每个专家只能看到自己 mcpServers 声明的工具 —— 最小权限原则。
+ *
+ * 模型分派（用户需求 2、3）：
+ *   · 每个角色可用自己的模型（role.modelId），未指定则用全局默认
+ *   · 主 Agent 拍板可用专用模型（settings.mainAgentModelId）
  */
 export function buildGraph(mcpTools: McpTool[] = [], llm?: LlmProviderLike) {
-  const provider = llm ?? makeChatLlmProvider();
+  const roles = allExperts();
   const g = new StateGraph(AgentState)
     .addNode("plan", planNode)
     .addNode("adjudge", adjudgeNode)
@@ -286,8 +300,16 @@ export function buildGraph(mcpTools: McpTool[] = [], llm?: LlmProviderLike) {
     .addNode("execute", executeNode)
     .addNode("archive", archiveNode);
 
-  // 专家节点：注册表驱动，加专家不用改图结构
-  for (const ex of EXPERTS) {
+  // 专家节点：动态角色，加/改角色不用改图结构
+  for (const ex of roles) {
+    // 每个角色独立模型：优先 store 里该角色指定的模型
+    let roleModelId: string | undefined;
+    try {
+      roleModelId = listRoles().find((r) => r.id === ex.id)?.modelId;
+    } catch {
+      /* ignore */
+    }
+    const provider = roleModelId ? makeStoreLlmProvider(roleModelId) : (llm ?? makeStoreLlmProvider(undefined, false));
     g.addNode(ex.id, makeExpertNode(ex.id, mcpTools, provider));
     g.addEdge(ex.id as "plan", "adjudge");
   }

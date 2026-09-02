@@ -21,6 +21,7 @@
     "@langchain/mcp-adapters": "^1.1.4",
     "@langchain/openai": "^1.5.11",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "vue": "^3.5.42",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -46,8 +47,14 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "../scripts", "to": "scripts" },
-      { "from": "../AGENT_TRADING_RULES.md", "to": "AGENT_TRADING_RULES.md" }
+      {
+        "from": "../scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "../AGENT_TRADING_RULES.md",
+        "to": "AGENT_TRADING_RULES.md"
+      }
     ],
     "win": {
       "target": "nsis",

@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { listMcpServers } from "./store.js";
 
 export const ROOT = (() => {
   const d = path.dirname(fileURLToPath(import.meta.url));
@@ -39,7 +40,6 @@ export interface McpServerConfig {
 export function loadMcpConfig(): Record<string, McpServerConfig> {
   // 1) store（界面管理的）
   try {
-    const { listMcpServers } = require("./store.js") as typeof import("./store.js");
     const list = listMcpServers().filter((s) => s.enabled);
     if (list.length) {
       const out: Record<string, McpServerConfig> = {};

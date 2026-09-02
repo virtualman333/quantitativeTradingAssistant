@@ -22,6 +22,7 @@
 import type { LlmProvider } from "./llm.js";
 import { SKILLS, getSkill, skillCatalog } from "./skills.js";
 import type { McpTool } from "./mcp.js";
+import { listRoles, type RoleConfig } from "./store.js";
 
 export interface ExpertOpinion {
   expert: string;
@@ -318,8 +319,43 @@ export const EXPERTS: Expert[] = [
   { ...riskBase, run: (llm, ctx) => invoke(llm, riskBase, ctx) },
 ];
 
+// ── 动态角色：从 store 读取（界面可增删改），与内置角色合并 ────
+/**
+ * 角色解析顺序：
+ *   1. store 里有同名 id → 用 store 的定义（含界面改过的 prompt/skills/mcp）
+ *   2. 否则用内置定义
+ * 这样界面改了角色立刻生效，不必改代码。
+ */
+export function allExperts(): Expert[] {
+  let stored: RoleConfig[] = [];
+  try {
+    stored = listRoles().filter((r) => r.enabled);
+  } catch {
+    stored = [];
+  }
+  const out: Expert[] = [];
+  for (const r of stored) {
+    const builtin = EXPERTS.find((e) => e.id === r.id);
+    const base: Omit<Expert, "run"> = {
+      id: r.id,
+      name: r.name,
+      duty: r.duty,
+      systemPrompt: r.systemPrompt,
+      skills: r.skills,
+      mcpServers: r.mcpServers,
+    };
+    out.push({
+      ...base,
+      // 保留内置实现（工具循环）；内置角色也可能被界面改 prompt，仍以 store 为准
+      run: (llm, ctx) => invoke(llm, base, ctx),
+      ...(builtin ? {} : {}),
+    });
+  }
+  return out.length ? out : EXPERTS;
+}
+
 export function getExpert(id: string): Expert | undefined {
-  return EXPERTS.find((e) => e.id === id);
+  return allExperts().find((e) => e.id === id);
 }
 
 export { skillCatalog, SKILLS };

@@ -20,7 +20,21 @@ import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, conf
 import { AgentState, buildGraphWithMcp } from "./graph.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
 
-const INTERVAL_MS = Number(process.env.ROUND_INTERVAL_MS ?? 5 * 60 * 1000);
+// 间隔优先级：环境变量（界面/命令行指定）> store 设置 > 默认 5 分钟
+const INTERVAL_MS = (() => {
+  const env = Number(process.env.ROUND_INTERVAL_MS);
+  if (Number.isFinite(env) && env > 0) return env;
+  try {
+    const p = path.join(ROOT, "data", "store.json");
+    if (fs.existsSync(p)) {
+      const m = Number(JSON.parse(fs.readFileSync(p, "utf8"))?.settings?.intervalMin);
+      if (Number.isFinite(m) && m > 0) return m * 60 * 1000;
+    }
+  } catch {
+    /* 回退默认 */
+  }
+  return 5 * 60 * 1000;
+})();
 const DRY_RUN = process.argv.includes("--dry-run");
 const ONCE = process.argv.includes("--once");
 const STATE = path.join(ROOT, "state");
@@ -245,7 +259,15 @@ async function runRound() {
 }
 
 async function main() {
-  log(`OKX Agent(LangGraph) 启动 interval=${INTERVAL_MS}ms dry=${DRY_RUN} once=${ONCE} llm=${process.env.LLM_PROVIDER ?? "mock"}`);
+  // 显示实际使用的模型（来自 store，而非环境变量 —— 界面改模型要立刻生效）
+  let modelName = "未知";
+  try {
+    const { resolveModel } = await import("./store.js");
+    modelName = resolveModel(undefined, true)?.name ?? "未知";
+  } catch {
+    modelName = process.env.LLM_PROVIDER ?? "mock";
+  }
+  log(`OKX Agent(LangGraph) 启动 interval=${INTERVAL_MS}ms dry=${DRY_RUN} once=${ONCE} 模型=${modelName}`);
   // dry-run 是「模式」不是「单轮」：只影响是否真的下单，不影响是否常驻。
   // 只有 --once 才跑一轮就退出（实测踩过：把 dry 也当单轮，导致常驻模式下服务跑完即退）
   if (ONCE) {
