@@ -8,7 +8,7 @@
  *   2. 暴露 store（模型/角色/MCP/Skill/设置）的完整增删改查给界面
  *   3. 读取账户与最近决策供展示
  */
-import { app, BrowserWindow, ipcMain, shell, dialog } from "electron";
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { spawn, ChildProcess } from "node:child_process";
@@ -30,6 +30,10 @@ function findAgentRoot(): string {
 }
 const AGENT_ROOT = findAgentRoot();
 const PROJECT_ROOT = path.resolve(AGENT_ROOT, "..");
+
+/** 应用名：菜单首项（macOS）与「关于」都用它，需早于 app ready 设置 */
+const APP_NAME = "OKX 交易 Agent";
+app.name = APP_NAME;
 
 // 动态导入 store（编译后路径为 dist/src/store.js）
 const storePath = path.join(AGENT_ROOT, "dist", "src", "store.js");
@@ -216,6 +220,8 @@ function createWindow() {
     pushLog(`❌ 找不到界面产物: ${distUi}（请先 npm run build，或用 npm run ui:dev）`);
   }
 
+  attachContextMenu(win);
+
   // 渲染进程的报错与未捕获异常回流到日志，避免界面白屏却无从查起
   win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
     if (level >= 2) pushLog(`[UI:${level === 3 ? "error" : "warn"}] ${message} @${sourceId}:${line}`);
@@ -298,9 +304,11 @@ ipcMain.handle("store:path", () => path.join(AGENT_ROOT, "data", "store.json"));
 // agent 控制
 ipcMain.handle("agent:start", () => startAgent());
 ipcMain.handle("agent:stop", () => stopAgent());
-ipcMain.handle("agent:runOnce", () => {
+/** 跑一轮（--once）：界面按钮与顶层菜单共用同一实现 */
+function runOnceAgent(): Promise<{ ok: boolean; code?: number | null; out?: string; error?: string }> {
   const st = loadSettingsSync();
-  const args = ["--once", ...(st?.dryRun ? ["--dry-run"] : [])];
+  // 设置缺失时按演练处理，避免误下真实单
+  const args = ["--once", ...(st?.dryRun !== false ? ["--dry-run"] : [])];
   return new Promise((resolve) => {
     const p = spawnAgent(args);
     let out = "";
@@ -315,7 +323,8 @@ ipcMain.handle("agent:runOnce", () => {
     p.on("exit", (code) => resolve({ ok: code === 0, code, out: out.slice(-3000) }));
     p.on("error", (e) => resolve({ ok: false, error: e.message }));
   });
-});
+}
+ipcMain.handle("agent:runOnce", () => runOnceAgent());
 ipcMain.handle("status:get", () => getStatus());
 ipcMain.handle("logs:get", () => logBuffer.slice(-500));
 ipcMain.handle("open:folder", (_e, which: string) => {
@@ -456,8 +465,157 @@ ipcMain.handle(
   }
 );
 
+// ── 顶层菜单（中文） ────────────────────────────────────────
+/**
+ * Electron 不设菜单时是默认英文（File / Edit / View …），这里整套换中文。
+ * 注意：role 只负责行为，label 必须自己写，否则仍是英文。
+ */
+function showAbout() {
+  return dialog.showMessageBox({
+    type: "info",
+    title: `关于 ${APP_NAME}`,
+    message: APP_NAME,
+    detail: [
+      `版本 ${app.getVersion()}`,
+      `Electron ${process.versions.electron} · Node ${process.versions.node}`,
+      "",
+      `数据目录：${path.join(AGENT_ROOT, "data")}`,
+      `项目根目录：${PROJECT_ROOT}`,
+    ].join("\n"),
+    buttons: ["确定"],
+    defaultId: 0,
+  });
+}
+
+function buildMenu(): Menu {
+  const isMac = process.platform === "darwin";
+
+  // macOS 首个菜单是应用名（关于 / 服务 / 隐藏 / 退出），其余平台合并进「文件」
+  const appMenu: MenuItemConstructorOptions[] = isMac
+    ? [
+        {
+          label: APP_NAME,
+          submenu: [
+            { label: `关于 ${APP_NAME}`, click: () => showAbout() },
+            { type: "separator" },
+            { label: "服务", role: "services" },
+            { type: "separator" },
+            { label: `隐藏 ${APP_NAME}`, role: "hide" },
+            { label: "隐藏其他", role: "hideOthers" },
+            { label: "显示全部", role: "unhide" },
+            { type: "separator" },
+            { label: `退出 ${APP_NAME}`, role: "quit" },
+          ],
+        },
+      ]
+    : [];
+
+  const fileMenu: MenuItemConstructorOptions = {
+    label: "文件",
+    submenu: [
+      {
+        label: "启动服务",
+        accelerator: "CmdOrCtrl+Shift+S",
+        click: () => pushLog(`菜单 → 启动服务：${startAgent().msg}`),
+      },
+      {
+        label: "停止服务",
+        accelerator: "CmdOrCtrl+Shift+X",
+        click: () => pushLog(`菜单 → 停止服务：${stopAgent().msg}`),
+      },
+      {
+        label: "跑一轮决策",
+        accelerator: "CmdOrCtrl+Shift+O",
+        click: async () => {
+          pushLog("菜单 → 跑一轮决策开始");
+          const r = await runOnceAgent();
+          pushLog(`菜单 → 跑一轮结束 ok=${r.ok} code=${r.code ?? "-"}`);
+        },
+      },
+      { type: "separator" },
+      {
+        label: "打开数据文件",
+        accelerator: "CmdOrCtrl+Shift+D",
+        click: () => shell.showItemInFolder(path.join(AGENT_ROOT, "data", "store.json")),
+      },
+      { label: "打开运行状态目录", click: () => shell.openPath(path.join(PROJECT_ROOT, "state")) },
+      { label: "打开日志目录", click: () => shell.openPath(path.join(PROJECT_ROOT, "logs")) },
+      ...(isMac ? [] : [{ type: "separator" } as MenuItemConstructorOptions, { label: "退出", role: "quit" } as MenuItemConstructorOptions]),
+    ],
+  };
+
+  const editMenu: MenuItemConstructorOptions = {
+    label: "编辑",
+    submenu: [
+      { label: "撤销", role: "undo" },
+      { label: "重做", role: "redo" },
+      { type: "separator" },
+      { label: "剪切", role: "cut" },
+      { label: "复制", role: "copy" },
+      { label: "粘贴", role: "paste" },
+      { label: "删除", role: "delete" },
+      { type: "separator" },
+      { label: "全选", role: "selectAll" },
+    ],
+  };
+
+  const viewMenu: MenuItemConstructorOptions = {
+    label: "视图",
+    submenu: [
+      { label: "重新加载", role: "reload" },
+      { label: "强制重新加载", role: "forceReload" },
+      { label: "开发者工具", role: "toggleDevTools" },
+      { type: "separator" },
+      { label: "实际大小", role: "resetZoom" },
+      { label: "放大", role: "zoomIn" },
+      { label: "缩小", role: "zoomOut" },
+      { type: "separator" },
+      { label: "切换全屏", role: "togglefullscreen" },
+    ],
+  };
+
+  const windowMenu: MenuItemConstructorOptions = {
+    label: "窗口",
+    submenu: [
+      { label: "最小化", role: "minimize" },
+      { label: isMac ? "缩放" : "最大化", role: "zoom" },
+      ...(isMac ? [{ label: "前置全部窗口", role: "front" } as MenuItemConstructorOptions] : []),
+      { type: "separator" },
+      { label: "关闭", role: "close" },
+    ],
+  };
+
+  const helpMenu: MenuItemConstructorOptions = {
+    label: "帮助",
+    submenu: [
+      { label: "查看运行日志目录", click: () => shell.openPath(path.join(PROJECT_ROOT, "logs")) },
+      { label: "打开数据文件", click: () => shell.showItemInFolder(path.join(AGENT_ROOT, "data", "store.json")) },
+      { type: "separator" },
+      { label: `关于 ${APP_NAME}`, click: () => showAbout() },
+    ],
+  };
+
+  return Menu.buildFromTemplate([...appMenu, fileMenu, editMenu, viewMenu, windowMenu, helpMenu]);
+}
+
+/** 界面右键菜单也换成中文（默认是英文的 Cut / Copy / Inspect） */
+function attachContextMenu(w: BrowserWindow) {
+  w.webContents.on("context-menu", (_e, params) => {
+    Menu.buildFromTemplate([
+      { label: "剪切", role: "cut", enabled: params.editFlags.canCut },
+      { label: "复制", role: "copy", enabled: params.editFlags.canCopy },
+      { label: "粘贴", role: "paste", enabled: params.editFlags.canPaste },
+      { type: "separator" },
+      { label: "全选", role: "selectAll" },
+      { type: "separator" },
+      { label: "检查元素", click: () => w.webContents.inspectElement(params.x, params.y) },
+    ]).popup({ window: w });
+  });
+}
+
 // ── 生命周期 ────────────────────────────────────────────────
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(buildMenu());
   createWindow();
   pushLog("界面就绪");
   const st = loadSettingsSync();
