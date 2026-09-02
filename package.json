@@ -1,0 +1,25 @@
+{
+  "name": "okx-trader-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OKX 自主交易专用 Agent（TS 常驻进程，5 分钟自驱决策，不依赖聊天会话）",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js",
+    "once": "tsx src/main.ts --once",
+    "dry": "tsx src/main.ts --once --dry-run"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
