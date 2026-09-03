@@ -34,6 +34,7 @@
 - fetch 有 3 分钟超时（网关挂起会卡死整轮）。
 
 ## 前端（ui/，Vite + Vue3 SFC）
+- **独立窗口（2026-09-03 定）**：Electron 子窗口复用同一套 UI，靠 URL hash 路由（`#/win/kline?instId=xxx`）；主进程 `win:open` 按 key 复用（`ui/lib/nav.js` 的 `openWin/openKlineWin/openDocWin`），无桥接时自动回退页内全屏弹窗（`fallbackWin`）。新增窗口类型=往 `WinFrame.vue` 的 VIEWS/TITLES 注册 + `ui/components/win/` 下加组件。
 - 产物 `dist/ui` 由 Electron file:// 加载（vite base 必须 `./`）。`ui:dev` = vite(默认 8088，自动探测空闲端口) + Electron（UI_DEV=1）；三处统一 IPv4 `127.0.0.1`（Vite 默认 localhost 解析到 ::1 会导致 waitPort 永不就绪）。
 - **UI 约定**：颜色/圆角/阴影只在 `ui/styles/main.css` 的 `:root`（浅色默认 + `[data-theme="dark"]`，localStorage 持久化），组件不写死色值（历史 `--c-*` 别名已补齐）；高度一律 flex 分配，禁止 `calc(100vh - 常数)`；需要撑满的页用 `main:has(.xxx-page)` + `.xxx-page{flex:1;min-height:0}`（log-page / rep-page）；表格统一 thead/tbody + 表头 sticky。
 - 界面与 Electron 原生菜单文案一律中文（`role` 不负责翻译）。
@@ -50,6 +51,7 @@
 - **spawn 空格路径**：绝对路径 + shell:true 在含空格目录（`OKX Trader`）会被拆断 → 统一把 `node_modules/.bin` 塞进 PATH，用裸命令名（`tsx.cmd`/`electron.cmd`）。
 - **MCP 连接泄漏**：`conn.close()` 必须放 finally，否则 stdio 子进程每轮泄漏。
 - **OKX 行情**：`volCcy24h` 是币数量，排序成交额须 ×last；tickSz 差异可达 10 个数量级，价格/张数格式化必须动态（用 market_scan 输出的 `instruments[inst].spec`）。
+- **git 提交中文编码（2026-09-03 实测）**：本机把命令行里的中文按 GBK 解码（实测 node 收到"报告"已是"鎶ュ憡"），所以 `git commit -m "中文"` 与 `-F` 默认都会存成双重编码乱码。**唯一可靠写法**：先用 write_to_file 写 UTF-8 消息文件，再执行 `git -c i18n.commitEncoding=UTF-8 commit -F <file>`（校验：`node -e "console.log(Buffer.from('报告','utf8').toString('hex'))"` 应得 e68aa5e5918a，若为 e98eb6 则仍被误解码）。push 常因网络 reset 失败，本地提交即可。
 - **网络**：DNS 污染会劫持 www.okx.com（CNAME awscn.okpool.top → 169.254.0.2）；脚本已做域名候选回退（www→aws→okx.com）+ `OKX_PUBLIC_BASE` + 代理环境变量。github push 也常连不上。
 - **过拟合教训**：alpha 结论必须 ≥1 年样本（6 个月 43 笔的 PF 1.62 在 1 年 141 笔后变 PF 0.92）。
 
