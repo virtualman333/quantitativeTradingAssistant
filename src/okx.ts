@@ -209,8 +209,9 @@ export async function placeOco(args: {
   inst: string;
   side: "buy" | "sell";
   size: number;
-  slPx: number;
-  tpPx: number;
+  /** 触发价已按 tickSz 取整的字符串（不同标的 tickSz 差异极大，不能再 toFixed(2)） */
+  slPx: string;
+  tpPx: string;
   clOrdId: string;
 }): Promise<{ ok: boolean; raw: string }> {
   const r = await mcpCall(
@@ -223,10 +224,10 @@ export async function placeOco(args: {
       side: args.side,
       posSide: "net",
       sz: String(args.size),
-      slTriggerPx: args.slPx.toFixed(2),
+      slTriggerPx: args.slPx,
       slOrdPx: "-1",
       slTriggerPxType: "mark",
-      tpTriggerPx: args.tpPx.toFixed(2),
+      tpTriggerPx: args.tpPx,
       tpOrdPx: "-1",
       tpTriggerPxType: "mark",
       clOrdId: args.clOrdId,

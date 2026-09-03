@@ -4,7 +4,7 @@
  * 背景：types.ts 早已声明 GuardResult（「LLM 意图必须过 Guard，不合规直接拒绝」），
  * 但此前一直没实现，执行链直接信任 LLM 输出就下单。本模块把 L1 中可代码化的
  * 约束固化成硬校验：
- *   L1-1 仅 BTC/ETH 永续
+ *   L1-1 仅 USDT 永续（交易所支持的任意标的，不再限 BTC/ETH）
  *   L1-2 杠杆 ≤5x
  *   L1-4 止损必挂
  *   L1-5 单笔风险 ≤2.5%
@@ -16,7 +16,8 @@
  */
 import type { AccountSnapshot, GuardResult, TradeIntent } from "./types.js";
 
-const ALLOWED_INSTS = new Set(["BTC-USDT-SWAP", "ETH-USDT-SWAP"]);
+/** L1-1 标的须为 USDT 计价永续（任意币种，如 BTC-USDT-SWAP / SOL-USDT-SWAP） */
+const INST_RE = /^[A-Z0-9]+-USDT-SWAP$/;
 const MAX_RISK_PCT = 0.025;      // L1-5 单笔风险 ≤2.5%
 const APPROVAL_RISK_PCT = 0.02;  // 超过 2% 需人工确认（L2 基准）
 const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
@@ -25,14 +26,22 @@ const DEVIATION_FIELDS = ["baseline", "actual", "rationale", "falsifier", "riskD
 /**
  * 校验单个交易意图。
  * @param refPrice 当前参考价（现价），用于反推隐含杠杆；0 表示未知则跳过杠杆校验。
+ * @param knownInsts 本轮行情/合约规格中确认存在且 state=live 的标的集合；传入则额外校验标的在集合内。
  */
-export function guardIntent(it: TradeIntent, snap: AccountSnapshot, refPrice = 0): GuardResult {
+export function guardIntent(
+  it: TradeIntent,
+  snap: AccountSnapshot,
+  refPrice = 0,
+  knownInsts?: Set<string>
+): GuardResult {
   const violations: string[] = [];
   const warnings: string[] = [];
 
-  // L1-1 仅 BTC/ETH 永续
-  if (!ALLOWED_INSTS.has(it.inst)) {
-    violations.push(`L1-1 标的「${it.inst}」不在白名单（仅 BTC-USDT-SWAP / ETH-USDT-SWAP）`);
+  // L1-1 仅 USDT 永续（任意标的，不再限 BTC/ETH）
+  if (!INST_RE.test(it.inst)) {
+    violations.push(`L1-1 标的「${it.inst}」非 USDT 计价永续（需形如 XXX-USDT-SWAP）`);
+  } else if (knownInsts && knownInsts.size && !knownInsts.has(it.inst)) {
+    violations.push(`L1-1 标的「${it.inst}」不在本轮行情候选池/合约规格中`);
   }
 
   // 理由必填
@@ -103,7 +112,8 @@ export function guardIntent(it: TradeIntent, snap: AccountSnapshot, refPrice = 0
 export function guardDecision(
   intents: TradeIntent[],
   snap: AccountSnapshot,
-  refPriceOf: (inst: string) => number
+  refPriceOf: (inst: string) => number,
+  knownInsts?: Set<string>
 ): GuardResult[] {
-  return (intents ?? []).map((it) => guardIntent(it, snap, refPriceOf(it.inst)));
+  return (intents ?? []).map((it) => guardIntent(it, snap, refPriceOf(it.inst), knownInsts));
 }

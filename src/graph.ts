@@ -243,7 +243,9 @@ async function adjudgeNode(s: State): Promise<Partial<State>> {
  "needsApproval":false,"approvalReason":""}
 
 约束：riskPct ≤0.025；>0.02 时 needsApproval=true 并写 reason；开仓必须给 slDist；
-偏离基准时 deviations 五项必填；只交易 BTC-USDT-SWAP 与 ETH-USDT-SWAP。`;
+偏离基准时 deviations 五项必填；
+标的与方向：可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(action=long)与做空(action=short)平等、均可开仓（net 模式单一方向，勿双向）；
+优先流动性好、规格清晰的标的，避开价格极低/价格步长(tickSz)极小、张数换算易出错的标的。`;
 
   const user = [
     s.sharedContext,

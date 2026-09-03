@@ -11,7 +11,7 @@ export type RiskTier = "BASE" | "AGG" | "DEF";
 
 /** LLM 输出的单标的决策意图 */
 export interface TradeIntent {
-  inst: string;              // BTC-USDT-SWAP / ETH-USDT-SWAP
+  inst: string;              // 任意 USDT 永续，如 BTC-USDT-SWAP / SOL-USDT-SWAP
   action: Direction;         // hold=不动, close=平仓, long/short=开仓
   riskPct?: number;          // 本笔风险占权益比例（如 0.012 = 1.2%）
   slDist?: number;           // 止损距离（价格单位）

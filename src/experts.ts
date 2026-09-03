@@ -237,7 +237,8 @@ const tradingBase: Omit<Expert, "run"> = {
 - 已有持仓时优先判断：持有 / 平仓 / 移动止损，而非默认加仓。
 - riskPct 建议 0.5%~2.5%；超过 2% 请在 flags 标注需人工确认。
 - 开仓必须给 slDist，否则无效。
-- 只交易 BTC-USDT-SWAP 与 ETH-USDT-SWAP。
+- 标的：可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(long)与做空(short)平等、均可开仓（net 模式单一方向）。
+- 优先流动性好、规格清晰的标的，避开价格极低/tickSz 极小的标的。
 - 需要查仓位/权益细节时，可用 MCP 的只读工具；**不要自己下单**（执行权归主 Agent）。`,
   skills: ["order_id", "read_charter"],
   mcpServers: ["okx-trade-mcp"],
@@ -252,7 +253,7 @@ const newsBase: Omit<Expert, "run"> = {
   duty: "负责消息面：事件闸门、方向否决、关键数字交叉验证。不产生开仓信号。",
   systemPrompt: `你是【新闻资讯专家】。
 
-职责：评估消息面对加密（BTC/ETH）的影响。**消息面是否决权与仓位调节器，不提供开仓信号。**
+职责：评估消息面对加密市场的影响（龙头 BTC/ETH 为主，也覆盖候选池内其他标的）。**消息面是否决权与仓位调节器，不提供开仓信号。**
 
 建议流程：
 1. 先调 news_fetch 采集消息（若 sharedContext 已有则可跳过）
@@ -289,16 +290,16 @@ const factorBase: Omit<Expert, "run"> = {
   duty: "负责多周期技术因子评分与共振判断。不负责执行与消息面。",
   systemPrompt: `你是【因子评分专家】。
 
-职责：对 BTC-USDT-SWAP / ETH-USDT-SWAP 做多周期（4H/1H/15m）技术因子评分。
-
-建议流程：先调 market_scan 拿到结构化行情，再评分。
+职责：对【候选标的与行情摘要】中的任意 USDT 永续做多周期（4H/1H/15m）技术因子评分。
+候选池行情摘要已在 sharedContext（含共振分/趋势/RSI/量比/ATR%/区间分位/资金费率），可直接据此评分；
+需要某标的详细 bars 时再调 market_scan。
 
 输出（advice 字段）：
 {
   "scores": {
     "BTC-USDT-SWAP": {"total":-35.2,"perBar":{"4H":-8,"1H":-72,"15m":-48},
       "trend":"down|up|range","volRatio":1.255,"rangePosPct":11.2,"rr":2.0,"funding":0.0001},
-    "ETH-USDT-SWAP": { ... }
+    "SOL-USDT-SWAP": { ... }
   },
   "thresholdCheck": {
     "BTC-USDT-SWAP": {"scoreOk":true,"trendOk":true,"volOk":true,
@@ -336,7 +337,7 @@ const riskBase: Omit<Expert, "run"> = {
   "suggestions": ["建议..."]
 }
 
-关注：当日/月度回撤、总敞口倍数、两标的相关性（BTC/ETH 同向时空头实际是同一个赌注）、
+关注：当日/月度回撤、总敞口倍数、多标的间的相关性（同板块/同 beta 标的方向一致时，多个仓位实为同一个赌注）、
       连亏笔数、是否触及熔断阈值。优先保证「有下一笔」，而非追求本笔收益。`,
   skills: ["read_charter"],
   mcpServers: ["okx-trade-mcp"],

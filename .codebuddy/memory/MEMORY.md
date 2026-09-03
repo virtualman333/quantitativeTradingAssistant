@@ -2,11 +2,11 @@
 
 ## 项目全貌（2026-09-02 全面通读后整理）
 
-**单仓库双套系统**。git 仓库根在 `E:/ai_project/okx_trader_agent/`（注意：`agent/` 是子目录；在 agent 下执行 git 命令时路径显示为相对 agent）。
+**单仓库双套系统**。git 仓库根在 `C:/Users/yongguichen/WorkBuddy/OKX Trader`（注意：`agent/` 是子目录；在 agent 下执行 git 命令时路径显示为相对 agent）。
 
 ### A. 交易决策系统（父目录 Python 体系）
-- 决策依据文档：`AGENT_TRADING_RULES.md`（章程 v2.0）、`DASHBOARD.md`（每轮自动更新面板）、`EVOLUTION.md`（复盘流水只追加）、`PLAYBOOK.md`（提案区）、`NEWS_SOURCES.md`（数据源实测）。
-- 章程 v2.0 核心：**L1 硬约束 10 条不可裁量**（L1-1 仅 BTC/ETH 永续、L1-2 杠杆≤5、L1-3 live 只读、L1-4 止损必挂、L1-5 单笔风险≤2.5%、L1-6 月度回撤 12% 熔断、L1-7 归档只追加+偏离留痕、L1-8 clOrdId 幂等、L1-9 禁双向、L1-10 禁亏损加仓）；其余全部为 **L2 可裁量基准**，偏离须写 §0.3 五项（baseline/actual/rationale/falsifier/riskDelta），绩效由 §0.4 独立核算。
+- 决策依据文档：`AGENT_TRADING_RULES.md`（章程 v2.1）、`DASHBOARD.md`（每轮自动更新面板）、`EVOLUTION.md`（复盘流水只追加）、`PLAYBOOK.md`（提案区）、`NEWS_SOURCES.md`（数据源实测）。
+- 章程 v2.1 核心：**L1 硬约束 10 条不可裁量**（L1-1 仅 USDT 计价永续、交易所支持的任意标的、L1-2 杠杆≤5、L1-3 live 只读、L1-4 止损必挂、L1-5 单笔风险≤2.5%、L1-6 月度回撤 12% 熔断、L1-7 归档只追加+偏离留痕、L1-8 clOrdId 幂等、L1-9 禁双向、L1-10 禁亏损加仓）；其余全部为 **L2 可裁量基准**，偏离须写 §0.3 五项（baseline/actual/rationale/falsifier/riskDelta），绩效由 §0.4 独立核算。**v2.1（2026-09-03）**：L1-1 由「仅 BTC/ETH」放开为「任意 USDT 永续」；§3 合约规格由写死 BTC/ETH 改为每轮从 OKX instruments 动态获取（ctVal/lotSz/minSz/tickSz）；方向自由强调多空平等（net 模式单一方向）。
 - `scripts/*.py`（16 个）：market_scan（行情/共振分）、news_fetch/news_verify/news_log（消息面，双源验证）、review_trade（复盘）、dashboard、archive_round（归档唯一入口只追加）、report/mail_report/mail_send（邮件）、mcp_call（MCP 降级通道，live 拒写）、order_id（clOrdId 生成）、deviation_stats、trade_round（--loop 5 分钟轮）、jin10_client、其他。
 - 运行时数据（已被 .gitignore 排除入库）：`logs/`（YYYY-MM 日志 + rounds.jsonl 只追加）、`state/`（runtime.json、round_input_R*.json、decision、snapshots）、`ledger/trades.csv`、`news/news.jsonl`、`reports/`。
 - **运行环境**：仅 okx-demo 模拟盘可交易；okx-live 只读监控已于 2026-09-02 停止监控。起始权益约 79,894 USDT。运行时（2026-09-02 22:15）round_no 19，1 个持仓，当日 -0.88%。
@@ -43,7 +43,8 @@
 - 用户：完成开发任务后自动 git add + commit + push（push 因网络可能失败，本地提交即可）。
 - 用户：不要每改一点就验证/截图/编译检查；除非关键运行时错误或明确要求。
 - 章程序言规定 AI 自主决策但 L1 边界不可逾越；`agent/` 的 TS 实现即该章程的工程化版本。
-- **Electron IPC 坑**：渲染进程传给 `ipcRenderer.invoke` 的参数若为 Vue `reactive`/`ref` 代理(Proxy)，`structuredClone` 会抛 `An object could not be cloned`。已统一在 `electron/preload.ts` 的 `safeInvoke` 里对参数做 `JSON.parse(JSON.stringify())` 拍成纯对象，所有 `api.*` 调用都走它。
+- **Electron IPC 坑（2026-09-03 修正修复位置）**：Vue `reactive`/`ref` 的 Proxy 参数在 `contextBridge` 传递（渲染进程→preload）时就被 `structuredClone` 抛 `An object could not be cloned`，发生在参数进 preload 之前。**正确修复在渲染进程侧** `ui/lib/api.js`：用 Proxy 统一包装 `window.api`，调用前先 `JSON.parse(JSON.stringify())` 拍平参数（undefined/函数原样、失败回退）。preload 的 `safeInvoke` 只是双保险，修不到 contextBridge 这层（旧记录说 safeInvoke 修复是错的）。
 - **Electron preload 新旧产物坑（2026-09-03）**：`dist/electron/preload.js` 是早期配置的遗留旧产物（tsconfig.electron.json 现在只编 main.ts），缺新 API 会报 `api.xxx is not a function`。`resolvePreload()` 必须**优先选正规 CJS 产物 `dist/preload/preload.js`**，postbuild.mjs 会自动清理遗留文件。遇到「界面某功能报 not a function」先查加载到的 preload 是不是旧的（`npx tsc -p tsconfig.electron.json && node scripts/postbuild.mjs` 后重启应用）。
 - **Windows renameSync 覆盖坑（2026-09-03）**：`fs.renameSync(tmp, target)` 在 Windows 下覆盖已存在的 target 时，若 target 被其他进程打开（哪怕只读）会报 `EPERM`（`fs.writeFileSync` 直写则没事）。本地 JSON 持久化（store.ts 的 saveStore 等）原子写必须捕获 `EPERM/EEXIST/EBUSY/EACCES` 回退直写，否则界面「保存」会偶发/持续失败。
 - git 状态：2026-09-03 已全部提交并 push（b46e5c7），工作区干净。**仓库根在 `C:/Users/yongguichen/WorkBuddy/OKX Trader`**（agent 是子目录；注意 MEMORY 顶部记的 E 盘旧路径已失效）。`guard.ts` 已由「删除」改为「重新实现」——风控硬校验（L1 约束运行时拦截，见 src/guard.ts）。
+- **动态合约规格 + 候选池（2026-09-03 v2.1）**：L1-1 已放开为任意 USDT 永续。执行层张数/价格必须用 `market_scan.py` 输出的 `instruments[inst].spec`（ctVal/lotSz/minSz/tickSz）动态计算，禁止硬编码面值或固定 `toFixed(2)` 价格（BTC tickSz=0.1、SATS tickSz=1e-12）。候选池按 24h 成交额排序时，OKX `volCcy24h` 是「币数量」须 `×last` 才是 USDT 成交额，否则 SATS/PEPE 等低价 meme 币会霸榜。guard 白名单改为 `X-USDT-SWAP` 格式 + 本轮 knownInsts 双校验。

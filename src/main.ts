@@ -114,6 +114,69 @@ function refPriceOf(mkt: unknown, inst: string): number {
   return 0;
 }
 
+/** 合约规格（由 market_scan.py 从 OKX instruments 动态获取，替代硬编码 BTC/ETH 面值） */
+interface InstSpec {
+  ctVal: number;   // 每张面值（如 BTC=0.01, ETH=0.1, SATS=10000000）
+  lotSz: number;   // 下单数量步长（张）
+  minSz: number;   // 最小下单量（张）
+  tickSz: number;  // 价格步长
+}
+
+function specOf(mkt: unknown, inst: string): InstSpec | null {
+  try {
+    const d = mkt as { instruments?: Record<string, any> };
+    const s = d?.instruments?.[inst]?.spec;
+    if (!s) return null;
+    const ctVal = Number(s.ctVal);
+    if (!(ctVal > 0)) return null;
+    const lotSz = Number(s.lotSz);
+    const minSz = Number(s.minSz);
+    const tickSz = Number(s.tickSz);
+    return {
+      ctVal,
+      lotSz: lotSz > 0 ? lotSz : 0.01,
+      minSz: minSz > 0 ? minSz : 0.01,
+      tickSz: tickSz > 0 ? tickSz : 0.01,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 本轮行情中确认存在且 state=live 的标的集合（供 Guard L1-1 校验） */
+function knownInstsOf(mkt: unknown): Set<string> {
+  const out = new Set<string>();
+  try {
+    const d = mkt as { instruments?: Record<string, any> };
+    for (const [inst, v] of Object.entries(d?.instruments ?? {})) {
+      if (v && v.spec && String(v.spec.state) === "live") out.add(inst);
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+/** 把行情压缩成一行一标的的精简摘要（market_scan.py 已生成 digest，回退用全文） */
+function buildMarketDigest(mkt: unknown): string {
+  try {
+    const d = mkt as { digest?: string[]; instruments?: Record<string, unknown> };
+    if (Array.isArray(d.digest) && d.digest.length) {
+      return d.digest.join("\n");
+    }
+    return JSON.stringify(d.instruments ?? {}).slice(0, 6000);
+  } catch {
+    return "行情不可用";
+  }
+}
+
+/** 价格按 tickSz 取整并转字符串（避免科学计数法，OKX 下单价格须为 tickSz 整数倍） */
+function fmtTick(px: number, tickSz: number): string {
+  const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
+  const snapped = Math.round(px / tickSz) * tickSz;
+  return snapped.toFixed(decimals);
+}
+
 function loadRuntime() {
   const p = path.join(STATE, "runtime.json");
   const def = { daySlCount: 0, dayPnlPct: 0, monthDdPct: 0, roundNo: 0 };
@@ -132,34 +195,47 @@ function loadRuntime() {
 }
 
 // ── 副作用：执行与归档（图外） ─────────────────────────────
-async function executeOpen(it: TradeIntent, snap: AccountSnapshot, roundId: string, seq: number, refPrice: number) {
+async function executeOpen(
+  it: TradeIntent,
+  snap: AccountSnapshot,
+  roundId: string,
+  seq: number,
+  refPrice: number,
+  spec: InstSpec | null
+) {
   const inst = it.inst;
   const refPx = refPrice;
   if (refPx <= 0) return { ok: false, msg: `${inst}: 无参考价（行情缺失）` };
   if (!it.slDist || !it.riskPct) return { ok: false, msg: `${inst}: 缺 slDist/riskPct` };
+  if (!spec || !(spec.ctVal > 0)) return { ok: false, msg: `${inst}: 缺合约规格（无法计算张数）` };
 
   const notional = (snap.equityUsdt * it.riskPct) / (it.slDist / refPx);
-  const ctVal = inst.startsWith("BTC") ? 0.01 : 0.1;
-  const size = Number((notional / (refPx * ctVal)).toFixed(4));
-  if (!(size > 0)) return { ok: false, msg: `${inst}: 张数为 0` };
+  // 张数 = 名义 / (每张面值 × 现价)，按 lotSz 步长向下取整，且不小于 minSz
+  const rawSize = notional / (refPx * spec.ctVal);
+  const size = Number(
+    (Math.max(spec.minSz, Math.floor(rawSize / spec.lotSz) * spec.lotSz)).toFixed(10)
+  );
+  if (!(size > 0)) return { ok: false, msg: `${inst}: 张数为 0（raw=${rawSize.toFixed(6)}）` };
 
   const lever = Number((notional / snap.equityUsdt).toFixed(2));
   const side = it.action === "long" ? "buy" : "sell";
   const slPx = it.action === "long" ? refPx - it.slDist : refPx + it.slDist;
   const tpPx = it.action === "long" ? refPx + it.slDist * (it.tpRR ?? 2) : refPx - it.slDist * (it.tpRR ?? 2);
+  const slPxStr = fmtTick(slPx, spec.tickSz);
+  const tpPxStr = fmtTick(tpPx, spec.tickSz);
 
   const cl = await genClOrdId(roundId, seq, { instId: inst, sz: size });
   if (!cl) return { ok: false, msg: `${inst}: clOrdId 生成失败` };
 
   if (DRY_RUN) {
-    return { ok: true, msg: `[DRY] ${inst} ${side} ${size}张 名义≈${notional.toFixed(0)} 杠杆≈${lever}x SL=${slPx.toFixed(2)} TP=${tpPx.toFixed(2)} id=${cl}` };
+    return { ok: true, msg: `[DRY] ${inst} ${side} ${size}张 名义≈${notional.toFixed(0)} 杠杆≈${lever}x SL=${slPxStr} TP=${tpPxStr} id=${cl}` };
   }
 
   await setLeverage(inst, Math.min(Math.max(lever, 1), 5));
   const placed = await placeOrder({ inst, side, size, clOrdId: cl });
   if (!placed.ok) return { ok: false, msg: `${inst}: 下单失败 ${placed.raw.slice(0, 180)}` };
 
-  const oco = await placeOco({ inst, side: side === "buy" ? "sell" : "buy", size, slPx, tpPx, clOrdId: cl + "oc" });
+  const oco = await placeOco({ inst, side: side === "buy" ? "sell" : "buy", size, slPx: slPxStr, tpPx: tpPxStr, clOrdId: cl + "oc" });
   const confirmed = await confirmAlgo(inst);
   return { ok: oco.ok && confirmed, msg: `${inst} ${side} ${size}张; OCO=${oco.ok}; 回查=${confirmed}` };
 }
@@ -198,6 +274,8 @@ async function runRound() {
     }
   }
 
+  const marketDigest = buildMarketDigest(mkt.data);
+  const knownInsts = knownInstsOf(mkt.data);
   const sharedContext = [
     `轮次 ${roundId}，时间 ${ts()}，环境 demo（模拟盘）`,
     ``,
@@ -206,7 +284,8 @@ async function runRound() {
     `【挂单】${snap.algoOrders.length ? JSON.stringify(snap.algoOrders) : "无"}`,
     `【运行态】当日止损 ${rt.daySlCount} 次，当日盈亏 ${rt.dayPnlPct}%，月度回撤 ${rt.monthDdPct}%`,
     ``,
-    `【行情】${JSON.stringify(mkt.data).slice(0, 6000)}`,
+    `【候选标的与行情摘要】可交易其中任意 USDT 永续，做多/做空均可；优先流动性好、规格清晰的标的`,
+    marketDigest,
   ].join("\n");
 
   // ② 连接 MCP（给专家供工具），跑图（编排 + LLM 决策）
@@ -266,7 +345,7 @@ async function runRound() {
       execResults.push(`持有 ${it.inst}: ${it.reason}`);
       continue;
     }
-    const g = guardIntent(it, snap, refPriceOf(mkt.data, it.inst));
+    const g = guardIntent(it, snap, refPriceOf(mkt.data, it.inst), knownInsts);
     if (!g.ok) {
       const msg = `⛔ 风控拦截 ${it.inst}/${it.action}: ${g.violations.join("；")}`;
       execResults.push(msg);
@@ -277,7 +356,7 @@ async function runRound() {
     seq++;
     const r = it.action === "close"
       ? await executeClose(it, snap)
-      : await executeOpen(it, snap, roundId, seq, refPriceOf(mkt.data, it.inst));
+      : await executeOpen(it, snap, roundId, seq, refPriceOf(mkt.data, it.inst), specOf(mkt.data, it.inst));
     execResults.push(`${it.inst}/${it.action}: ${r.ok ? "✅" : "❌"} ${r.msg}`);
   }
   for (const r of execResults) log(`执行 ${r}`);

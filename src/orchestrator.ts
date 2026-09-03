@@ -91,7 +91,8 @@ async function adjudicate(
 - riskPct 不超过 0.025；单笔 >0.02 时把 needsApproval 设为 true 并写 approvalReason。
 - 开仓必须给 slDist。
 - 偏离章程基准时 deviations 五项必填（尤其 falsifier 可证伪预判）。
-- 只能交易 BTC-USDT-SWAP 与 ETH-USDT-SWAP。`;
+- 可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(action=long)与做空(action=short)平等、均可开仓（net 模式单一方向）。
+- 优先流动性好、规格清晰的标的，避开价格极低/价格步长极小的标的。`;
 
   const user = [
     ctx,
