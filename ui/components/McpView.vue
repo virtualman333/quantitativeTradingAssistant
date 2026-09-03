@@ -12,12 +12,22 @@ const testing = ref("");
 const saving = ref(false);
 const fieldErr = ref("");
 
-const blank = () => ({ id: uid("mcp"), name: "", command: "", args: [], url: "", headers: null, enabled: true });
+const blank = () => ({ id: uid("mcp"), name: "", kind: "exchange", command: "", args: [], url: "", headers: null, enabled: true });
+
+// 业务类型标签（区分「交易所」与「其他 MCP」）
+const KIND = {
+  exchange: { t: "交易所", cls: "t-buy" },
+  data: { t: "数据源", cls: "t-info" },
+  tool: { t: "工具", cls: "t-hold" },
+  other: { t: "其他", cls: "t-hold" },
+};
+const kindOf = (k) => KIND[k] || { t: "交易所", cls: "t-hold" };
 
 // 表单里 args/headers 用字符串编辑，保存时再解析
 function toForm(m) {
   return {
     ...m,
+    kind: m.kind || "exchange",
     argsStr: (m.args || []).join(" "),
     headersStr: m.headers ? JSON.stringify(m.headers) : "",
   };
@@ -62,6 +72,7 @@ async function doSave() {
     await api.mcpUpsert({
       id,
       name,
+      kind: f.kind || "exchange",
       command: f.command || "",
       args: String(f.argsStr || "").split(/\s+/).filter(Boolean),
       url: f.url || undefined,
@@ -112,11 +123,12 @@ async function test(m) {
     <div class="body">
       <table v-if="store.mcps.length">
         <thead>
-          <tr><th>名称</th><th>类型</th><th>命令 / URL</th><th>状态</th><th>操作</th></tr>
+          <tr><th>名称</th><th>分类</th><th>协议</th><th>命令 / URL</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="m in store.mcps" :key="m.id">
             <td><b>{{ m.name }}</b></td>
+            <td><span :class="['tag', kindOf(m.kind).cls]">{{ kindOf(m.kind).t }}</span></td>
             <td><span :class="['tag', m.url ? 't-info' : 't-hold']">{{ m.url ? "HTTP" : "stdio" }}</span></td>
             <td class="wrap"><code>{{ m.url || ((m.command || "") + " " + (m.args || []).join(" ")) }}</code></td>
             <td><span :class="['tag', m.enabled ? 't-on' : 't-off']">{{ m.enabled ? "启用" : "停用" }}</span></td>
@@ -141,6 +153,15 @@ async function test(m) {
       <h3>{{ editingId ? "编辑 MCP" : "新增 MCP" }}</h3>
       <div class="body">
         <div class="row"><label>名称</label><input v-model="editing.name" placeholder="如：OKX 交易 MCP" /></div>
+        <div class="row">
+          <label>分类</label>
+          <select v-model="editing.kind">
+            <option value="exchange">交易所（账户/持仓/下单）</option>
+            <option value="data">数据源（新闻/链上/行情）</option>
+            <option value="tool">工具（文件/搜索等）</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
         <div class="row">
           <label>ID</label><input v-model="editing.id" :readonly="!!editingId" />
         </div>

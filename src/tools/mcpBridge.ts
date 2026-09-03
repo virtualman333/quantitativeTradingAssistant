@@ -10,6 +10,7 @@
  * 它们的字段映射由各自 server 负责，本层不关心，只负责「连上 + 过滤只读 + 交给 LLM」。
  */
 import { connectMcp, type McpTool } from "../mcp.js";
+import { listMcpServers } from "../store.js";
 import type { Tool, ToolResult } from "./types.js";
 
 /**
@@ -48,7 +49,25 @@ export interface McpReadToolSet {
  * 调用方（portfolio 引擎）用完后负责 close。
  */
 export async function loadMcpReadTools(): Promise<McpReadToolSet> {
-  const conn = await connectMcp();
+  // 只桥接「交易所」类型 MCP（账户/持仓/挂单来自交易所）；
+  // 数据源/工具等其他类型不参与持仓汇总，避免把无关工具混入。
+  let servers: { id: string; enabled: boolean; kind?: string }[] = [];
+  try {
+    servers = listMcpServers().filter((s) => s.enabled);
+  } catch {
+    servers = [];
+  }
+  const exchangeIds = servers
+    .filter((s) => (s.kind ?? "exchange") === "exchange")
+    .map((s) => s.id);
+
+  const conn = exchangeIds.length
+    ? await connectMcp(exchangeIds)
+    : {
+        tools: [] as McpTool[],
+        errors: ["未配置任何「交易所」类型 MCP。请到 MCP 页把 server 分类设为「交易所」。"],
+        close: async () => {},
+      };
   const tools: Tool[] = [];
   const seen = new Set<string>();
 

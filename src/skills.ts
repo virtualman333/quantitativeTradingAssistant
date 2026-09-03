@@ -133,6 +133,19 @@ export const SKILLS: Skill[] = [
     },
   },
   {
+    id: "polymarket_sentiment",
+    name: "Polymarket 情绪",
+    description:
+      "从 Polymarket 预测市场拉取加密/宏观相关事件的隐含概率与成交量（市场情绪）。价格=市场集体判断的概率(0-1)。",
+    args: "{limit?:数字(默认12)}",
+    readOnly: true,
+    run: async (a) => {
+      const args = [];
+      if (a.limit) args.push("--limit", String(a.limit));
+      return runPyScript("polymarket_sentiment.py", args, 120_000);
+    },
+  },
+  {
     id: "news_log",
     name: "消息入库",
     description: "把采集到的消息写入 news/news.jsonl（只追加）并生成当日投影与当轮简报。",

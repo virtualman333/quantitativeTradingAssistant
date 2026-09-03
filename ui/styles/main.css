@@ -35,6 +35,14 @@
   --sh-3: 0 18px 48px rgba(0, 0, 0, .58);
   --ring: 0 0 0 2px rgba(76, 141, 255, .35);
   --ease: .16s cubic-bezier(.4, 0, .2, 1);
+
+  /* 兼容别名：部分组件历史使用了 --c-* 前缀，映射到标准变量，避免颜色失效 */
+  --c-text-dim: var(--dim);
+  --c-bg-soft: var(--surface-2);
+  --c-warn: var(--yellow);
+  --c-buy: var(--green);
+  --c-sell: var(--red);
+  --c-danger: var(--red);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0 }
@@ -204,7 +212,7 @@ code { font-family: Consolas, "Cascadia Code", monospace }
 .card:hover { border-color: var(--border-strong); transform: translateY(-1px) }
 .card .k { color: var(--dim); font-size: 11px; letter-spacing: .3px }
 .card .v { font-size: 19px; font-weight: 600; margin-top: 3px; word-break: break-all; line-height: 1.35 }
-.up { color: var(--green) } .down { color: var(--red) }
+.up { color: var(--green) } .down { color: var(--red) } .warn { color: var(--yellow) }
 
 .panel {
   background: var(--surface); border: 1px solid var(--border);

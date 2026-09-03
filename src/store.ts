@@ -61,9 +61,14 @@ export interface RoleConfig {
   createdAt: string;
 }
 
+/** MCP 业务类型：exchange=交易所（提供账户/持仓/下单）；data=数据源（新闻/链上/行情）；tool=通用工具；other=其他 */
+export type McpKind = "exchange" | "data" | "tool" | "other";
+
 export interface McpServerCfg {
   id: string;
   name: string;
+  /** 业务类型，见 McpKind。缺省视为 exchange（兼容旧配置） */
+  kind?: McpKind;
   /** stdio 型 */
   command?: string;
   args?: string[];
@@ -153,6 +158,7 @@ function defaults(): StoreData {
       {
         id: "okx-trade-mcp",
         name: "OKX 交易 MCP",
+        kind: "exchange",
         command: "okx-trade-mcp",
         args: ["--modules", "all"],
         enabled: true,
@@ -173,6 +179,7 @@ function defaults(): StoreData {
         news_fetch: true,
         news_verify: true,
         news_log: true,
+        polymarket_sentiment: true,
         order_id: true,
         read_charter: true,
       },

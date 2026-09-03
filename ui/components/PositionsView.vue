@@ -29,6 +29,62 @@ function fmt(x) {
 }
 const pct = (x) => (x == null ? "—" : (Number(x) * 100).toFixed(2) + "%");
 
+// ── 全局概览（顶部汇总卡）──
+const totalEquity = computed(() =>
+  accounts.value.reduce((s, a) => s + (Number(a.equityUsd) || 0), 0)
+);
+const totalUpl = computed(() =>
+  positions.value.reduce((s, p) => s + (Number(p.upl) || 0), 0)
+);
+// 浮盈率 = 浮盈 / 本金（权益已含浮盈，减掉浮盈即本金）
+const totalUplRatio = computed(() => {
+  const base = totalEquity.value - totalUpl.value;
+  return base > 0 ? totalUpl.value / base : null;
+});
+
+// 距强平距离（0~1，越小越危险）：long 用 mark-liq，short 用 liq-mark
+function liqDist(p) {
+  const mark = Number(p.markPrice);
+  const liq = Number(p.liqPrice);
+  if (!mark || liq == null) return null;
+  return p.side === "short" ? (liq - mark) / mark : (mark - liq) / mark;
+}
+// 距强平风险配色：<5% 危险(红)，<10% 警告(黄)
+function liqCls(d) {
+  if (d == null) return "";
+  if (d < 0.05) return "down";
+  if (d < 0.1) return "warn";
+  return "";
+}
+
+// 持仓排序：风险优先（距强平近的在前），其次保持不变
+const sortedPositions = computed(() =>
+  [...positions.value].sort((a, b) => {
+    const da = liqDist(a);
+    const db = liqDist(b);
+    if (da == null && db == null) return 0;
+    if (da == null) return 1;
+    if (db == null) return -1;
+    return da - db;
+  })
+);
+
+// 最近强平距离（最危险一笔）
+const worstLiq = computed(() => {
+  let w = null;
+  for (const p of positions.value) {
+    const d = liqDist(p);
+    if (d != null && (w == null || d < w)) w = d;
+  }
+  return w;
+});
+
+// 仓位占比 = 名义价值 / 总权益（0~1）
+function weightPct(p) {
+  if (p.notionalUsd == null || !totalEquity.value) return null;
+  return Number(p.notionalUsd) / totalEquity.value;
+}
+
 function sideTag(s) {
   if (s === "long") return { t: "多", cls: "t-buy" };
   if (s === "short") return { t: "空", cls: "t-sell" };
@@ -126,9 +182,10 @@ onUnmounted(() => {
   <div class="head-row">
     <div class="btn-group">
       <button v-if="!streaming" class="primary" @click="summarize">汇总持仓</button>
-      <button v-else @click="stop">停止</button>
+      <button v-else @click="stop"><span class="spin"></span>汇总中…（点此停止）</button>
     </div>
     <span class="spacer"></span>
+    <span v-if="streaming" class="hint">正在调用各交易所只读工具归并数据…</span>
     <span v-if="lastSync" class="hint">上次汇总 {{ lastSync }}</span>
   </div>
 
@@ -160,6 +217,34 @@ onUnmounted(() => {
     <div class="body notes">{{ notes || streamText }}</div>
   </div>
 
+  <!-- 全局概览 -->
+  <div v-if="totalEquity || positions.length" class="cards" style="margin-top:12px">
+    <div class="card">
+      <div class="k">总权益（USD）</div>
+      <div class="v">{{ fmt(totalEquity) }}</div>
+    </div>
+    <div class="card">
+      <div class="k">总浮盈</div>
+      <div class="v" :class="signCls(totalUpl)">{{ totalUpl >= 0 ? "+" : "" }}{{ fmt(totalUpl) }}</div>
+    </div>
+    <div class="card">
+      <div class="k">浮盈率</div>
+      <div class="v" :class="signCls(totalUplRatio)">
+        {{ totalUplRatio == null ? "—" : (totalUplRatio >= 0 ? "+" : "") + (totalUplRatio * 100).toFixed(2) + "%" }}
+      </div>
+    </div>
+    <div class="card">
+      <div class="k">持仓笔数</div>
+      <div class="v">{{ positions.length }}</div>
+    </div>
+    <div class="card">
+      <div class="k">最近强平距离</div>
+      <div class="v" :class="liqCls(worstLiq)">
+        {{ worstLiq == null ? "—" : (worstLiq * 100).toFixed(1) + "%" }}
+      </div>
+    </div>
+  </div>
+
   <!-- 账户卡片 -->
   <div v-if="accounts.length" class="cards" style="margin-top:12px">
     <div v-for="a in accounts" :key="a.exchange" class="card exch-card">
@@ -176,34 +261,43 @@ onUnmounted(() => {
 
   <!-- 持仓表 -->
   <div v-if="positions.length" class="panel" style="margin-top:12px">
-    <h2>当前持仓（{{ positions.length }}）</h2>
+    <h2>当前持仓（{{ positions.length }}）<span class="spacer"></span><span class="hint">按距强平风险排序</span></h2>
     <div class="body">
-      <table>
-        <thead>
-          <tr>
-            <th>交易所</th><th>标的</th><th>市场</th><th>方向</th><th>数量</th>
-            <th>开仓价</th><th>标记价</th><th>名义价值</th><th>浮盈</th><th>浮盈%</th>
-            <th>杠杆</th><th>强平价</th><th>保证金模式</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(p, i) in positions" :key="p.exchange + p.instId + i">
-            <td><span class="tag t-hold">{{ p.exchange }}</span></td>
-            <td><b>{{ p.instId }}</b></td>
-            <td>{{ p.market }}</td>
-            <td><span :class="['tag', sideTag(p.side).cls]">{{ sideTag(p.side).t }}</span></td>
-            <td>{{ fmt(p.size) }}</td>
-            <td>{{ fmt(p.entryPrice) }}</td>
-            <td>{{ fmt(p.markPrice) }}</td>
-            <td>{{ fmt(p.notionalUsd) }}</td>
-            <td :class="signCls(p.upl)">{{ p.upl >= 0 ? "+" : "" }}{{ fmt(p.upl) }}</td>
-            <td :class="signCls(p.uplRatio)">{{ pct(p.uplRatio) }}</td>
-            <td>{{ p.leverage == null ? "—" : p.leverage + "x" }}</td>
-            <td>{{ fmt(p.liqPrice) }}</td>
-            <td>{{ p.marginMode || "—" }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="scroll-x">
+        <table>
+          <thead>
+            <tr>
+              <th>交易所</th><th>标的</th><th>市场</th><th>方向</th><th>数量</th>
+              <th>开仓价</th><th>标记价</th><th>名义价值</th><th>仓位占比</th>
+              <th>浮盈</th><th>浮盈%</th><th>杠杆</th><th>强平价</th><th>距强平</th><th>保证金模式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(p, i) in sortedPositions" :key="p.exchange + p.instId + i">
+              <td><span class="tag t-hold">{{ p.exchange }}</span></td>
+              <td><b>{{ p.instId }}</b></td>
+              <td>{{ p.market }}</td>
+              <td><span :class="['tag', sideTag(p.side).cls]">{{ sideTag(p.side).t }}</span></td>
+              <td>{{ fmt(p.size) }}</td>
+              <td>{{ fmt(p.entryPrice) }}</td>
+              <td>{{ fmt(p.markPrice) }}</td>
+              <td>{{ fmt(p.notionalUsd) }}</td>
+              <td>
+                <div class="weight">
+                  <div class="bar"><i :style="{ width: (weightPct(p) == null ? 0 : weightPct(p) * 100) + '%' }"></i></div>
+                  <span>{{ weightPct(p) == null ? "—" : (weightPct(p) * 100).toFixed(1) + "%" }}</span>
+                </div>
+              </td>
+              <td :class="signCls(p.upl)">{{ p.upl >= 0 ? "+" : "" }}{{ fmt(p.upl) }}</td>
+              <td :class="signCls(p.uplRatio)">{{ pct(p.uplRatio) }}</td>
+              <td>{{ p.leverage == null ? "—" : p.leverage + "x" }}</td>
+              <td>{{ fmt(p.liqPrice) }}</td>
+              <td :class="liqCls(liqDist(p))">{{ liqDist(p) == null ? "—" : (liqDist(p) * 100).toFixed(1) + "%" }}</td>
+              <td>{{ p.marginMode || "—" }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -251,4 +345,19 @@ onUnmounted(() => {
 .dot.run { background: var(--c-warn); }
 .dot.ok { background: var(--c-buy); }
 .dot.bad { background: var(--c-danger); }
+.scroll-x { overflow-x: auto; }
+.spin {
+  width: 12px; height: 12px; border-radius: 50%; flex: none; display: inline-block;
+  border: 2px solid var(--border-strong); border-top-color: var(--blue);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg) } }
+.weight { display: flex; align-items: center; gap: 7px; min-width: 112px; }
+.weight .bar { flex: 1; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.weight .bar i {
+  display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--blue), var(--purple));
+  transition: width var(--ease);
+}
+.weight span { font-size: 11px; color: var(--text-2); min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
 </style>

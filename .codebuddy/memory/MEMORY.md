@@ -18,7 +18,7 @@
   - `store.ts`：JSON 本地持久化（agent/data/store.json）：模型/角色/MCP 配置/settings/recentRounds。**必须存在**（graph/llm/mcp/experts 都依赖它）——曾有 list 未显示但它存在。
   - `okx.ts`：不重写签名，复用父目录 python 脚本（mcp_call/order_id/market_scan/archive_round），runPy 用 python 解释器不能用 process.execPath（tsx 下是 node.exe）。
   - `mcp.ts`：MCP 客户端，Windows 垫片须 cmd /c 包装；写操作不走 MCP，一律走 okx.ts 受控通道。
-  - `experts.ts`：内置 4 专家（trading/news/factor/risk），ReAct 简化版工具循环（≤4 次），支持从 store 动态角色覆盖。
+  - `experts.ts`：**可插拔专家体系**——专家声明式定义在 `experts/<id>/expert.json`（systemPrompt/skills/mcpServers/enabled/alwaysInvoke），可带 `experts/<id>/knowledge/*.md` 领域经验 + `lessons.md`（每轮 `evolveExpert()` 自动追加进化）。`loadExpertDefs()` 扫描加载，`listExpertRoles()` 三层来源：文件 → store.roles 覆盖 → 内置 `EXPERTS` 兜底。现有 8 专家：trading/news/factor/risk/funding/onchain/sentiment/execution。ReAct 简化版工具循环（≤4 次）。新增专家=放一个 JSON，无需改 TS。
   - `graph.ts`：LangGraph 图，Send 动态扇出专家，Annotation.Reducer 合并 opinions；execute/archive 为占位节点（实际在 main.ts）。
   - `electron/main.ts`：启动即拉起 agent 子进程（tsx src/main.ts），UI 直接可用；config.json 在 agent/electron/（旧简单配置）与 store.json（新，多模型）并存，注意两者未完全打通。
 - **前端（2026-09-02 重写）**：Vite + Vue3 SFC 构建模式（`ui/`：main.js、App.vue、store/index.js、lib/{api,feedback,format}.js、components/*.vue、styles/main.css），产物 dist/ui 由 Electron 用 file:// 加载（vite base 必须 "./"）。`npm run ui:dev` = Vite dev server(5173) + Electron（UI_DEV=1）。
