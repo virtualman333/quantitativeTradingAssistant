@@ -3,7 +3,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { status } from "../store/index.js";
 import { api } from "../lib/api.js";
-import { goTab, klineInst } from "../lib/nav.js";
+import { goTab, openKlineWin } from "../lib/nav.js";
 import { fmtNum, signCls, STANCE_TEXT } from "../lib/format.js";
 
 const rd = computed(() => status.latestRound || {});
@@ -48,10 +48,9 @@ function fmtPrice(v) {
   const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
   return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
-/** 点交易对 → 跳行情页并自动展开该标的 K 线 */
+/** 点交易对 → 独立窗口看 K 线（不打断当前页） */
 function openKlineOf(t) {
-  klineInst.value = t.instId;
-  goTab("mkt");
+  openKlineWin(t.instId);
 }
 let tickTimer = null;
 let ticking = false;
@@ -137,7 +136,7 @@ onUnmounted(stopTick);
         </tbody>
       </table>
       <div v-else-if="!tickersErr" class="empty">加载中…</div>
-      <div class="hint" style="margin-top:8px">点击交易对查看 K 线 · 市值梯队为内置静态排名（OKX 公共行情不返回市值）</div>
+      <div class="hint" style="margin-top:8px">点击交易对在独立窗口查看 K 线 · 市值梯队为内置静态排名（OKX 公共行情不返回市值）</div>
     </div>
   </div>
 

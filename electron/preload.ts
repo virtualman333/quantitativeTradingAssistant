@@ -82,6 +82,16 @@ contextBridge.exposeInMainWorld("api", {
   marketTickers: () => safeInvoke("market:tickers"),
   marketKline: (instId: string, bar?: string, limit?: number) =>
     safeInvoke("market:kline", instId, bar, limit),
+  // 独立窗口（K 线 / 报告等）：同 key 复用已开窗口
+  winOpen: (o: {
+    kind: string;
+    hash: string;
+    title?: string;
+    width?: number;
+    height?: number;
+    key?: string;
+  }) => safeInvoke("win:open", o),
+  winClose: () => safeInvoke("win:close"),
   openFolder: (w: string) => safeInvoke("open:folder", w),
   openStore: () => safeInvoke("open:store"),
   showError: (m: string) => safeInvoke("dialog:error", m),

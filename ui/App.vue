@@ -2,6 +2,10 @@
 /**
  * App.vue —— 根组件：页签 + 全局提示 + 各业务视图
  * 视图用 KeepAlive 缓存，切换页签不丢状态（对话、滚动位置、未提交的编辑）。
+ *
+ * 两种形态（由 URL hash 决定）：
+ *   - 主界面：header + 页签 + 视图
+ *   - 独立窗口（#/win/kline?instId=xxx）：只渲染一个 WinFrame，K 线 / 报告等
  */
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import {
@@ -23,7 +27,8 @@ import PositionsView from "./components/PositionsView.vue";
 import TraceView from "./components/TraceView.vue";
 import ReportsView from "./components/ReportsView.vue";
 import MarketView from "./components/MarketView.vue";
-import { tab } from "./lib/nav.js"; // 共享页签：支持跨视图跳转（如总览「查看更多」→行情）
+import WinFrame from "./components/WinFrame.vue";
+import { tab, winRoute, fallbackWin, closeFallbackWin, closeWin } from "./lib/nav.js";
 
 /** 页签图标：内联 SVG，随 currentColor 走主题色，不依赖任何图标字体 */
 const svg = (inner) =>
@@ -77,86 +82,125 @@ function toggleTheme() {
   applyTheme(theme.value === "light" ? "dark" : "light");
 }
 
+/** Esc：页内弹窗直接关，独立窗口交给主进程关掉自己 */
+function onKey(e) {
+  if (e.key !== "Escape") return;
+  if (fallbackWin.value) closeFallbackWin();
+  else if (winRoute.value) closeWin();
+}
+
 onMounted(async () => {
   // 主题初始化放最前，避免首屏闪色
   let saved = "light";
   try { saved = localStorage.getItem("okx-agent-theme") || "light"; } catch { /* ignore */ }
   applyTheme(saved === "dark" ? "dark" : "light");
+  window.addEventListener("keydown", onKey);
   await initApp();
 });
-onBeforeUnmount(dispose);
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKey);
+  dispose();
+});
 </script>
 
 <template>
-  <header class="hd">
-    <div class="brand">
-      <div class="logo">OK</div>
-      <h1>OKX 交易 Agent</h1>
-    </div>
-    <span :class="['badge', status.agentRunning ? 'run' : 'stop']">
-      {{ status.agentRunning ? '运行中' : '未运行' }}
-    </span>
-    <span v-if="currentModel" class="model-chip" :title="currentModel.name">
-      <span class="hint">模型</span>{{ currentModel.name }}
-    </span>
-    <span class="spacer"></span>
-    <button class="theme-btn" :title="theme === 'light' ? '切换到深色' : '切换到浅色'" @click="toggleTheme">
-      <span class="theme-ico" v-html="theme === 'light' ? ICON_MOON : ICON_SUN"></span>
-    </button>
-    <button :disabled="status.busy" @click="runOnce">
-      {{ status.busy ? '运行中…' : '跑一轮' }}
-    </button>
-    <div class="btn-group">
-      <button class="primary" :disabled="status.agentRunning" @click="startAgent">启动服务</button>
-      <button class="danger" :disabled="!status.agentRunning" @click="stopAgent">停止</button>
-    </div>
-  </header>
+  <!-- 独立窗口形态：没有 header/页签，只渲染一个窗口组件 -->
+  <div v-if="winRoute" class="win-shell">
+    <WinFrame :route="winRoute" />
+  </div>
 
-  <nav class="tabs">
-    <div v-for="t in tabs" :key="t.k"
-         :class="['tab', tab === t.k && 'active']"
-         @click="tab = t.k">
-      <span class="tab-ico" v-html="ICONS[t.k]"></span>{{ t.t }}
-    </div>
-  </nav>
-
-  <main>
-    <div v-if="globalError" class="alert err">
-      <span class="spacer">⚠ {{ globalError }}</span>
-      <button class="sm" @click="initApp()">重试</button>
-    </div>
-    <div v-if="isMockModel" class="alert info">
-      <span class="spacer">当前默认模型为 <b>mock</b>，不会真实调用。到「模型」页添加 API Key 并设为默认。</span>
-      <button class="sm" @click="tab = 'models'">去配置</button>
-    </div>
-    <div v-if="status.pending.length" class="alert">
-      <span class="spacer">
-        <span class="tag t-warn">{{ status.pending.length }}</span>
-        笔决策等待人工确认：{{ status.pending.join('、') }}
+  <template v-else>
+    <header class="hd">
+      <div class="brand">
+        <div class="logo">OK</div>
+        <h1>OKX 交易 Agent</h1>
+      </div>
+      <span :class="['badge', status.agentRunning ? 'run' : 'stop']">
+        {{ status.agentRunning ? '运行中' : '未运行' }}
       </span>
-    </div>
+      <span v-if="currentModel" class="model-chip" :title="currentModel.name">
+        <span class="hint">模型</span>{{ currentModel.name }}
+      </span>
+      <span class="spacer"></span>
+      <button class="theme-btn" :title="theme === 'light' ? '切换到深色' : '切换到浅色'" @click="toggleTheme">
+        <span class="theme-ico" v-html="theme === 'light' ? ICON_MOON : ICON_SUN"></span>
+      </button>
+      <button :disabled="status.busy" @click="runOnce">
+        {{ status.busy ? '运行中…' : '跑一轮' }}
+      </button>
+      <div class="btn-group">
+        <button class="primary" :disabled="status.agentRunning" @click="startAgent">启动服务</button>
+        <button class="danger" :disabled="!status.agentRunning" @click="stopAgent">停止</button>
+      </div>
+    </header>
 
-    <KeepAlive>
-      <component :is="currentView" />
-    </KeepAlive>
-  </main>
+    <nav class="tabs">
+      <div v-for="t in tabs" :key="t.k"
+           :class="['tab', tab === t.k && 'active']"
+           @click="tab = t.k">
+        <span class="tab-ico" v-html="ICONS[t.k]"></span>{{ t.t }}
+      </div>
+    </nav>
 
-  <!-- 全局确认框 -->
-  <div v-if="confirmBox.open" class="modal" @click.self="answerConfirm(false)">
-    <div class="box" style="width:420px">
-      <h3>{{ confirmBox.title }}</h3>
-      <div class="body" style="white-space:pre-wrap">{{ confirmBox.message }}</div>
-      <div class="foot">
-        <button @click="answerConfirm(false)">取消</button>
-        <button :class="confirmBox.danger ? 'danger' : 'primary'" @click="answerConfirm(true)">
-          {{ confirmBox.confirmText }}
-        </button>
+    <main>
+      <div v-if="globalError" class="alert err">
+        <span class="spacer">⚠ {{ globalError }}</span>
+        <button class="sm" @click="initApp()">重试</button>
+      </div>
+      <div v-if="isMockModel" class="alert info">
+        <span class="spacer">当前默认模型为 <b>mock</b>，不会真实调用。到「模型」页添加 API Key 并设为默认。</span>
+        <button class="sm" @click="tab = 'models'">去配置</button>
+      </div>
+      <div v-if="status.pending.length" class="alert">
+        <span class="spacer">
+          <span class="tag t-warn">{{ status.pending.length }}</span>
+          笔决策等待人工确认：{{ status.pending.join('、') }}
+        </span>
+      </div>
+
+      <KeepAlive>
+        <component :is="currentView" />
+      </KeepAlive>
+    </main>
+
+    <!-- 全局确认框 -->
+    <div v-if="confirmBox.open" class="modal" @click.self="answerConfirm(false)">
+      <div class="box" style="width:420px">
+        <h3>{{ confirmBox.title }}</h3>
+        <div class="body" style="white-space:pre-wrap">{{ confirmBox.message }}</div>
+        <div class="foot">
+          <button @click="answerConfirm(false)">取消</button>
+          <button :class="confirmBox.danger ? 'danger' : 'primary'" @click="answerConfirm(true)">
+            {{ confirmBox.confirmText }}
+          </button>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- 全局提示 -->
-  <div class="toasts">
-    <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.msg }}</div>
+    <!-- 全局提示 -->
+    <div class="toasts">
+      <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.msg }}</div>
+    </div>
+  </template>
+
+  <!-- 没有主进程桥接（浏览器 dev）时的独立窗口回退：页内全屏弹窗 -->
+  <div v-if="fallbackWin" class="modal win-modal" @click.self="closeFallbackWin()">
+    <div class="win-modal-box">
+      <WinFrame :route="fallbackWin" />
+    </div>
   </div>
 </template>
+
+<style scoped>
+.win-shell { position: fixed; inset: 0; }
+.win-modal { z-index: 60; }
+.win-modal-box {
+  position: relative;
+  width: 92vw;
+  height: 90vh;
+  background: var(--bg);
+  border-radius: var(--r);
+  overflow: hidden;
+  box-shadow: var(--sh-3);
+}
+</style>

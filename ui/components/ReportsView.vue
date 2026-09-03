@@ -9,6 +9,7 @@
  */
 import { ref, computed, onMounted } from "vue";
 import { api } from "../lib/api.js";
+import { openDocWin } from "../lib/nav.js";
 import { toast, toastErr } from "../lib/feedback.js";
 
 const DT = { OPEN: "开仓", HOLD: "持有", CLOSE: "平仓", STANDBY: "观望" };
@@ -158,6 +159,13 @@ async function regen() {
   }
 }
 
+/** 在独立窗口里看（右侧预览区太窄，长报告读着费劲） */
+async function openInWindow() {
+  if (!curDoc.value?.path) return;
+  const r = await openDocWin(curDoc.value.path, curDoc.value.label);
+  if (r && r.ok === false) toast(r.error || "打开窗口失败", "err");
+}
+
 async function openExternal() {
   if (!curDoc.value?.path) return;
   try {
@@ -288,6 +296,7 @@ onMounted(refresh);
               {{ busy ? "生成中…" : "用 LLM 重新生成" }}
             </button>
             <button class="sm" :disabled="!curDoc?.path" @click="reload">重新加载</button>
+            <button class="sm" :disabled="!curDoc?.path" @click="openInWindow">⧉ 独立窗口</button>
             <button class="sm" :disabled="!curDoc?.path" @click="openExternal">外部打开</button>
           </div>
         </h2>

@@ -1,11 +1,11 @@
 <script setup>
 /**
  * MarketView —— 行情：全量 USDT 永续列表，支持搜索 / 涨跌筛选 / 三种排序 / 加载更多，
- * 点击任意交易对在下方展示 K 线（自绘 SVG，见 KlineChart.vue）。
+ * 点击任意交易对在下方内嵌 K 线，双击（或点「独立窗口」）在独立窗口里看大图。
  */
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { api } from "../lib/api.js";
-import { klineInst } from "../lib/nav.js";
+import { openKlineWin } from "../lib/nav.js";
 import { fmtNum, signCls } from "../lib/format.js";
 import KlineChart from "./KlineChart.vue";
 
@@ -111,18 +111,9 @@ async function setBar(b) {
   await fetchKline();
 }
 
-/** 从总览点某个交易对跳过来时，自动展开它的 K 线（消费后置空） */
-function consumePendingKline() {
-  if (!klineInst.value) return;
-  const inst = klineInst.value;
-  klineInst.value = "";
-  const row = all.value.find((t) => t.instId === inst) || { instId: inst };
-  openKline(row);
-}
-
 function start() {
   if (timer) return;
-  load().then(consumePendingKline);
+  load();
   timer = setInterval(load, 15_000);
 }
 function stop() {
@@ -153,7 +144,7 @@ onUnmounted(stop);
     <button @click="load">刷新</button>
     <span class="spacer"></span>
     <span class="hint">
-      {{ visible.length }}/{{ list.length }} 个 · 每 15 秒刷新 · {{ ts || "—" }}
+      单击内嵌预览 · 双击独立窗口 · {{ visible.length }}/{{ list.length }} 个 · 每 15 秒刷新 · {{ ts || "—" }}
       <span v-if="source" class="tag">{{ source === "mcp" ? "MCP" : "REST" }}</span>
     </span>
   </div>
@@ -175,7 +166,9 @@ onUnmounted(stop);
             :key="t.instId"
             class="row-click"
             :class="kInst === t.instId && 'cur'"
+            :title="`单击内嵌预览 · 双击独立窗口看 ${t.instId}`"
             @click="openKline(t)"
+            @dblclick.stop="openKlineWin(t.instId, kBar)"
           >
             <td class="dim">{{ rankText(t.rank) }}</td>
             <td><b>{{ t.instId }}</b></td>
@@ -204,6 +197,7 @@ onUnmounted(stop);
       K 线：{{ kInst }}
       <span class="hint" style="font-weight:400">{{ kBar }}</span>
       <span class="spacer"></span>
+      <button class="sm" @click="openKlineWin(kInst, kBar)">⧉ 独立窗口</button>
       <button class="sm" @click="kInst = ''">收起</button>
     </h2>
     <div class="body">

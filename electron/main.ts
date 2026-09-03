@@ -269,6 +269,42 @@ function resolvePreload(): string {
   return fs.existsSync(legacy) ? legacy : canonical;
 }
 
+/** 独立窗口（K 线 / 报告等）：key -> BrowserWindow，同 key 复用并聚焦，避免开一堆重复窗口 */
+const subWins = new Map<string, BrowserWindow>();
+
+/**
+ * 加载界面：dev server（npm run ui:dev）> 构建产物（dist/ui）。
+ * hash 用于独立窗口路由（#/win/kline?instId=xxx），主窗口传空。
+ */
+function loadUi(w: BrowserWindow, hash = ""): boolean {
+  const devPort = process.env.UI_DEV_PORT || "8088";
+  const devUrl = process.env.UI_DEV === "1" ? `http://127.0.0.1:${devPort}` : "";
+  const distUi = path.join(AGENT_ROOT, "dist", "ui", "index.html");
+  if (devUrl) {
+    w.loadURL(devUrl + (hash ? "#" + hash : ""));
+    return true;
+  }
+  if (fs.existsSync(distUi)) {
+    w.loadFile(distUi, hash ? { hash: hash.replace(/^#/, "") } : {});
+    return true;
+  }
+  return false;
+}
+
+/** 外链一律走系统浏览器：对话 Markdown 渲染出的 <a> 点击时不允许把应用窗口导航走 */
+function attachNavigationGuard(w: BrowserWindow) {
+  w.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  w.webContents.on("will-navigate", (e, url) => {
+    if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1") && !url.startsWith("http://localhost")) {
+      e.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+}
+
 function createWindow() {
   const preload = resolvePreload();
   if (!fs.existsSync(preload)) {
@@ -285,29 +321,13 @@ function createWindow() {
     },
   });
 
-  // 外链一律走系统浏览器：对话 Markdown 渲染出的 <a> 点击时不允许把应用窗口导航走
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) shell.openExternal(url);
-    return { action: "deny" };
-  });
-  win.webContents.on("will-navigate", (e, url) => {
-    if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1") && !url.startsWith("http://localhost")) {
-      e.preventDefault();
-      shell.openExternal(url);
-    }
-  });
+  attachNavigationGuard(win);
 
   // 界面来源：dev server（npm run ui:dev）> 构建产物（dist/ui）> 报错
-  const devPort = process.env.UI_DEV_PORT || "8088";
-  const devUrl = process.env.UI_DEV === "1" ? `http://127.0.0.1:${devPort}` : "";
-  const distUi = path.join(AGENT_ROOT, "dist", "ui", "index.html");
-  if (devUrl) {
-    win.loadURL(devUrl);
+  if (!loadUi(win)) {
+    pushLog(`❌ 找不到界面产物: ${path.join(AGENT_ROOT, "dist", "ui", "index.html")}（请先 npm run build，或用 npm run ui:dev）`);
+  } else if (process.env.UI_DEV === "1") {
     pushLog("开发模式：加载 Vite dev server");
-  } else if (fs.existsSync(distUi)) {
-    win.loadFile(distUi);
-  } else {
-    pushLog(`❌ 找不到界面产物: ${distUi}（请先 npm run build，或用 npm run ui:dev）`);
   }
 
   attachContextMenu(win);
@@ -320,8 +340,13 @@ function createWindow() {
     pushLog(`❌ 界面加载失败(${code}) ${desc} ${url}`);
   });
 
+  // 主窗口关了就一起关掉所有独立窗口，否则进程会被残留的子窗口吊住
   win.on("closed", () => {
     win = null;
+    for (const w of subWins.values()) {
+      if (!w.isDestroyed()) w.close();
+    }
+    subWins.clear();
   });
 }
 
@@ -518,6 +543,53 @@ ipcMain.handle("account:get", async (_e, profile = "demo") => {
   }
 });
 ipcMain.handle("logs:get", () => logBuffer.slice(-500));
+
+// ── 独立窗口（K 线 / 报告等）──────────────────────────────────
+// 内容还是同一套 UI，靠 URL hash 路由（#/win/kline?instId=xxx）决定渲染什么，
+// 好处是窗口内所有 api（行情、报告）都能直接用，不用再传数据过去。
+ipcMain.handle("win:open", (_e, o: any = {}) => {
+  const key = String(o?.key || o?.kind || "win");
+  const hash = String(o?.hash || "");
+  const title = String(o?.title || "OKX 交易 Agent");
+  const existing = subWins.get(key);
+  if (existing && !existing.isDestroyed()) {
+    // 同一个 key 已经开过：改 hash 让窗口内路由切换（同文档导航，不整页重载）
+    existing.webContents
+      .executeJavaScript(`location.hash = ${JSON.stringify(hash)}`)
+      .catch(() => {});
+    existing.focus();
+    return { ok: true, reused: true };
+  }
+  const w = new BrowserWindow({
+    width: Number(o?.width) || 1120,
+    height: Number(o?.height) || 780,
+    minWidth: 680,
+    minHeight: 480,
+    title,
+    parent: win || undefined,
+    autoHideMenuBar: true, // 子窗口不占菜单栏，标题栏由界面自己画
+    webPreferences: {
+      preload: resolvePreload(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  subWins.set(key, w);
+  attachNavigationGuard(w);
+  attachContextMenu(w);
+  if (!loadUi(w, hash)) {
+    pushLog("❌ 独立窗口：找不到界面产物（请先 npm run build）");
+  }
+  w.on("closed", () => subWins.delete(key));
+  return { ok: true };
+});
+
+/** 子窗口自己的关闭按钮（Esc / ✕）；主窗口调用不生效，避免误关主界面 */
+ipcMain.handle("win:close", (e) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  if (w && w !== win) w.close();
+  return { ok: true };
+});
 
 // ── 报告入口（日报/周报 Markdown，位于 reports/daily|weekly） ──
 const REPORTS_DIR = path.join(AGENT_ROOT, "reports");
