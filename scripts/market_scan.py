@@ -29,7 +29,14 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-BASE = "https://www.okx.com"
+# 域名候选：主站被 DNS 污染/断连时依次回退；环境变量 OKX_PUBLIC_BASE 可强制指定。
+# 另：urllib 自动读取 HTTPS_PROXY/HTTP_PROXY 环境变量，挂代理时无需改代码。
+BASES = (
+    [os.environ["OKX_PUBLIC_BASE"].rstrip("/")]
+    if os.environ.get("OKX_PUBLIC_BASE")
+    else ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"]
+)
+BASE = BASES[0]
 CST = timezone(timedelta(hours=8))
 DEFAULT_INSTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
 # 默认候选池大小：按 24h 成交额取前 N 个 USDT 永续（用户指令：不限 BTC/ETH，目标是盈利）
@@ -44,27 +51,27 @@ CANDLE_LIMIT = 300
 # HTTP
 # --------------------------------------------------------------------------
 def _http_get(path: str, params: dict | None = None, retries: int = 3) -> dict:
-    url = BASE + path
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
+    qs = "?" + urllib.parse.urlencode(params) if params else ""
     ctx = ssl.create_default_context()
     last_err = None
-    for attempt in range(retries):
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Accept": "application/json",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            if attempt < retries - 1:
-                time.sleep(1.2 * (attempt + 1))
-    raise RuntimeError(f"GET {url} failed after {retries} tries: {last_err}")
+    for base in BASES:  # 主域名不通（DNS 污染/断连）时换备用域名
+        url = base + path + qs
+        for attempt in range(retries):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Accept": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if attempt < retries - 1:
+                    time.sleep(1.2 * (attempt + 1))
+    raise RuntimeError(f"GET {path}{qs} failed on all {BASES}: {last_err}")
 
 
 # --------------------------------------------------------------------------

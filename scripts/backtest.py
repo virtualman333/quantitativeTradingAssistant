@@ -32,6 +32,7 @@ import argparse
 import bisect
 import json
 import math
+import os
 import ssl
 import sys
 import time
@@ -40,7 +41,13 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-BASE = "https://www.okx.com"
+# 域名候选：主站被 DNS 污染/断连时依次回退；环境变量 OKX_PUBLIC_BASE 可强制指定
+BASES = (
+    [os.environ["OKX_PUBLIC_BASE"].rstrip("/")]
+    if os.environ.get("OKX_PUBLIC_BASE")
+    else ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"]
+)
+BASE = BASES[0]
 DEFAULT_INSTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
 
 # 成本（单边）
@@ -66,22 +73,24 @@ WEIGHT_1H = 0.375  # 1H 30% / (4H 50% + 1H 30%)
 # HTTP
 # --------------------------------------------------------------------------- #
 def _http_get(path: str, params: dict, retries: int = 3):
-    url = BASE + path + "?" + urllib.parse.urlencode(params)
+    qs = "?" + urllib.parse.urlencode(params)
     ctx = ssl.create_default_context()
     last = None
-    for attempt in range(retries):
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                         "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            if attempt < retries - 1:
-                time.sleep(1.2 * (attempt + 1))
+    for base in BASES:  # 主域名不通（DNS 污染/断连）时换备用域名
+        url = base + path + qs
+        for attempt in range(retries):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                             "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if attempt < retries - 1:
+                    time.sleep(1.2 * (attempt + 1))
     raise last
 
 

@@ -19,13 +19,20 @@ import argparse
 import bisect
 import json
 import math
+import os
 import sys
 import urllib.parse
 import urllib.request
 
 import backtest as bt
 
-OKX = "https://www.okx.com"
+# 域名候选：主站被 DNS 污染/断连时依次回退；环境变量 OKX_PUBLIC_BASE 可强制指定
+OKX_BASES = (
+    [os.environ["OKX_PUBLIC_BASE"].rstrip("/")]
+    if os.environ.get("OKX_PUBLIC_BASE")
+    else ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"]
+)
+OKX = OKX_BASES[0]
 
 
 def fetch_funding(inst: str, hours: int):
@@ -37,10 +44,22 @@ def fetch_funding(inst: str, hours: int):
         params = {"instId": inst, "limit": "100"}
         if before:
             params["before"] = before
-        url = OKX + "/api/v5/public/funding-rate-history?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            d = json.loads(resp.read().decode())
+        qs = "/api/v5/public/funding-rate-history?" + urllib.parse.urlencode(params)
+        d = None
+        last_err = None
+        for base in OKX_BASES:  # 主域名不通（DNS 污染/断连）时换备用域名
+            try:
+                req = urllib.request.Request(
+                    base + qs, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    d = json.loads(resp.read().decode())
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                d = None
+        if d is None:
+            raise last_err  # type: ignore[misc]
         data = d.get("data", [])
         if d.get("code") != "0" or not data:
             break
