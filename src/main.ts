@@ -298,6 +298,8 @@ async function runRound() {
       live_watch: [],
       actions: (decision.intents ?? []).map((i: TradeIntent) => `${i.inst}:${i.action} — ${i.reason}`),
       decision: decision.summary,
+      decision_type: decision.decision,
+      risk_tier: decision.riskTier,
       market_summary: JSON.stringify(mkt.data).slice(0, 4000),
       deviations: (decision.intents ?? []).flatMap((i: TradeIntent) => i.deviations ?? []),
       experts: (final.opinions ?? []).map((o: { expert: string; stance: string; summary: string }) => ({ expert: o.expert, stance: o.stance, summary: o.summary })),

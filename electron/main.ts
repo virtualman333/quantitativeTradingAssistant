@@ -50,6 +50,13 @@ let win: BrowserWindow | null = null;
 let agentProc: ChildProcess | null = null;
 let logBuffer: string[] = [];
 
+// ── 进程自愈：常驻 agent 崩溃后自动重启（退避 + 上限，避免崩溃循环） ──
+let manualStop = false;
+let restartCount = 0;
+let restartTimer: NodeJS.Timeout | null = null;
+const MAX_RESTART = 5;
+const RESTART_BASE_DELAY_MS = 3000;
+
 // ── store 桥接（优先用编译产物，其次 tsx 运行时） ──────────────
 async function withStore<T>(fn: (s: any) => T): Promise<T> {
   if (fs.existsSync(storePath)) {
@@ -140,6 +147,7 @@ function autoStartEnabled(): boolean {
 
 function startAgent() {
   if (agentProc) return { ok: false, msg: "已在运行" };
+  manualStop = false;
   const st = loadSettingsSync();
   // 演练模式必须作为 --dry-run 传给子进程，否则只是打印一行日志、实际仍会下单
   const dry = st?.dryRun === true;
@@ -150,19 +158,49 @@ function startAgent() {
   agentProc.on("exit", (code) => {
     pushLog(`服务退出 code=${code}`);
     agentProc = null;
-    win?.webContents.send("agent:status", { running: false });
+    // 非手动停止且异常退出（code 非 0）→ 自动重启；否则仅更新状态
+    if (!manualStop && code !== 0) {
+      scheduleRestart();
+    } else {
+      restartCount = 0;
+      win?.webContents.send("agent:status", { running: false });
+    }
   });
   agentProc.on("error", (e) => {
     pushLog(`服务启动失败: ${e.message}`);
     agentProc = null;
-    win?.webContents.send("agent:status", { running: false });
+    if (!manualStop) scheduleRestart();
   });
   win?.webContents.send("agent:status", { running: true });
   return { ok: true, msg: "已启动" };
 }
 
+/** 崩溃后带退避地自动重启；连续失败达上限则放弃，避免崩溃循环 */
+function scheduleRestart() {
+  if (restartCount >= MAX_RESTART) {
+    pushLog(`⛔ 自动重启达上限(${MAX_RESTART})，停止重试，请人工排查`);
+    restartCount = 0;
+    win?.webContents.send("agent:status", { running: false });
+    return;
+  }
+  restartCount++;
+  const delay = RESTART_BASE_DELAY_MS * restartCount; // 3s/6s/9s... 线性退避
+  pushLog(`将在 ${delay / 1000}s 后自动重启（第 ${restartCount}/${MAX_RESTART} 次）`);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    pushLog("自动重启中…");
+    startAgent();
+  }, delay);
+}
+
 function stopAgent() {
   if (!agentProc) return { ok: false, msg: "未运行" };
+  manualStop = true;
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+  restartCount = 0;
   agentProc.kill("SIGTERM");
   agentProc = null;
   pushLog("已停止服务");

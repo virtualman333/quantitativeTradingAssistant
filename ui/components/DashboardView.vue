@@ -8,6 +8,13 @@ const rd = computed(() => status.latestRound || {});
 const positions = computed(() => rd.value.positions || []);
 const totalUpl = computed(() => positions.value.reduce((a, p) => a + (Number(p.upl) || 0), 0));
 const experts = computed(() => rd.value.experts || []);
+const decisionType = computed(() => rd.value.decision_type || "");
+const riskTier = computed(() => rd.value.risk_tier || "");
+const conflicts = computed(() => rd.value.conflicts || []);
+const actions = computed(() => rd.value.actions || []);
+const execResults = computed(() => rd.value.exec_results || []);
+const DECISION_TEXT = { OPEN: "开仓", HOLD: "持有", CLOSE: "平仓", STANDBY: "观望" };
+const RISK_TEXT = { BASE: "基准", AGG: "激进", DEF: "防守" };
 const syncedAt = computed(() => {
   if (!status.lastRefreshAt) return "—";
   const d = new Date(status.lastRefreshAt);
@@ -70,10 +77,37 @@ const roundTime = computed(() => {
   </div>
 
   <div class="panel">
-    <h2>最近决策</h2>
+    <h2>最近决策 · 因果链</h2>
     <div class="body">
-      <div v-if="rd.decision" class="pre">{{ rd.decision }}</div>
-      <div v-else class="empty">暂无决策记录</div>
+      <div v-if="rd.decision" class="chain">
+        <div class="step">
+          <div class="step-lbl">拍板</div>
+          <div class="step-body">
+            <span class="tag t-info">{{ DECISION_TEXT[decisionType] || decisionType || "决策" }}</span>
+            <span v-if="riskTier" class="tag t-hold">{{ RISK_TEXT[riskTier] || riskTier }}</span>
+            <div class="pre">{{ rd.decision }}</div>
+          </div>
+        </div>
+        <div v-if="conflicts.length" class="step">
+          <div class="step-lbl warn">冲突</div>
+          <div class="step-body">
+            <div v-for="(c, i) in conflicts" :key="i" class="line warn">{{ c }}</div>
+          </div>
+        </div>
+        <div v-if="actions.length" class="step">
+          <div class="step-lbl">动作</div>
+          <div class="step-body">
+            <div v-for="(a, i) in actions" :key="i" class="line">{{ a }}</div>
+          </div>
+        </div>
+        <div v-if="execResults.length" class="step">
+          <div class="step-lbl">执行</div>
+          <div class="step-body">
+            <div v-for="(r, i) in execResults" :key="i" class="line mono">{{ r }}</div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty">暂无决策记录（跑一轮后产生）</div>
     </div>
   </div>
 
@@ -100,3 +134,17 @@ const roundTime = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.chain { display: flex; flex-direction: column; gap: 12px; }
+.step { display: flex; gap: 12px; align-items: flex-start; }
+.step-lbl {
+  flex: 0 0 46px; text-align: center; font-size: 11px; padding: 3px 0;
+  border-radius: var(--r-xs); background: var(--hover-2); color: var(--dim);
+}
+.step-lbl.warn { color: var(--yellow); }
+.step-body { flex: 1; min-width: 0; }
+.line { font-size: 12px; line-height: 1.75; color: var(--text-2); word-break: break-word; }
+.line.warn { color: var(--yellow); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+</style>
