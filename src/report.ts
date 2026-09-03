@@ -223,7 +223,7 @@ function readRoundsRaw(): RoundReportPayload[] {
 }
 
 /** 生成单轮报告：LLM 出 HTML，TS 落盘并刷新 index。useLlm=false 时跳过 LLM 走纯数据兜底页 */
-export async function generateRoundReport(payload: RoundReportPayload, useLlm = true): Promise<void> {
+export async function generateRoundReport(payload: RoundReportPayload, useLlm = true, refreshIndex = true): Promise<void> {
   // 兜底：无专家/无模型时也产出最小汇总页，保证「每轮都有详情」
   const experts = payload.experts ?? [];
   let summaryHtml = "";
@@ -287,7 +287,122 @@ export async function generateRoundReport(payload: RoundReportPayload, useLlm = 
     write(path.join(dir, `${id}.html`), html);
   }
 
+  if (refreshIndex) renderIndex();
+}
+
+/** 界面可查看的一份 HTML 文档（汇总页 / 某个角色页） */
+export interface RoundDoc {
+  key: string; // summary 或角色 id
+  label: string; // 汇总 / 角色 id
+  path: string;
+  size: number;
+  mtime: string; // ISO
+}
+
+/** 界面轮次列表的一行 */
+export interface RoundReportItem {
+  round_id: string;
+  time_cst: string;
+  env: string;
+  equity_usdt: number | null;
+  decision_type: string;
+  risk_tier: string;
+  decision: string;
+  n_positions: number;
+  docs: RoundDoc[];
+}
+
+/** 记录表 index.html 的绝对路径（界面「总记录表」用） */
+export function indexPath(): string {
+  return path.join(REPORTS_DIR, "index.html");
+}
+
+/** docs 排序：汇总在最前，其余按角色名 */
+function sortDocs(files: string[]): string[] {
+  return files.slice().sort((a, b) => {
+    const an = a.toLowerCase().replace(/\.html$/, "");
+    const bn = b.toLowerCase().replace(/\.html$/, "");
+    if (an === "summary") return -1;
+    if (bn === "summary") return 1;
+    return an.localeCompare(bn);
+  });
+}
+
+/** 扫描 reports/<round_id>/ 下的全部 HTML，返回可直接在界面里查看的轮次列表 */
+export function listRoundReports(): RoundReportItem[] {
+  const meta = new Map<string, RoundReportPayload>();
+  for (const r of readRoundsRaw()) {
+    const id = String(r.round_id ?? "").trim();
+    if (id) meta.set(id, r);
+  }
+
+  const items: RoundReportItem[] = [];
+  if (!fs.existsSync(REPORTS_DIR)) return items;
+
+  for (const name of fs.readdirSync(REPORTS_DIR)) {
+    // 只认轮次目录（daily/weekly 是 report.py 的 Markdown 报表，不算轮次报告）
+    if (!/^R\d+$/i.test(name)) continue;
+    const dir = path.join(REPORTS_DIR, name);
+    if (!fs.statSync(dir).isDirectory()) continue;
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.toLowerCase().endsWith(".html"))
+      .filter((f) => fs.statSync(path.join(dir, f)).isFile());
+    if (!files.length) continue;
+
+    const docs: RoundDoc[] = sortDocs(files).map((f) => {
+      const st = fs.statSync(path.join(dir, f));
+      const key = f.replace(/\.html$/i, "");
+      return {
+        key,
+        label: key.toLowerCase() === "summary" ? "汇总" : key,
+        path: path.join(dir, f),
+        size: st.size,
+        mtime: st.mtime.toISOString(),
+      };
+    });
+
+    const m = meta.get(name);
+    items.push({
+      round_id: name,
+      time_cst: String(m?.time_cst ?? ""),
+      env: String(m?.env ?? "demo").replace(/\s+/g, " ").trim().slice(0, 24),
+      equity_usdt: m?.equity_usdt != null ? Number(m.equity_usdt) : null,
+      decision_type: String(m?.decision_type ?? ""),
+      risk_tier: String(m?.risk_tier ?? ""),
+      decision: String(m?.decision ?? "").replace(/^#+\s*/gm, "").replace(/\s+/g, " ").slice(0, 120),
+      n_positions: (m?.positions ?? []).length,
+      docs,
+    });
+  }
+
+  // 新轮次在前
+  items.sort((a, b) => (b.time_cst || b.round_id).localeCompare(a.time_cst || a.round_id));
+  return items;
+}
+
+/** 用 LLM 重新生成指定轮次的 HTML 报告（覆盖现有文件），成功返回 true */
+export async function regenerateRound(roundId: string): Promise<boolean> {
+  const rid = String(roundId ?? "").trim();
+  if (!rid) return false;
+  const row = readRoundsRaw().find((r) => String(r.round_id ?? "").trim() === rid);
+  if (!row) return false;
+  await generateRoundReport(row, true);
+  return true;
+}
+
+/** 为「归档里有、但还没有 HTML」的历史轮次补纯数据兜底页（不耗 token），返回补生成数量 */
+export async function ensureRoundReports(): Promise<number> {
+  let n = 0;
+  for (const r of readRoundsRaw()) {
+    const rid = String(r.round_id ?? "").trim();
+    if (!rid) continue;
+    if (fs.existsSync(path.join(REPORTS_DIR, rid, "summary.html"))) continue;
+    await generateRoundReport(r, false, false);
+    n++;
+  }
   renderIndex();
+  return n;
 }
 
 /**

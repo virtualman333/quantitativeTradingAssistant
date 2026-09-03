@@ -569,6 +569,51 @@ ipcMain.handle("reports:dir", () => {
   return { ok: true };
 });
 
+/** 轮次 HTML 报告列表（reports/<round_id>/summary.html + <expert>.html）；
+ *  顺带为「归档里有、还没 HTML」的历史轮次补纯数据兜底页，保证每轮都能点开。 */
+ipcMain.handle("reports:rounds", async () => {
+  try {
+    const mod: any = await import(
+      "file://" + path.join(AGENT_ROOT, "dist", "src", "report.js").replace(/\\/g, "/")
+    );
+    const added = Number((await mod.ensureRoundReports()) ?? 0);
+    return {
+      ok: true,
+      added,
+      rounds: mod.listRoundReports() ?? [],
+      indexPath: typeof mod.indexPath === "function" ? mod.indexPath() : "",
+    };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 500), rounds: [] };
+  }
+});
+
+/** 用 LLM 重新生成某轮报告（界面「重新生成」，覆盖 reports/<round_id>/*.html） */
+ipcMain.handle("reports:regen", async (_e, roundId: string) => {
+  try {
+    const mod: any = await import(
+      "file://" + path.join(AGENT_ROOT, "dist", "src", "report.js").replace(/\\/g, "/")
+    );
+    const ok = await mod.regenerateRound(String(roundId ?? ""));
+    return ok
+      ? { ok: true, rounds: mod.listRoundReports() ?? [] }
+      : { ok: false, error: "归档中找不到该轮次" };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 500) };
+  }
+});
+
+/** 读一份 HTML 报告全文（界面用 iframe srcdoc 渲染），只允许 reports 目录内的文件 */
+ipcMain.handle("reports:html", (_e, p: string) => {
+  const full = path.resolve(p);
+  if (!full.startsWith(path.resolve(REPORTS_DIR))) return { ok: false, error: "路径越界" };
+  try {
+    return { ok: true, html: fs.readFileSync(full, "utf8") };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+});
+
 /** 生成日报/周报（复用 scripts/report.py 的确定性统计） */
 ipcMain.handle("reports:gen", async (_e, kind: string) => {
   try {

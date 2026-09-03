@@ -340,11 +340,15 @@ td.nowrap, .nowrap { white-space: nowrap }
   white-space: pre-wrap; word-break: break-all; color: var(--code-text);
 }
 /* 日志页要撑满剩余高度：内容区临时变 flex 列，日志框吃掉多余空间 */
-main:has(.log-page) { display: flex; flex-direction: column; overflow: hidden }
+main:has(.log-page), main:has(.rep-page) { display: flex; flex-direction: column; overflow: hidden }
 .log-page { flex: 1; min-height: 0; display: flex; flex-direction: column }
 .log-page .body { flex: 1; min-height: 0; display: flex }
 .log-page .body + .body { flex: none }
 .log-page #log { flex: 1; width: 100% }
+
+/* 报告中心：左列表 + 右预览，高度由 flex 分配，预览区才撑得满 */
+.rep-page { flex: 1; min-height: 0; display: flex; flex-direction: column }
+.rep-page .rep-head { flex: none }
 
 /* ── 模态 ─────────────────────────────────── */
 .modal {

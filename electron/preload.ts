@@ -69,8 +69,11 @@ contextBridge.exposeInMainWorld("api", {
   runOnce: () => safeInvoke("agent:runOnce"),
   getStatus: () => safeInvoke("status:get"),
   getLogs: () => safeInvoke("logs:get"),
-  // 报告（日报/周报）
+  // 报告（轮次 HTML 报告 + 日报/周报）
   reportsList: () => safeInvoke("reports:list"),
+  reportsRounds: () => safeInvoke("reports:rounds"),
+  reportsRegen: (roundId: string) => safeInvoke("reports:regen", roundId),
+  reportsHtml: (p: string) => safeInvoke("reports:html", p),
   reportsRead: (p: string) => safeInvoke("reports:read", p),
   reportsOpen: (p: string) => safeInvoke("reports:open", p),
   reportsDir: () => safeInvoke("reports:dir"),
