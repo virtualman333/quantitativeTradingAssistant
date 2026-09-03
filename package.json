@@ -22,6 +22,7 @@
     "@langchain/mcp-adapters": "^1.1.4",
     "@langchain/openai": "^1.5.11",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "markdown-it": "^15.0.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {

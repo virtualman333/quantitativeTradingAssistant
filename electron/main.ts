@@ -285,6 +285,18 @@ function createWindow() {
     },
   });
 
+  // 外链一律走系统浏览器：对话 Markdown 渲染出的 <a> 点击时不允许把应用窗口导航走
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (e, url) => {
+    if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1") && !url.startsWith("http://localhost")) {
+      e.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
   // 界面来源：dev server（npm run ui:dev）> 构建产物（dist/ui）> 报错
   const devPort = process.env.UI_DEV_PORT || "8088";
   const devUrl = process.env.UI_DEV === "1" ? `http://127.0.0.1:${devPort}` : "";
@@ -570,12 +582,51 @@ ipcMain.handle("reports:gen", async (_e, kind: string) => {
   }
 });
 
-// ── 热门行情（OKX 公共 REST，免认证；域名回退 + 10s 缓存） ──
+// ── 热门行情（优先 okx-trade-mcp；失败回退直连 REST；10s 缓存） ──
 let tickersCache: { at: number; rows: unknown[] } | null = null;
-ipcMain.handle("market:tickers", async (_e, limit = 15) => {
-  if (tickersCache && Date.now() - tickersCache.at < 10_000) {
-    return { ok: true, tickers: tickersCache.rows.slice(0, Number(limit) || 15), ts: tickersCache.at };
+let mktMcp: { tools: any[]; close: () => Promise<void> } | null = null;
+
+/** 行情专用 MCP 长连接：惰性建立、复用；调用失败置空待重连 */
+async function getMktMcp() {
+  if (mktMcp) return mktMcp;
+  try {
+    const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "mcp.js").replace(/\\/g, "/"));
+    const conn = await mod.connectMcp(["okx-trade-mcp"]);
+    if (conn.tools.length) {
+      mktMcp = conn;
+      return mktMcp;
+    }
+    await conn.close();
+  } catch {
+    /* 无 MCP 环境则静默，走 REST 回退 */
   }
+  return null;
+}
+
+async function tickersViaMcp(): Promise<any[]> {
+  const conn = await getMktMcp();
+  if (!conn) throw new Error("MCP 未连接");
+  const t = conn.tools.find((x: any) => String(x.name).endsWith("__market_get_tickers"));
+  if (!t) throw new Error("MCP 缺少 market_get_tickers 工具");
+  let out: any;
+  try {
+    out = await t.invoke({ instType: "SWAP" });
+  } catch (e) {
+    mktMcp = null; // 连接可能已断，下次重连
+    throw e;
+  }
+  // callTool 结果形如 {content:[{type:"text",text:"{\"tool\":...,\"ok\":true,\"data\":{\"data\":[...]}}"}]}
+  let j: any = out;
+  if (out?.content && Array.isArray(out.content)) {
+    const text = out.content.map((c: any) => c.text ?? "").join("");
+    j = JSON.parse(text);
+  }
+  const arr = j?.data?.data ?? j?.data;
+  if (!Array.isArray(arr)) throw new Error("MCP 返回结构异常");
+  return arr;
+}
+
+async function tickersViaRest(): Promise<any[]> {
   const bases = process.env.OKX_PUBLIC_BASE
     ? [process.env.OKX_PUBLIC_BASE.replace(/\/+$/, "")]
     : ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"];
@@ -590,28 +641,58 @@ ipcMain.handle("market:tickers", async (_e, limit = 15) => {
         lastErr = `code=${j.code} ${j.msg ?? ""}`;
         continue;
       }
-      const rows = (j.data as any[])
-        .filter((t) => String(t.instId).endsWith("-USDT-SWAP"))
-        .sort((a, b) => Number(b.volCcy24h) - Number(a.volCcy24h)) // 按 24h 成交额排热门
-        .map((t) => {
-          const last = Number(t.last);
-          const open = Number(t.open24h);
-          return {
-            instId: String(t.instId),
-            last,
-            changePct: open ? ((last - open) / open) * 100 : 0,
-            volUsd: Number(t.volCcy24h),
-            high24h: Number(t.high24h),
-            low24h: Number(t.low24h),
-          };
-        });
-      tickersCache = { at: Date.now(), rows };
-      return { ok: true, tickers: rows.slice(0, Number(limit) || 15), ts: Date.now() };
+      return j.data;
     } catch (e) {
       lastErr = String((e as Error)?.message ?? e);
     }
   }
-  return { ok: false, error: lastErr.slice(0, 300) };
+  throw new Error(lastErr || "直连 REST 失败");
+}
+
+function toTickerRows(data: any[]) {
+  return (data as any[])
+    .filter((t) => String(t.instId).endsWith("-USDT-SWAP"))
+    .sort((a, b) => Number(b.volCcy24h) - Number(a.volCcy24h)) // 按 24h 成交额排热门
+    .map((t) => {
+      const last = Number(t.last);
+      const open = Number(t.open24h);
+      return {
+        instId: String(t.instId),
+        last,
+        changePct: open ? ((last - open) / open) * 100 : 0,
+        volUsd: Number(t.volCcy24h),
+        high24h: Number(t.high24h),
+        low24h: Number(t.low24h),
+      };
+    });
+}
+
+ipcMain.handle("market:tickers", async (_e, limit = 15) => {
+  const n = Number(limit) || 15;
+  if (tickersCache && Date.now() - tickersCache.at < 10_000) {
+    return { ok: true, tickers: tickersCache.rows.slice(0, n), ts: tickersCache.at };
+  }
+  let data: any[] | null = null;
+  let source = "";
+  let lastErr = "";
+  try {
+    data = await tickersViaMcp();
+    source = "mcp";
+  } catch (e) {
+    lastErr = `MCP: ${String((e as Error)?.message ?? e).slice(0, 140)}`;
+  }
+  if (!data) {
+    try {
+      data = await tickersViaRest();
+      source = "rest";
+    } catch (e) {
+      lastErr += ` | REST: ${String((e as Error)?.message ?? e).slice(0, 150)}`;
+    }
+  }
+  if (!data) return { ok: false, error: lastErr.slice(0, 300) };
+  const rows = toTickerRows(data);
+  tickersCache = { at: Date.now(), rows };
+  return { ok: true, tickers: rows.slice(0, n), ts: Date.now(), source };
 });
 ipcMain.handle("open:folder", (_e, which: string) => {
   shell.openPath(which === "logs" ? path.join(PROJECT_ROOT, "logs") : path.join(PROJECT_ROOT, "state"));
@@ -993,4 +1074,10 @@ app.on("window-all-closed", () => {
   stopAgent();
   if (process.platform !== "darwin") app.quit();
 });
-app.on("before-quit", () => stopAgent());
+app.on("before-quit", () => {
+  if (mktMcp) {
+    mktMcp.close().catch(() => {});
+    mktMcp = null;
+  }
+  stopAgent();
+});

@@ -312,4 +312,27 @@ onBeforeUnmount(() => {
 .reason { margin: 6px 0; border-left: 2px solid var(--c-border); padding-left: 8px; }
 .reason summary { cursor: pointer; font-size: 12px; color: var(--c-text-dim); }
 .reason-text { margin-top: 4px; white-space: pre-wrap; font-size: 12.5px; color: var(--c-text-dim); line-height: 1.6; }
+
+/* Markdown 正文（v-html 内容需 :deep 穿透） */
+.text { line-height: 1.65; }
+.text :deep(p) { margin: 4px 0; }
+.text :deep(h1), .text :deep(h2), .text :deep(h3), .text :deep(h4) { margin: 10px 0 4px; line-height: 1.4; }
+.text :deep(h1) { font-size: 17px; }
+.text :deep(h2) { font-size: 15.5px; }
+.text :deep(h3), .text :deep(h4) { font-size: 14px; }
+.text :deep(h1:first-child), .text :deep(h2:first-child), .text :deep(h3:first-child) { margin-top: 0; }
+.text :deep(ul), .text :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.text :deep(li) { margin: 2px 0; }
+.text :deep(code) { background: var(--c-bg-soft); border: 1px solid var(--c-border-soft); border-radius: 4px; padding: 1px 5px; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.text :deep(pre) { background: var(--c-bg-soft); border: 1px solid var(--c-border-soft); border-radius: 6px; padding: 8px 10px; margin: 6px 0; overflow: auto; max-height: 420px; }
+.text :deep(pre code) { background: none; border: none; padding: 0; font-size: 12px; white-space: pre; }
+.text :deep(blockquote) { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--c-border); color: var(--c-text-dim); }
+.text :deep(blockquote p) { margin: 2px 0; }
+.text :deep(table) { border-collapse: collapse; margin: 6px 0; font-size: 12.5px; display: block; overflow-x: auto; max-width: 100%; }
+.text :deep(th), .text :deep(td) { border: 1px solid var(--c-border); padding: 4px 10px; text-align: left; }
+.text :deep(th) { background: var(--c-bg-soft); font-weight: 600; }
+.text :deep(a) { color: var(--c-accent); text-decoration: none; }
+.text :deep(a:hover) { text-decoration: underline; }
+.text :deep(hr) { border: none; border-top: 1px solid var(--c-border); margin: 8px 0; }
+.text :deep(img) { max-width: 100%; }
 </style>

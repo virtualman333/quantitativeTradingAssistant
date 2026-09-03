@@ -1,4 +1,5 @@
 /** format.js —— 展示层小工具 */
+import MarkdownIt from "markdown-it";
 
 export function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -30,15 +31,20 @@ export function escapeHtml(s) {
 }
 
 /**
- * 极简 markdown：代码块 + 行内码 + 换行。
- * 先整体转义再生成标签，模型输出里的 HTML 不会被当成标签执行。
+ * Markdown 渲染（对话等富文本输出）。
+ * html:false —— 模型输出里的裸 HTML 一律转义成文本，不会被当成标签执行；
+ * breaks:true —— 单个换行也断行（聊天习惯）。
+ * 渲染失败时回退为转义文本 + <br>，绝不让界面白屏。
  */
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+
 export function renderText(s) {
-  const t = escapeHtml(s ?? "");
-  return t
-    .replace(/```(\w*)\r?\n?([\s\S]*?)```/g, (_m, _lang, code) => `<pre><code>${code.replace(/\n$/, "")}</code></pre>`)
-    .replace(/`([^`\n]+?)`/g, "<code>$1</code>")
-    .replace(/\r?\n/g, "<br>");
+  const raw = String(s ?? "");
+  try {
+    return md.render(raw);
+  } catch {
+    return escapeHtml(raw).replace(/\r?\n/g, "<br>");
+  }
 }
 
 export function briefArgs(args, max = 90) {
