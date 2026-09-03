@@ -2,12 +2,12 @@
 
 ## 项目全貌（2026-09-02 全面通读后整理）
 
-**单仓库双套系统**。git 仓库根在 `C:/Users/yongguichen/WorkBuddy/OKX Trader`（注意：`agent/` 是子目录；在 agent 下执行 git 命令时路径显示为相对 agent）。
+**agent 自包含**（2026-09-03 起）。git 仓库根仍在 `C:/Users/yongguichen/WorkBuddy/OKX Trader`，但父目录只保留 `.git`/`.gitignore`/`.workbuddy`/`agent/`；原父目录的 scripts/state/news/ledger/reports/logs/AGENT_TRADING_RULES.md/.mcp.json 已全部迁入 `agent/`。代码里 `ROOT`/`PROJECT_ROOT` 现在都指向 `agent/`（不再指向父目录）。
 
-### A. 交易决策系统（父目录 Python 体系）
+### A. 交易决策系统（原父目录 Python 体系，2026-09-03 已迁入 agent/）
 - 决策依据文档：`AGENT_TRADING_RULES.md`（章程 v2.1）、`DASHBOARD.md`（每轮自动更新面板）、`EVOLUTION.md`（复盘流水只追加）、`PLAYBOOK.md`（提案区）、`NEWS_SOURCES.md`（数据源实测）。
 - 章程 v2.1 核心：**L1 硬约束 10 条不可裁量**（L1-1 仅 USDT 计价永续、交易所支持的任意标的、L1-2 杠杆≤5、L1-3 live 只读、L1-4 止损必挂、L1-5 单笔风险≤2.5%、L1-6 月度回撤 12% 熔断、L1-7 归档只追加+偏离留痕、L1-8 clOrdId 幂等、L1-9 禁双向、L1-10 禁亏损加仓）；其余全部为 **L2 可裁量基准**，偏离须写 §0.3 五项（baseline/actual/rationale/falsifier/riskDelta），绩效由 §0.4 独立核算。**v2.1（2026-09-03）**：L1-1 由「仅 BTC/ETH」放开为「任意 USDT 永续」；§3 合约规格由写死 BTC/ETH 改为每轮从 OKX instruments 动态获取（ctVal/lotSz/minSz/tickSz）；方向自由强调多空平等（net 模式单一方向）。
-- `scripts/*.py`（16 个）：market_scan（行情/共振分）、news_fetch/news_verify/news_log（消息面，双源验证）、review_trade（复盘）、dashboard、archive_round（归档唯一入口只追加）、report/mail_report/mail_send（邮件）、mcp_call（MCP 降级通道，live 拒写）、order_id（clOrdId 生成）、deviation_stats、trade_round（--loop 5 分钟轮）、jin10_client、其他。
+- `agent/scripts/*.py`（21 个，2026-09-03 从父目录迁入、删了 `_probe_mcp.py`）：market_scan（行情/共振分）、news_fetch/news_verify/news_log/news_db（消息面，双源验证+SQLite 复用）、review_trade（复盘）、dashboard、archive_round（归档唯一入口只追加）、report/mail_report/mail_send（邮件）、mcp_call（MCP 降级通道，live 拒写）、order_id（clOrdId 生成）、deviation_stats、trade_round、jin10_client、backtest/factor_analysis/funding_backtest/cross_market（回测/因子/跨市场分析）、polymarket_sentiment（情绪）。
 - 运行时数据（已被 .gitignore 排除入库）：`logs/`（YYYY-MM 日志 + rounds.jsonl 只追加）、`state/`（runtime.json、round_input_R*.json、decision、snapshots）、`ledger/trades.csv`、`news/news.jsonl`、`reports/`。
 - **运行环境**：仅 okx-demo 模拟盘可交易；okx-live 只读监控已于 2026-09-02 停止监控。起始权益约 79,894 USDT。运行时（2026-09-02 22:15）round_no 19，1 个持仓，当日 -0.88%。
 
@@ -16,7 +16,7 @@
 - 拓扑：`collect → plan →(Send 并行)→ 专家 → adjudge → execute → archive`。graph.ts 只编排、main.ts 负责副作用（取数/下单/归档）。
 - 源文件：src/{main,graph,okx,mcp,skills,experts,llm,store,orchestrator,types}.ts + electron/{main,preload}.ts + ui/index.html。
   - `store.ts`：JSON 本地持久化（agent/data/store.json）：模型/角色/MCP 配置/settings/recentRounds。**必须存在**（graph/llm/mcp/experts 都依赖它）——曾有 list 未显示但它存在。
-  - `okx.ts`：不重写签名，复用父目录 python 脚本（mcp_call/order_id/market_scan/archive_round），runPy 用 python 解释器不能用 process.execPath（tsx 下是 node.exe）。
+  - `okx.ts`：不重写签名，复用 `agent/scripts/` 下 python 脚本（mcp_call/order_id/market_scan/archive_round），runPy 用 python 解释器不能用 process.execPath（tsx 下是 node.exe）。`ROOT` = `AGENT_ROOT`（store.ts 导出，向上探测 package.json+src）= agent 自身；脚本内 `ROOT=dirname(dirname(__file__))` 自动=agent，故 scripts 迁入后所有相对路径无需改 .py。
   - `mcp.ts`：MCP 客户端，Windows 垫片须 cmd /c 包装；写操作不走 MCP，一律走 okx.ts 受控通道。
   - `experts.ts`：**可插拔专家体系**——专家声明式定义在 `experts/<id>/expert.json`（systemPrompt/skills/mcpServers/enabled/alwaysInvoke），可带 `experts/<id>/knowledge/*.md` 领域经验 + `lessons.md`（每轮 `evolveExpert()` 自动追加进化）。`loadExpertDefs()` 扫描加载，`listExpertRoles()` 三层来源：文件 → store.roles 覆盖 → 内置 `EXPERTS` 兜底。现有 8 专家：trading/news/factor/risk/funding/onchain/sentiment/execution。ReAct 简化版工具循环（≤4 次）。新增专家=放一个 JSON，无需改 TS。
   - `graph.ts`：LangGraph 图，Send 动态扇出专家，Annotation.Reducer 合并 opinions；execute/archive 为占位节点（实际在 main.ts）。
@@ -47,4 +47,5 @@
 - **Electron preload 新旧产物坑（2026-09-03）**：`dist/electron/preload.js` 是早期配置的遗留旧产物（tsconfig.electron.json 现在只编 main.ts），缺新 API 会报 `api.xxx is not a function`。`resolvePreload()` 必须**优先选正规 CJS 产物 `dist/preload/preload.js`**，postbuild.mjs 会自动清理遗留文件。遇到「界面某功能报 not a function」先查加载到的 preload 是不是旧的（`npx tsc -p tsconfig.electron.json && node scripts/postbuild.mjs` 后重启应用）。
 - **Windows renameSync 覆盖坑（2026-09-03）**：`fs.renameSync(tmp, target)` 在 Windows 下覆盖已存在的 target 时，若 target 被其他进程打开（哪怕只读）会报 `EPERM`（`fs.writeFileSync` 直写则没事）。本地 JSON 持久化（store.ts 的 saveStore 等）原子写必须捕获 `EPERM/EEXIST/EBUSY/EACCES` 回退直写，否则界面「保存」会偶发/持续失败。
 - git 状态：2026-09-03 已全部提交并 push（b46e5c7），工作区干净。**仓库根在 `C:/Users/yongguichen/WorkBuddy/OKX Trader`**（agent 是子目录；注意 MEMORY 顶部记的 E 盘旧路径已失效）。`guard.ts` 已由「删除」改为「重新实现」——风控硬校验（L1 约束运行时拦截，见 src/guard.ts）。
-- **动态合约规格 + 候选池（2026-09-03 v2.1）**：L1-1 已放开为任意 USDT 永续。执行层张数/价格必须用 `market_scan.py` 输出的 `instruments[inst].spec`（ctVal/lotSz/minSz/tickSz）动态计算，禁止硬编码面值或固定 `toFixed(2)` 价格（BTC tickSz=0.1、SATS tickSz=1e-12）。候选池按 24h 成交额排序时，OKX `volCcy24h` 是「币数量」须 `×last` 才是 USDT 成交额，否则 SATS/PEPE 等低价 meme 币会霸榜。guard 白名单改为 `X-USDT-SWAP` 格式 + 本轮 knownInsts 双校验。
+- **动态合约规格 + 候选池（2026-09-03 v2.1）**：L1-1 已放开为任意 USDT 永续。执行层张数/价格必须用 `market_scan.py` 输出的 `instruments[inst].spec`（ctVal/lotSz/minSz/tickSz）动态计算，禁止硬编码面值或固定 `toFixed(2)` 价格（BTC tickSz=0.1、SATS tickSz=1e-12）。候选池按 24h 成交额排序时，OKX `volCcy24h` 是「币数量」须 `×last` 才是 USDT 成交额，否则 SATS/PEPE 等低价 meme 币会霸榜。guard L1-1 校验 = `USDT_RE=/USDT/i`（只守 USDT 计价）+ 本轮 knownInsts 白名单，**不写死交易所命名格式**。
+- **脚本 vs 模型职责边界（2026-09-03 用户定）**：这是 Agent，语义/判断类的事交给模型，只有确定性的事交给脚本。**脚本**：行情与指标计算、合约规格抓取、clOrdId、下单固定参数、L1 风控硬校验、落盘归档。**模型**：解读行情、选标的选方向、仓位/止损参数，以及**把不同交易所的命名/字段语义归一成统一 TradeIntent**（币安 `BTCUSDT` == OKX `BTC-USDT-SWAP` 是模型的理解，不是脚本写死的映射表）。切换交易所时不做 per-exchange 脚本适配层，只换数据源 + 让白名单跟随数据源。

@@ -14,18 +14,16 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import { AGENT_ROOT } from "./store.js";
 
 const execFileAsync = promisify(execFile);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * ROOT = 项目根（agent 的上一级），Python 脚本在 ROOT/scripts/ 下。
- * 注意：agent 子进程用 tsx 跑源码，此处 __dirname 是 src/，故 ROOT=父目录；
- * 编译后（dist/src）路径会不同，但 agent 不走编译产物执行 skill，故无碍。
+ * ROOT = agent/ 目录（自包含）：Python 脚本在 agent/scripts/ 下，
+ * 数据与章程（state/ news/ ledger/ logs/ AGENT_TRADING_RULES.md）也在 agent/ 下。
+ * 用 store.js 的 AGENT_ROOT（向上探测 package.json+src），编译前后均正确。
  */
-export const ROOT = path.resolve(__dirname, "..", "..");
+export const ROOT = AGENT_ROOT;
 
 /** python 解释器探测（Windows 上 process.execPath 是 node，不能用，实测踩过） */
 let _py: string | null = null;
@@ -141,6 +139,48 @@ const RUNNERS: Record<string, SkillRunner> = {
     const args = ["--round", String(a.roundId ?? "R000000"), "--seq", String(a.seq ?? 1)];
     if (a.params) args.push("--params", JSON.stringify(a.params));
     return runPyScript("order_id.py", args, 60_000);
+  },
+  cross_market: async (a) => {
+    const args = [];
+    if (a.hours) args.push("--hours", String(a.hours));
+    return runPyScript("cross_market.py", args, 300_000);
+  },
+  deviation_stats: async (a) => {
+    const args = [];
+    if (a.list) args.push("--list");
+    if (a.round) args.push("--round", String(a.round));
+    if (a.json) args.push("--json");
+    return runPyScript("deviation_stats.py", args, 60_000);
+  },
+  factor_analysis: async (a) => {
+    const args = [];
+    if (a.hours) args.push("--hours", String(a.hours));
+    return runPyScript("factor_analysis.py", args, 300_000);
+  },
+  funding_backtest: async (a) => {
+    const args = [];
+    if (a.inst) args.push("--inst", String(a.inst));
+    if (a.hours) args.push("--hours", String(a.hours));
+    return runPyScript("funding_backtest.py", args, 300_000);
+  },
+  report: async (a) => {
+    const args = [];
+    if (a.daily) args.push("--daily", String(a.daily));
+    if (a.weeklyEnd) args.push("--weekly-end", String(a.weeklyEnd));
+    if (a.json) args.push("--json");
+    return runPyScript("report.py", args, 60_000);
+  },
+  review_trade: async (a) => {
+    const args = [];
+    if (a.commit) {
+      if (!a.input) return { ok: false, output: "", error: "commit 复盘需要 input 参数" };
+      args.push("--commit", "--input", String(a.input));
+    } else if (a.stats) {
+      args.push("--stats");
+    } else {
+      args.push("--prepare");
+    }
+    return runPyScript("review_trade.py", args, 60_000);
   },
   read_charter: async (a) => {
     const p = path.join(ROOT, "AGENT_TRADING_RULES.md");

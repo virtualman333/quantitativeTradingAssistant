@@ -11,7 +11,7 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, exec, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // 本文件编译为 ESM（preload 才需要 CJS），因此没有内置 __dirname，自行推导。
@@ -29,7 +29,8 @@ function findAgentRoot(): string {
   return path.resolve(HERE, "..", "..");
 }
 const AGENT_ROOT = findAgentRoot();
-const PROJECT_ROOT = path.resolve(AGENT_ROOT, "..");
+/** 项目根即 agent/ 自身（自包含：state/logs 等运行时数据也在 agent 下，不再依赖父目录） */
+const PROJECT_ROOT = AGENT_ROOT;
 
 /** 应用名：菜单首项（macOS）与「关于」都用它，需早于 app ready 设置 */
 const APP_NAME = "OKX 交易 Agent";
@@ -368,6 +369,75 @@ ipcMain.handle("mcp:test", async (_e, id) => {
   } catch (e) {
     return { ok: false, error: String(e).slice(0, 300) };
   }
+});
+
+// ── MCP 一键安装（内置交易所预设目录） ─────────────────────
+/** npm 全局安装（直接二进制启动的预设，如 okx-trade-mcp） */
+function runNpmInstall(pkgs: string[]): Promise<{ ok: boolean; output: string; error?: string }> {
+  return new Promise((resolve) => {
+    const cmd = `npm install -g ${pkgs.join(" ")} --no-fund --no-audit --loglevel=error`;
+    pushLog(`一键安装 MCP: ${cmd}`);
+    exec(
+      cmd,
+      { timeout: 180_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        const output = `${stdout || ""}${stderr || ""}`.trim().slice(-2000);
+        if (err) {
+          const detail = (stderr || stdout || err.message || "").slice(0, 300);
+          resolve({ ok: false, output, error: `npm 安装失败(${err.code ?? "?"})：${detail}` });
+        } else {
+          resolve({ ok: true, output });
+        }
+      }
+    );
+  });
+}
+
+/** 内置交易所 MCP 预设列表（附带「是否已安装」状态） */
+ipcMain.handle("mcp:presets", async () => {
+  const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "mcpPresets.js").replace(/\\/g, "/"));
+  const presets: any[] = mod.listMcpPresets();
+  const installedIds = new Set(((withStoreSync()?.mcpServers ?? []) as any[]).map((m) => m.id));
+  return presets.map((p) => ({ ...p, installed: installedIds.has(p.id) }));
+});
+
+/** 一键安装 + 写入配置：先按需 npm 全局安装，再把 server 落进 store */
+ipcMain.handle("mcp:install", async (_e, payload: { presetId?: string; env?: Record<string, string> }) => {
+  const presetId = String(payload?.presetId ?? "");
+  if (!presetId) return { ok: false, error: "缺少 presetId" };
+  const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "mcpPresets.js").replace(/\\/g, "/"));
+  const preset = mod.getMcpPreset(presetId);
+  if (!preset) return { ok: false, error: `未知预设: ${presetId}` };
+
+  let installOutput = "";
+  if (preset.installPackages?.length) {
+    const r = await runNpmInstall(preset.installPackages);
+    installOutput = r.output;
+    if (!r.ok) return { ok: false, error: r.error, output: installOutput };
+  }
+
+  // 过滤掉空凭证，避免把空字符串写进 env
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(payload?.env ?? {})) {
+    if (String(v ?? "").trim()) env[k] = String(v).trim();
+  }
+
+  await withStore((s) =>
+    s.upsertMcpServer({
+      id: preset.id,
+      name: preset.name,
+      kind: "exchange",
+      command: preset.command,
+      args: preset.args,
+      env: Object.keys(env).length ? env : undefined,
+      windowsCmdWrap: preset.windowsCmdWrap,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+    })
+  );
+
+  pushLog(`MCP「${preset.name}」已安装并写入配置`);
+  return { ok: true, installed: true, output: installOutput, id: preset.id };
 });
 
 // Skill
@@ -716,6 +786,7 @@ function buildMenu(): Menu {
       },
       { label: "打开运行状态目录", click: () => shell.openPath(path.join(PROJECT_ROOT, "state")) },
       { label: "打开日志目录", click: () => shell.openPath(path.join(PROJECT_ROOT, "logs")) },
+      { label: "打开轮次报告", click: () => shell.openPath(path.join(AGENT_ROOT, "reports", "index.html")) },
       ...(isMac ? [] : [{ type: "separator" } as MenuItemConstructorOptions, { label: "退出", role: "quit" } as MenuItemConstructorOptions]),
     ],
   };

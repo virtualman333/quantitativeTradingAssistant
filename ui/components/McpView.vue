@@ -1,8 +1,8 @@
 <script setup>
 /** MCP Server 管理：stdio / HTTP 两种类型，可测试连接 */
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { store, reload } from "../store/index.js";
-import { api } from "../lib/api.js";
+import { api, errText } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
 import { uid } from "../lib/format.js";
 
@@ -113,9 +113,97 @@ async function test(m) {
     testing.value = "";
   }
 }
+
+// ── 一键安装内置交易所 MCP ─────────────────────────────
+const presets = ref([]);
+const installingPreset = ref(null); // 正在安装的预设
+const installEnv = ref({}); // { 环境变量名: 用户输入 }
+const installing = ref(false);
+const installErr = ref("");
+const installLog = ref("");
+
+async function loadPresets() {
+  try {
+    presets.value = (await api.mcpPresets()) || [];
+  } catch {
+    presets.value = [];
+  }
+}
+
+function openInstall(p) {
+  installErr.value = "";
+  installLog.value = "";
+  installingPreset.value = p;
+  installEnv.value = {};
+  for (const v of p.envVars || []) installEnv.value[v.key] = "";
+}
+
+function envInputType(key) {
+  const k = String(key || "").toLowerCase();
+  return k.includes("secret") || k.includes("key") || k.includes("passphrase") ? "password" : "text";
+}
+
+async function doInstall() {
+  const p = installingPreset.value;
+  if (!p) return;
+  installErr.value = "";
+  const env = {};
+  const missing = [];
+  for (const v of p.envVars || []) {
+    const val = String(installEnv.value[v.key] || "").trim();
+    if (val) env[v.key] = val;
+    else if (v.required) missing.push(v.label);
+  }
+  if (missing.length) return void (installErr.value = `请填写必填项：${missing.join("、")}`);
+
+  installing.value = true;
+  try {
+    const r = await api.mcpInstall({ presetId: p.id, env });
+    if (r?.ok) {
+      installLog.value = r.output || "";
+      toastOk("已安装并配置，可在下方列表测试连接");
+      installingPreset.value = null;
+      await reload();
+      await loadPresets();
+    } else {
+      installErr.value = r?.error || "安装失败";
+    }
+  } catch (e) {
+    installErr.value = errText(e);
+  } finally {
+    installing.value = false;
+  }
+}
+
+onMounted(loadPresets);
 </script>
 
 <template>
+  <div class="panel">
+    <h2>一键安装交易所 MCP<span class="spacer"></span>
+      <span class="hint">只读桥接，写操作仍走受控通道</span>
+    </h2>
+    <div class="body">
+      <div v-if="presets.length" class="preset-grid">
+        <div v-for="p in presets" :key="p.id" class="preset-card">
+          <div class="px">
+            <span class="px-logo">{{ p.exchange.slice(0, 1) }}</span>
+            <div class="px-main">
+              <div class="px-name">{{ p.name }}</div>
+              <span :class="['tag', p.installed ? 't-on' : 't-hold']">{{ p.installed ? "已安装" : "未安装" }}</span>
+            </div>
+          </div>
+          <div class="desc">{{ p.description }}</div>
+          <div class="foot">
+            <code class="cmd">{{ p.command === "npx" ? "npx " + p.args.join(" ") : p.command }}</code>
+            <button class="sm primary" @click="openInstall(p)">{{ p.installed ? "重新配置" : "安装" }}</button>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty">未连接到主进程，无法读取预设目录</div>
+    </div>
+  </div>
+
   <div class="panel">
     <h2>MCP Server<span class="spacer"></span>
       <button class="primary sm" @click="openNew">+ 新增</button>
@@ -184,6 +272,33 @@ async function test(m) {
       <div class="foot">
         <button @click="editing = null">取消</button>
         <button class="primary" :disabled="saving" @click="doSave">{{ saving ? "保存中…" : "保存" }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="installingPreset" class="modal" @click.self="installingPreset = null">
+    <div class="box">
+      <h3>安装 {{ installingPreset.name }}</h3>
+      <div class="body">
+        <div v-if="installingPreset.note" class="alert info">{{ installingPreset.note }}</div>
+        <template v-if="installingPreset.envVars && installingPreset.envVars.length">
+          <div v-for="v in installingPreset.envVars" :key="v.key" class="row">
+            <label>{{ v.label }}<span v-if="v.required" class="req">*</span></label>
+            <input v-model="installEnv[v.key]" :type="envInputType(v.key)" :placeholder="v.placeholder || ''" />
+          </div>
+        </template>
+        <div v-else class="hint">该 server 无需 API 凭证即可使用。</div>
+        <div v-if="installErr" class="field-err">{{ installErr }}</div>
+        <div v-if="installLog" class="install-log"><code>{{ installLog }}</code></div>
+        <div class="hint">
+          安装 = 执行
+          <code>{{ installingPreset.installPackages && installingPreset.installPackages.length ? "npm install -g " + installingPreset.installPackages.join(" ") : "npx（首次连接自动下载）" }}</code>
+          并写入配置。凭证仅保存在本地 <code>data/store.json</code>，建议仅授予读取权限。
+        </div>
+      </div>
+      <div class="foot">
+        <button @click="installingPreset = null" :disabled="installing">取消</button>
+        <button class="primary" :disabled="installing" @click="doInstall">{{ installing ? "安装中…" : "安装并配置" }}</button>
       </div>
     </div>
   </div>

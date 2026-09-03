@@ -16,8 +16,13 @@
  */
 import type { AccountSnapshot, GuardResult, TradeIntent } from "./types.js";
 
-/** L1-1 标的须为 USDT 计价永续（任意币种，如 BTC-USDT-SWAP / SOL-USDT-SWAP） */
-const INST_RE = /^[A-Z0-9]+-USDT-SWAP$/;
+/**
+ * L1-1 标的须为 USDT 计价（任意币种）。
+ * 不写死交易所命名格式（OKX=XXX-USDT-SWAP，币安/Bybit=XXXUSDT）——
+ * 「是否本所真实存在的 USDT 永续」由 knownInsts 白名单（本轮行情/合约规格）兜底，
+ * 格式语义的归一化属于模型职责，不硬编码进脚本。
+ */
+const USDT_RE = /USDT/i;
 const MAX_RISK_PCT = 0.025;      // L1-5 单笔风险 ≤2.5%
 const APPROVAL_RISK_PCT = 0.02;  // 超过 2% 需人工确认（L2 基准）
 const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
@@ -37,10 +42,16 @@ export function guardIntent(
   const violations: string[] = [];
   const warnings: string[] = [];
 
-  // L1-1 仅 USDT 永续（任意标的，不再限 BTC/ETH）
-  if (!INST_RE.test(it.inst)) {
-    violations.push(`L1-1 标的「${it.inst}」非 USDT 计价永续（需形如 XXX-USDT-SWAP）`);
-  } else if (knownInsts && knownInsts.size && !knownInsts.has(it.inst)) {
+  // L1-1 仅 USDT 计价（任意标的，不再限 BTC/ETH）。
+  // 本质约束 = USDT 计价；「是否本所真实标的」交给 knownInsts 白名单（本轮行情/合约规格）。
+  // 脚本不替模型判定交易所命名格式。
+  const instStr = String(it.inst ?? "").trim();
+  if (!instStr) {
+    violations.push(`L1-1 标的为空`);
+  } else if (!USDT_RE.test(instStr)) {
+    violations.push(`L1-1 标的「${it.inst}」非 USDT 计价`);
+  }
+  if (instStr && knownInsts && knownInsts.size && !knownInsts.has(instStr)) {
     violations.push(`L1-1 标的「${it.inst}」不在本轮行情候选池/合约规格中`);
   }
 

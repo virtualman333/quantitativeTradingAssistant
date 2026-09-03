@@ -51,11 +51,11 @@
     ],
     "extraResources": [
       {
-        "from": "../scripts",
+        "from": "scripts",
         "to": "scripts"
       },
       {
-        "from": "../AGENT_TRADING_RULES.md",
+        "from": "AGENT_TRADING_RULES.md",
         "to": "AGENT_TRADING_RULES.md"
       }
     ],

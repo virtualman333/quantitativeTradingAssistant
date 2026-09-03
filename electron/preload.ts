@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("api", {
   mcpUpsert: (c: unknown) => safeInvoke("mcp:upsert", c),
   mcpDelete: (id: string) => safeInvoke("mcp:delete", id),
   mcpTest: (id: string) => safeInvoke("mcp:test", id),
+  mcpPresets: () => safeInvoke("mcp:presets"),
+  mcpInstall: (p: { presetId: string; env?: Record<string, string> }) => safeInvoke("mcp:install", p),
   // Skill
   skillsList: () => safeInvoke("skills:list"),
   skillsSetEnabled: (id: string, on: boolean) => safeInvoke("skills:setEnabled", id, on),

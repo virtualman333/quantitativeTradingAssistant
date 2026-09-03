@@ -25,8 +25,8 @@ export const AGENT_ROOT = (() => {
   }
   return path.resolve(__dirname, "..", "..");
 })();
-/** 仓库根（scripts/、AGENT_TRADING_RULES.md 所在） */
-export const PROJECT_ROOT = path.resolve(AGENT_ROOT, "..");
+/** 项目根（自包含：scripts/、state/、AGENT_TRADING_RULES.md 都在 agent/ 内） */
+export const PROJECT_ROOT = AGENT_ROOT;
 
 const DENY_DIRS = [".git", "node_modules", ".venv", "__pycache__", "release", "dist"];
 const DENY_FILES = [".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", ".htpasswd"];

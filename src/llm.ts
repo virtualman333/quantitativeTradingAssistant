@@ -22,6 +22,8 @@ export interface LlmProvider {
   readonly name: string;
   readonly modelId: string;
   decide(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
+  /** 返回原文（不做 JSON 提取），用于生成 HTML/Markdown 等非 JSON 内容 */
+  complete(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
 }
 
 /** 统一注入中文：推理模型默认可能用英文思考，加一句约束尽量让思考与回答都走中文 */
@@ -164,7 +166,8 @@ class OpenAICompatProvider implements LlmProvider {
    *   1. 只吃流式的网关：非流式 400 / 11101 → 自动改走流式；
    *   2. 推理模型：思考链占用 max_tokens，正文被截断 → 自动翻倍预算重试。
    */
-  async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+  /** 取一次完整正文（不做 JSON 提取），供 decide/complete 共用 */
+  private async raw(sys: string, user: string, opts?: DecideOpts): Promise<string> {
     const msgs: ChatMessage[] = [
       { role: "system", content: sys + LANG_HINT },
       { role: "user", content: user },
@@ -177,7 +180,7 @@ class OpenAICompatProvider implements LlmProvider {
       const r = await this.callOnce(msgs, budget, false, onReasoning);
       if (r.ok) {
         // 正文非空即交付；空正文只有「被预算截断」才需要重试，其余照常返回
-        if (r.content || r.finish !== "length") return extractJson(r.content);
+        if (r.content || r.finish !== "length") return r.content;
       } else if (!isNonStreamRejected(r.status, r.raw)) {
         // 非「拒绝非流式」的错误原样抛出，避免掩盖鉴权/参数等真实问题
         throw new Error(`${this.cfg.name} HTTP ${r.status}: ${r.raw.slice(0, 300)}`);
@@ -193,7 +196,7 @@ class OpenAICompatProvider implements LlmProvider {
       const r = await this.callOnce(msgs, tokens, true, onReasoning);
       if (!r.ok) throw new Error(`${this.cfg.name} HTTP ${r.status}: ${r.raw.slice(0, 300)}`);
       last = r;
-      if (r.content) return extractJson(r.content);
+      if (r.content) return r.content;
       if (r.finish !== "length") {
         throw new Error(`${this.cfg.name} 返回空正文（finish=${r.finish || "未知"}）`);
       }
@@ -204,6 +207,14 @@ class OpenAICompatProvider implements LlmProvider {
         `请在「设置-模型」把该模型的 maxTokens 调大`
     );
   }
+
+  async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+    return extractJson(await this.raw(sys, user, opts));
+  }
+
+  async complete(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+    return this.raw(sys, user, opts);
+  }
 }
 
 // ── Anthropic 原生 ──
@@ -213,7 +224,7 @@ class AnthropicProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
-  async decide(sys: string, user: string, _opts?: DecideOpts): Promise<string> {
+  async complete(sys: string, user: string, _opts?: DecideOpts): Promise<string> {
     const base = (this.cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
     const r = await fetchWithTimeout(`${base}/v1/messages`, {
       method: "POST",
@@ -235,7 +246,11 @@ class AnthropicProvider implements LlmProvider {
       throw new Error(`${this.cfg.name} HTTP ${r.status}: ${t.slice(0, 300)}`);
     }
     const j = (await r.json()) as { content?: { text?: string }[] };
-    return extractJson(j.content?.[0]?.text ?? "");
+    return j.content?.[0]?.text ?? "";
+  }
+
+  async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+    return extractJson(await this.complete(sys, user, opts));
   }
 }
 
@@ -271,6 +286,9 @@ class MockProvider implements LlmProvider {
       flags: ["mock 模式"],
     });
   }
+  async complete(_sys: string, _user?: string, _opts?: DecideOpts): Promise<string> {
+    return "[mock] 未配置真实模型，无法生成 HTML 报告。请在「设置-模型」添加 API Key 并设为默认。";
+  }
 }
 
 /** 按模型配置创建 provider。obfuscated=false 用于「测试连接」等无需混淆的场景。 */
@@ -289,13 +307,18 @@ export function createProvider(cfg: ModelConfig, obfuscated = true): LlmProvider
   }
   // mock 不发网络、无需混淆；真实 provider 统一做「发送前混淆 + 返回后还原」。
   if (!obfuscated || cfg.provider === "mock") return p;
-  const inner = p.decide.bind(p);
+  const innerDecide = p.decide.bind(p);
+  const innerComplete = p.complete.bind(p);
   return {
     name: p.name,
     modelId: p.modelId,
     async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
       // 在 system 最前面注入代号约定，并对正文做敏感标识混淆
-      const raw = await inner(OBF_PREAMBLE + "\n\n" + obfuscate(sys), obfuscate(user), opts);
+      const raw = await innerDecide(OBF_PREAMBLE + "\n\n" + obfuscate(sys), obfuscate(user), opts);
+      return deobfuscate(raw);
+    },
+    async complete(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+      const raw = await innerComplete(OBF_PREAMBLE + "\n\n" + obfuscate(sys), obfuscate(user), opts);
       return deobfuscate(raw);
     },
   };

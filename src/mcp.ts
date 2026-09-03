@@ -13,13 +13,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { listMcpServers } from "./store.js";
+import { listMcpServers, AGENT_ROOT } from "./store.js";
 
-export const ROOT = (() => {
-  const d = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(d, "..", "..");
-})();
+export const ROOT = AGENT_ROOT;
 
 export interface McpServerConfig {
   command: string;
@@ -83,7 +79,9 @@ export function toTransportParams(cfg: McpServerConfig) {
   else
     needWrap =
       isWin &&
-      (/\.ps1$|\.cmd$|\.bat$/i.test(cfg.command) || cfg.command === "okx-trade-mcp");
+      (/\.ps1$|\.cmd$|\.bat$/i.test(cfg.command) ||
+        cfg.command === "okx-trade-mcp" ||
+        /^npx(\.cmd)?$/i.test(cfg.command));
 
   if (needWrap) {
     return {

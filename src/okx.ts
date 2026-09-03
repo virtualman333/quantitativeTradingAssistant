@@ -9,13 +9,12 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { AGENT_ROOT } from "./store.js";
 
 const execFileAsync = promisify(execFile);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** 项目根目录（agent/ 的上一级） */
-export const ROOT = path.resolve(__dirname, "..", "..");
+/** 项目根目录（agent/ 自身，脚本与数据均自包含在 agent 下，不再依赖父目录） */
+export const ROOT = AGENT_ROOT;
 
 /**
  * 注意：不能用 process.execPath —— 在 tsx 下它是 node.exe，拿去跑 .py 会

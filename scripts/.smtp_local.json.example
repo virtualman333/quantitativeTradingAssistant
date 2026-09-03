@@ -1,0 +1,9 @@
+{
+  "_comment": "复制为 .smtp_local.json 并填入真实值。.smtp_local.json 已在 .gitignore 中，绝不入库。",
+  "host": "smtp.yeah.net",
+  "port": 465,
+  "user": "your-mail@yeah.net",
+  "password": "邮箱授权码（不是登录密码）",
+  "sender": "your-mail@yeah.net",
+  "to": "recipient@qq.com"
+}

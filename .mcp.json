@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "okx-trade-mcp": {
+      "command": "okx-trade-mcp",
+      "args": ["--modules", "all"],
+      "env": {}
+    }
+  }
+}

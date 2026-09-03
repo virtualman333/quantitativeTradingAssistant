@@ -11,3 +11,6 @@ electron/config.json
 
 # 提交信息临时文件（PowerShell 下中文 -m 容易被编码破坏，改用 -F 文件时产生）
 .gitmsg*.txt
+
+# 专家自动进化产物（每轮 LLM 复盘追加到 knowledge/lessons.md，运行时生成，非手写领域知识）
+experts/*/knowledge/lessons.md

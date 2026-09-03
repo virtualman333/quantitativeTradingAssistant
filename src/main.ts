@@ -22,6 +22,7 @@ import { reflectExperts } from "./experts.js";
 import { reloadStore } from "./store.js";
 import { guardIntent } from "./guard.js";
 import { alert } from "./alert.js";
+import { generateRoundReport, generateAllReports } from "./report.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
 
 // 间隔优先级：环境变量（界面/命令行指定）> store 设置 > 默认 5 分钟
@@ -187,7 +188,9 @@ function loadRuntime() {
       daySlCount: j.day_sl_count ?? 0,
       dayPnlPct: j.day_pnl_pct ?? 0,
       monthDdPct: j.month_dd_pct ?? 0,
-      roundNo: j.round_no ?? 0,
+      // 注意：archive_round.py 写的字段是 round_count（不是 round_no），
+      // 之前读错字段导致 round_id 永远停在 R000001（实测踩过，rounds.jsonl 里重复了 11 次 R000001）。
+      roundNo: j.round_no ?? j.round_count ?? 0,
     };
   } catch {
     return def;
@@ -389,6 +392,14 @@ async function runRound() {
     fs.writeFileSync(path.join(STATE, `round_input_${roundId}.json`), JSON.stringify(payload, null, 2), "utf8");
     await runPy("archive_round.py", ["--in", `state/round_input_${roundId}.json`]);
     log(`归档完成 ${roundId}`);
+
+    // ⑥ 生成 HTML 报告（LLM 出 HTML，落盘 reports/；失败只记日志，绝不阻断交易）
+    try {
+      await generateRoundReport(payload);
+      log(`报告已生成 ${roundId}`);
+    } catch (e) {
+      log(`报告生成失败: ${String(e).slice(0, 150)}`);
+    }
   } catch (e) {
     log(`归档失败（不回滚）: ${String(e).slice(0, 200)}`);
   }
@@ -423,6 +434,13 @@ async function main() {
     modelName = process.env.LLM_PROVIDER ?? "mock";
   }
   log(`OKX Agent(LangGraph) 启动 interval=${INTERVAL_MS}ms dry=${DRY_RUN} once=${ONCE} 模型=${modelName}`);
+  // 补生成历史轮次的 HTML 详情（纯数据兜底、不耗 token），让记录表每条都能点开
+  try {
+    const n = await generateAllReports(false);
+    if (n > 0) log(`历史轮次报告已补齐（共 ${n} 轮）`);
+  } catch (e) {
+    log(`历史报告补齐失败: ${String(e).slice(0, 150)}`);
+  }
   // dry-run 是「模式」不是「单轮」：只影响是否真的下单，不影响是否常驻。
   // 只有 --once 才跑一轮就退出（实测踩过：把 dry 也当单轮，导致常驻模式下服务跑完即退）
   if (ONCE) {
