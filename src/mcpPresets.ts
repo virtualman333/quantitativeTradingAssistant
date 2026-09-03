@@ -27,7 +27,7 @@ export interface McpPreset {
   /** server id（与 store.mcpServers[].id 对应） */
   id: string;
   name: string;
-  /** 交易所短标识（界面 logo 用首字符） */
+  /** 短标识（界面 logo 用首字符） */
   exchange: string;
   description: string;
   /** npm 全局安装的包；为空则 npx 运行时自装 */
@@ -39,6 +39,12 @@ export interface McpPreset {
   envVars: McpEnvVar[];
   /** 安装弹窗里的补充说明 */
   note?: string;
+  /** 业务类型（默认 exchange） */
+  kind?: "exchange" | "data" | "tool" | "other";
+  /** HTTP 型 MCP：有 url 则走 Streamable HTTP，忽略 command/args */
+  url?: string;
+  /** HTTP 型请求头（如金十 Bearer token） */
+  headers?: Record<string, string>;
 }
 
 export const MCP_PRESETS: McpPreset[] = [
@@ -116,6 +122,23 @@ export const MCP_PRESETS: McpPreset[] = [
       { key: "CDP_API_KEY_PRIVATE_KEY", label: "CDP API 私钥", required: true },
     ],
     note: "使用 Coinbase Developer Platform (CDP) 密钥。",
+  },
+  {
+    id: "jin10-data-mcp",
+    name: "金十数据 MCP",
+    exchange: "金十",
+    description: "金十财经数据（新闻/快讯/财经日历/行情），HTTP Streamable MCP，消息面专用数据源。",
+    installPackages: [],
+    command: "",
+    args: [],
+    windowsCmdWrap: false,
+    envVars: [],
+    kind: "data",
+    url: "https://mcp.jin10.com/mcp",
+    headers: {
+      Authorization: "Bearer sk-R7V5Q69CqBwTmuX52qmdO0qnH_CgsCdT9cAV96LZ4I4",
+    },
+    note: "金十数据源（token 已内置）；如失效可在 MCP 页修改 Authorization 头。",
   },
 ];
 
