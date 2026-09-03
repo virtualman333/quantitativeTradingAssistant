@@ -628,7 +628,7 @@ ipcMain.handle("reports:gen", async (_e, kind: string) => {
 });
 
 // ── 热门行情（优先 okx-trade-mcp；失败回退直连 REST；10s 缓存） ──
-let tickersCache: { at: number; rows: unknown[] } | null = null;
+let tickersCache: { at: number; rows: unknown[]; src: string } | null = null;
 let mktMcp: { tools: any[]; close: () => Promise<void> } | null = null;
 
 /** 行情专用 MCP 长连接：惰性建立、复用；调用失败置空待重连 */
@@ -694,14 +694,29 @@ async function tickersViaRest(): Promise<any[]> {
   throw new Error(lastErr || "直连 REST 失败");
 }
 
+/**
+ * 市值分层：OKX 公共行情不返回市值，这里用主流币市值梯队做静态排名（1 最大）。
+ * 未收录的币 rank=9999，在市值排序里排在末尾，梯队内部再按 24h 成交额排。
+ * 用途：首页 Top5 与行情页「按市值排序」——够用且零依赖（无额外 API、不受网络影响）。
+ */
+const MCAP_RANK: Record<string, number> = {
+  BTC: 1, ETH: 2, SOL: 3, BNB: 4, XRP: 5, DOGE: 6, ADA: 7, TRX: 8, AVAX: 9, LINK: 10,
+  TON: 11, DOT: 12, SUI: 13, LTC: 14, BCH: 15, HBAR: 16, SHIB: 17, UNI: 18, PEPE: 19, APT: 20,
+  NEAR: 21, ICP: 22, AAVE: 23, ETC: 24, POL: 25, ATOM: 26, FIL: 27, ARB: 28, OP: 29, INJ: 30,
+  TIA: 31, SEI: 32, RUNE: 33, IMX: 34, GRT: 35, AXL: 36, ALGO: 37, EGLD: 38, SAND: 39, MANA: 40,
+};
+
 function toTickerRows(data: any[]) {
   return (data as any[])
     .filter((t) => String(t.instId).endsWith("-USDT-SWAP"))
-    .sort((a, b) => Number(b.volCcy24h) - Number(a.volCcy24h)) // 按 24h 成交额排热门
+    .sort((a, b) => Number(b.volCcy24h) - Number(a.volCcy24h)) // 先按 24h 成交额排热门
     .map((t) => {
       const last = Number(t.last);
       const open = Number(t.open24h);
+      const sym = String(t.instId).split("-")[0];
       return {
+        rank: MCAP_RANK[sym] ?? 9999,
+        symbol: sym,
         instId: String(t.instId),
         last,
         changePct: open ? ((last - open) / open) * 100 : 0,
@@ -712,10 +727,13 @@ function toTickerRows(data: any[]) {
     });
 }
 
-ipcMain.handle("market:tickers", async (_e, limit = 15) => {
-  const n = Number(limit) || 15;
+/**
+ * 全量行情（渲染进程侧做搜索/筛选/排序/截断，避免每次改条件都回主进程）。
+ * 约 470 个 USDT 永续，JSON 很小，一次传完最省心。
+ */
+ipcMain.handle("market:tickers", async () => {
   if (tickersCache && Date.now() - tickersCache.at < 10_000) {
-    return { ok: true, tickers: tickersCache.rows.slice(0, n), ts: tickersCache.at };
+    return { ok: true, tickers: tickersCache.rows, ts: tickersCache.at, source: tickersCache.src };
   }
   let data: any[] | null = null;
   let source = "";
@@ -736,9 +754,81 @@ ipcMain.handle("market:tickers", async (_e, limit = 15) => {
   }
   if (!data) return { ok: false, error: lastErr.slice(0, 300) };
   const rows = toTickerRows(data);
-  tickersCache = { at: Date.now(), rows };
-  return { ok: true, tickers: rows.slice(0, n), ts: Date.now(), source };
+  tickersCache = { at: Date.now(), rows, src: source };
+  return { ok: true, tickers: rows, ts: Date.now(), source };
 });
+
+/**
+ * K 线（优先 MCP market_get_candles，回退直连 REST）。
+ * OKX 返回倒序 [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]，这里统一转成正序对象。
+ */
+ipcMain.handle(
+  "market:kline",
+  async (_e, instId: string, bar = "15m", limit = 120) => {
+    const inst = String(instId ?? "");
+    const b = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D", "1W"].includes(String(bar))
+      ? String(bar)
+      : "15m";
+    const n = Math.min(Math.max(Number(limit) || 120, 20), 300);
+    const toCandles = (rows: any[]) =>
+      rows
+        .map((r) => ({
+          t: Number(r[0]),
+          o: Number(r[1]),
+          h: Number(r[2]),
+          l: Number(r[3]),
+          c: Number(r[4]),
+          v: Number(r[5]),
+        }))
+        .filter((k) => Number.isFinite(k.t) && Number.isFinite(k.c))
+        .sort((a, b2) => a.t - b2.t); // 正序（旧→新）
+
+    try {
+      const conn = await getMktMcp();
+      if (!conn) throw new Error("MCP 未连接");
+      const tool = conn.tools.find((x: any) => String(x.name).endsWith("__market_get_candles"));
+      if (!tool) throw new Error("MCP 缺少 market_get_candles 工具");
+      let out: any;
+      try {
+        out = await tool.invoke({ instId: inst, bar: b, limit: n });
+      } catch (e) {
+        mktMcp = null; // 连接可能已断，下次重连
+        throw e;
+      }
+      let j: any = out;
+      if (out?.content && Array.isArray(out.content)) {
+        j = JSON.parse(out.content.map((c: any) => c.text ?? "").join(""));
+      }
+      const arr = j?.data?.data ?? j?.data;
+      if (!Array.isArray(arr)) throw new Error("MCP 返回结构异常");
+      return { ok: true, instId: inst, bar: b, candles: toCandles(arr), source: "mcp" };
+    } catch (e) {
+      const mcpErr = String((e as Error)?.message ?? e).slice(0, 120);
+      // 回退直连
+      const bases = process.env.OKX_PUBLIC_BASE
+        ? [process.env.OKX_PUBLIC_BASE.replace(/\/+$/, "")]
+        : ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"];
+      let restErr = "";
+      for (const base of bases) {
+        try {
+          const r = await fetch(
+            `${base}/api/v5/market/candles?instId=${encodeURIComponent(inst)}&bar=${b}&limit=${n}`,
+            { signal: AbortSignal.timeout(10_000) }
+          );
+          const j: any = await r.json();
+          if (j.code !== "0") {
+            restErr = `code=${j.code} ${j.msg ?? ""}`;
+            continue;
+          }
+          return { ok: true, instId: inst, bar: b, candles: toCandles(j.data), source: "rest" };
+        } catch (err) {
+          restErr = String((err as Error)?.message ?? err);
+        }
+      }
+      return { ok: false, error: `MCP: ${mcpErr} | REST: ${restErr}`.slice(0, 300) };
+    }
+  }
+);
 ipcMain.handle("open:folder", (_e, which: string) => {
   shell.openPath(which === "logs" ? path.join(PROJECT_ROOT, "logs") : path.join(PROJECT_ROOT, "state"));
   return { ok: true };

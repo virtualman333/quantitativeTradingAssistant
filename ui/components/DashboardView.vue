@@ -3,6 +3,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { status } from "../store/index.js";
 import { api } from "../lib/api.js";
+import { goTab, klineInst } from "../lib/nav.js";
 import { fmtNum, signCls, STANCE_TEXT } from "../lib/format.js";
 
 const rd = computed(() => status.latestRound || {});
@@ -30,10 +31,28 @@ const roundTime = computed(() => {
   return m ? `${m[1]} ${m[2]}` : String(t);
 });
 
-// ── 热门行情：按 24h 成交额取前 15 个 USDT 永续，15 秒轮询 ──
+// ── 热门行情：首页只放市值前 5，完整列表在「行情」页 ──
 const tickers = ref([]);
 const tickersErr = ref("");
 const tickersAt = ref("");
+const top5 = computed(() =>
+  tickers.value
+    .slice()
+    .sort((a, b) => a.rank - b.rank || b.volUsd - a.volUsd) // 市值梯队优先，梯队内按成交额
+    .slice(0, 5)
+);
+function fmtPrice(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  const a = Math.abs(n);
+  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
+  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+/** 点交易对 → 跳行情页并自动展开该标的 K 线 */
+function openKlineOf(t) {
+  klineInst.value = t.instId;
+  goTab("mkt");
+}
 let tickTimer = null;
 let ticking = false;
 
@@ -95,28 +114,30 @@ onUnmounted(stopTick);
 
   <div class="panel">
     <h2>
-      热门行情（USDT 永续 · 24h 成交额前 15）
+      热门行情（市值前 5）
       <span class="hint" style="font-weight:400">每 15 秒刷新 · {{ tickersAt || "—" }}</span>
+      <button class="sm" style="float:right" @click="goTab('mkt')">查看更多 →</button>
     </h2>
     <div class="body">
       <div v-if="tickersErr" class="alert err" style="margin:0 0 8px">行情获取失败：{{ tickersErr }}</div>
-      <table v-if="tickers.length">
+      <table v-if="top5.length">
         <thead>
           <tr><th>交易对</th><th>最新价</th><th>24h 涨跌</th><th>24h 最高</th><th>24h 最低</th></tr>
         </thead>
         <tbody>
-          <tr v-for="t in tickers" :key="t.instId">
+          <tr v-for="t in top5" :key="t.instId" class="row-click" @click="openKlineOf(t)">
             <td><b>{{ t.instId }}</b></td>
-            <td>{{ fmtNum(t.last) }}</td>
+            <td>{{ fmtPrice(t.last) }}</td>
             <td :class="signCls(t.changePct)">
               {{ t.changePct >= 0 ? "+" : "" }}{{ t.changePct.toFixed(2) }}%
             </td>
-            <td>{{ fmtNum(t.high24h) }}</td>
-            <td>{{ fmtNum(t.low24h) }}</td>
+            <td>{{ fmtPrice(t.high24h) }}</td>
+            <td>{{ fmtPrice(t.low24h) }}</td>
           </tr>
         </tbody>
       </table>
       <div v-else-if="!tickersErr" class="empty">加载中…</div>
+      <div class="hint" style="margin-top:8px">点击交易对查看 K 线 · 市值梯队为内置静态排名（OKX 公共行情不返回市值）</div>
     </div>
   </div>
 
@@ -216,4 +237,6 @@ onUnmounted(stopTick);
 .line { font-size: 12px; line-height: 1.75; color: var(--text-2); word-break: break-word; }
 .line.warn { color: var(--yellow); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.row-click { cursor: pointer; }
+.row-click:hover { background: var(--hover-2); }
 </style>

@@ -22,8 +22,8 @@ import SettingsView from "./components/SettingsView.vue";
 import PositionsView from "./components/PositionsView.vue";
 import TraceView from "./components/TraceView.vue";
 import ReportsView from "./components/ReportsView.vue";
-
-const tab = ref("dash");
+import MarketView from "./components/MarketView.vue";
+import { tab } from "./lib/nav.js"; // 共享页签：支持跨视图跳转（如总览「查看更多」→行情）
 
 /** 页签图标：内联 SVG，随 currentColor 走主题色，不依赖任何图标字体 */
 const svg = (inner) =>
@@ -40,10 +40,12 @@ const ICONS = {
   cfg: svg('<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'),
   pos: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1.3"/><circle cx="3.5" cy="12" r="1.3"/><circle cx="3.5" cy="18" r="1.3"/>'),
   rep: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
+  mkt: svg('<line x1="3" y1="3" x2="3" y2="21"/><line x1="3" y1="21" x2="21" y2="21"/><polyline points="6 15 10 10 14 13 20 6"/>'),
 };
 
 const tabs = [
   { k: "dash", t: "总览" },
+  { k: "mkt", t: "行情" },
   { k: "chat", t: "对话" },
   { k: "obs", t: "观测" },
   { k: "models", t: "模型" },
@@ -58,6 +60,7 @@ const tabs = [
 const views = {
   dash: DashboardView, chat: ChatView, obs: TraceView, models: ModelsView, roles: RolesView,
   mcp: McpView, skills: SkillsView, log: LogView, rep: ReportsView, cfg: SettingsView, pos: PositionsView,
+  mkt: MarketView,
 };
 const currentView = computed(() => views[tab.value] || DashboardView);
 
