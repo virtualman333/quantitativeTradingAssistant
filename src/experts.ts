@@ -424,19 +424,17 @@ export function loadKnowledge(id: string, maxBytes = 12000): string {
   return text;
 }
 
-/** 自动进化：一条经验记录（每轮沉淀到该专家 knowledge/lessons.md） */
+/** 自动进化：一条已提炼的教训（复盘产出，非流水账） */
 export interface EvolutionEntry {
   roundId: string;
   time: string;
-  stance: string;
-  confidence: number;
-  summary: string;
+  /** 教训文本（精炼、可证伪：当 X 时应 Y，因为 Z） */
+  text: string;
+  /** 关联决策摘要（可选，供追溯） */
   decision?: string;
-  outcome?: string;
-  adopted?: boolean;
 }
 
-/** 把本轮专家的判断 + 主 Agent 决策 + 执行结果追加到其知识库（只追加，不覆盖） */
+/** 把一条提炼过的教训追加到某专家 knowledge/lessons.md（只追加，不覆盖） */
 const MAX_LESSONS_BYTES = 60 * 1024; // lessons.md 上限，超出裁掉最旧一半，防无限膨胀
 
 export function evolveExpert(id: string, entry: EvolutionEntry): void {
@@ -445,25 +443,69 @@ export function evolveExpert(id: string, entry: EvolutionEntry): void {
     fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, "lessons.md");
     if (!fs.existsSync(f)) {
-      fs.writeFileSync(f, "# 教训与进化记录（每轮自动追加，只增不删）\n\n", "utf8");
+      fs.writeFileSync(f, "# 教训与进化记录（复盘提炼，只增不删）\n\n", "utf8");
     } else if (fs.statSync(f).size > MAX_LESSONS_BYTES) {
       // 超限：只保留较新的后半段，避免文件无限增长
       const buf = fs.readFileSync(f, "utf8");
       fs.writeFileSync(f, buf.slice(-(MAX_LESSONS_BYTES >> 1)), "utf8");
     }
-    const line = [
-      `- ${entry.time} [${entry.roundId}] stance=${entry.stance} conf=${entry.confidence}`,
-      `  观点: ${entry.summary.slice(0, 200)}`,
-      entry.decision ? `  主Agent决策: ${entry.decision}` : "",
-      entry.outcome ? `  结果: ${entry.outcome}` : "",
-      entry.adopted !== undefined ? `  是否采纳: ${entry.adopted ? "是" : "否"}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const line = `- ${entry.time} [${entry.roundId}] ${entry.text}`;
     fs.appendFileSync(f, line + "\n\n", "utf8");
   } catch (e) {
     trace({ source: "agent", kind: "error", message: `专家进化写入失败 ${id}: ${String(e).slice(0, 120)}` });
   }
+}
+
+/**
+ * 复盘式进化：用 LLM 把本轮「专家观点 + 主 Agent 决策 + 执行结果」提炼成
+ * 可证伪的教训，归属到相关专家后写入各自 lessons.md。
+ * 与旧的机械追加不同：只记「可执行的教训」，观望/无实质判断时宁缺毋滥，避免污染上下文。
+ */
+export async function reflectExperts(opts: {
+  llm: LlmProvider;
+  roundId: string;
+  time: string;
+  opinions: ExpertOpinion[];
+  decision: string;
+  outcome: string;
+}): Promise<number> {
+  const { llm, roundId, time, opinions, decision, outcome } = opts;
+  if (!opinions.length) return 0;
+
+  const sys = `你是交易复盘助手。复盘本轮决策，提炼值得沉淀进专家知识库的教训。
+
+严格规则：
+- 只提炼「可执行、可证伪」的教训（如"当 4H 与 1H 趋势冲突时，应优先信 4H"），绝不写流水账、不重复已有常识。
+- 每条用 expert 字段标注它主要针对哪个专家（id：trading/news/factor/risk/sentiment/funding/onchain/execution，无明确归属用 main）。
+- 本轮若只是观望、无实质判断、或无可记教训，输出空数组（宁缺毋滥）。
+- 最多 3 条。
+
+只输出 JSON：{"lessons":[{"expert":"trading","text":"当…时应该…，因为…"}]}`;
+
+  const user = [
+    `轮次 ${roundId}`,
+    `主Agent决策: ${decision}`,
+    `执行结果: ${outcome}`,
+    `各专家观点:`,
+    ...opinions.map((o) => `- ${o.expert}(${o.stance}, 置信${o.confidence}): ${o.summary.slice(0, 160)}`),
+  ].join("\n");
+
+  let lessons: { expert: string; text: string }[] = [];
+  try {
+    const raw = await llm.decide(sys, user);
+    const m = raw.match(/\{[\s\S]*\}/);
+    const j = JSON.parse(m ? m[0] : raw) as { lessons?: { expert?: string; text?: string }[] };
+    lessons = (j.lessons ?? [])
+      .filter((l) => l?.expert && l?.text && String(l.text).trim())
+      .map((l) => ({ expert: String(l.expert), text: String(l.text).trim() }));
+  } catch {
+    return 0; // 复盘失败静默，不阻塞交易
+  }
+
+  for (const l of lessons) {
+    evolveExpert(String(l.expert), { roundId, time, text: String(l.text).trim(), decision });
+  }
+  return lessons.length;
 }
 
 /**

@@ -1,0 +1,7 @@
+{
+  "id": "news_verify",
+  "name": "消息双源交叉验证",
+  "description": "对消息中的关键数字做第二信源验证（经 playwright 抓搜索引擎）。命中则升 A 级（具备否决权），否则维持 B 级。用于满足章程 §10.3。",
+  "args": "{text:\"消息文本\", numbers?:[\"3.8\",\"62.2\"]}  或  {fromInput:\"state/news_input.json\"}",
+  "readOnly": true
+}

@@ -1,0 +1,7 @@
+{
+  "id": "order_id",
+  "name": "生成合规 clOrdId",
+  "description": "生成符合 OKX 规范的客户端订单 ID（字母开头、仅字母数字、≤32 位、禁 _ 与 -）。开仓前必须调用，禁止手写。",
+  "args": "{roundId:\"R000001\", seq:1, params?:{instId:\"BTC-USDT-SWAP\", sz:13.48}}",
+  "readOnly": true
+}

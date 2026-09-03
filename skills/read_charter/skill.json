@@ -1,0 +1,7 @@
+{
+  "id": "read_charter",
+  "name": "查阅交易章程",
+  "description": "读取 AGENT_TRADING_RULES.md 的指定章节（如 §4 开仓基准、§10 消息面、§9 风控）。专家对规则有疑问时调用。",
+  "args": "{section?:\"§10\"（不传则返回前 6000 字）, maxChars?:数字}",
+  "readOnly": true
+}

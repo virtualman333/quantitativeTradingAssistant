@@ -1,0 +1,7 @@
+{
+  "id": "market_scan",
+  "name": "行情扫描",
+  "description": "拉取 BTC/ETH 永续的多周期（4H/1H/15m）K线、EMA、RSI、ATR、量比、区间分位、资金费率，输出结构化 JSON。",
+  "args": "无参数",
+  "readOnly": true
+}

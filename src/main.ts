@@ -17,8 +17,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, confirmAlgo, setLeverage, closePosition, runPy } from "./okx.js";
-import { AgentState, buildGraphWithMcp } from "./graph.js";
-import { evolveExpert } from "./experts.js";
+import { AgentState, buildGraphWithMcp, makeStoreLlmProvider } from "./graph.js";
+import { reflectExperts } from "./experts.js";
 import { reloadStore } from "./store.js";
 import { guardIntent } from "./guard.js";
 import { alert } from "./alert.js";
@@ -314,22 +314,19 @@ async function runRound() {
     log(`归档失败（不回滚）: ${String(e).slice(0, 200)}`);
   }
 
-  // ⑥ 专家自动进化：把本轮各专家观点 + 主 Agent 决策 + 执行结果沉淀回各自知识库
+  // ⑥ 复盘式进化：用 LLM 把本轮观点/决策/结果提炼成可证伪的教训，沉淀到相关专家知识库
   try {
     const decisionText = decision ? `${decision.decision}: ${decision.summary.slice(0, 100)}` : "无决策";
     const outcome = execResults.join(" | ").slice(0, 200);
-    for (const o of final.opinions ?? []) {
-      evolveExpert(o.expert, {
-        roundId,
-        time: ts(),
-        stance: o.stance,
-        confidence: o.confidence,
-        summary: o.summary,
-        decision: decisionText,
-        outcome: outcome || undefined,
-      });
-    }
-    log(`专家知识库已进化（${(final.opinions ?? []).length} 位）`);
+    const n = await reflectExperts({
+      llm: makeStoreLlmProvider(undefined, true) as never,
+      roundId,
+      time: ts(),
+      opinions: final.opinions ?? [],
+      decision: decisionText,
+      outcome: outcome || "无执行动作",
+    });
+    if (n > 0) log(`专家知识库已进化（提炼 ${n} 条教训）`);
   } catch (e) {
     log(`专家进化失败: ${String(e).slice(0, 150)}`);
   }

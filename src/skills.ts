@@ -1,26 +1,30 @@
 /**
  * skills.ts —— 技能系统（Skill）
  *
- * Skill = 一段可复用的确定性能力（脚本/查询/计算），供专家按需调用。
- * 与 MCP 工具的区别：
- *   · MCP 工具：外部 server 暴露的能力（okx-trade-mcp、jin10 等），动态发现
- *   · Skill   ：本项目自己沉淀的能力（已踩过坑、参数已固化），确定性更高
+ * 与专家（experts）同构的可插拔结构：
+ *   · 声明式元数据（name/description/args/readOnly）在 `skills/<id>/skill.json`，
+ *     程序启动扫描加载，增删改无需改 TS（可版本控制、可界面编辑）。
+ *   · 执行逻辑（run）保留在下方 RUNNERS 映射：参数处理各异（固定参数/条件分支/
+ *     JSON 序列化/读文件截取），不适合 JSON 化。
+ *   · 若 skills/ 目录缺失或为空，SKILLS 为空（兜底不内置，避免两份定义漂移）。
  *
- * 为什么要单独一层：
- *   有些能力（如「双源交叉验证」）流程固定且已经踩过坑，
- *   交给 LLM 临场发挥容易跑偏（忘了等 JS 渲染、忘了归一化数字）。
- *   固化为 Skill 后，专家只需说「调用 news_verify」即可。
- *
- * 新增 Skill：往 SKILLS 里加一项即可，专家 prompt 会自动带上能力清单。
+ * 新增 Skill 两步：① 加 `skills/<id>/skill.json` ② 在 RUNNERS 注册同名 run 函数。
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { AGENT_ROOT } from "./store.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * ROOT = 项目根（agent 的上一级），Python 脚本在 ROOT/scripts/ 下。
+ * 注意：agent 子进程用 tsx 跑源码，此处 __dirname 是 src/，故 ROOT=父目录；
+ * 编译后（dist/src）路径会不同，但 agent 不走编译产物执行 skill，故无碍。
+ */
 export const ROOT = path.resolve(__dirname, "..", "..");
 
 /** python 解释器探测（Windows 上 process.execPath 是 node，不能用，实测踩过） */
@@ -50,22 +54,23 @@ export interface SkillResult {
   error?: string;
 }
 
-export interface Skill {
+/** 声明式定义（skills/<id>/skill.json） */
+export interface SkillDef {
   id: string;
   name: string;
   description: string;
-  /** 参数说明，写进专家 prompt */
   args: string;
-  /** 只读技能（不产生任何写操作） */
   readOnly: boolean;
+}
+
+/** 完整 Skill = 元数据 + 执行逻辑 */
+export interface Skill extends SkillDef {
   run(args: Record<string, unknown>): Promise<SkillResult>;
 }
 
-async function runPyScript(
-  script: string,
-  args: string[],
-  timeoutMs = 180_000
-): Promise<SkillResult> {
+type SkillRunner = (args: Record<string, unknown>) => Promise<SkillResult>;
+
+async function runPyScript(script: string, args: string[], timeoutMs = 180_000): Promise<SkillResult> {
   try {
     const r = await execFileAsync(py(), [path.join("scripts", script), ...args], {
       cwd: ROOT,
@@ -81,148 +86,116 @@ async function runPyScript(
   }
 }
 
-export const SKILLS: Skill[] = [
-  {
-    id: "market_scan",
-    name: "行情扫描",
-    description:
-      "拉取 BTC/ETH 永续的多周期（4H/1H/15m）K线、EMA、RSI、ATR、量比、区间分位、资金费率，输出结构化 JSON。",
-    args: "无参数",
-    readOnly: true,
-    run: async () => {
-      const r = await runPyScript("market_scan.py", []);
-      if (!r.ok) return r;
-      // 输出可能很长，截断以省 token
-      return { ok: true, output: r.output.slice(0, 12000) };
-    },
+// ── 执行逻辑：id -> run 函数（参数处理保留在代码，不 JSON 化） ──
+const RUNNERS: Record<string, SkillRunner> = {
+  market_scan: async () => {
+    const r = await runPyScript("market_scan.py", []);
+    if (!r.ok) return r;
+    return { ok: true, output: r.output.slice(0, 12000) };
   },
-  {
-    id: "news_query",
-    name: "查可信消息库",
-    description:
-      "从 SQLite 消息库查询最近 N 小时已入库的可信消息（A=双源已验证 / B=单一专业源），无需重新抓取与二次验证。优先用它复用历史可信消息。",
-    args: "{hours?:数字(默认24), minCred?:'A'|'B'|'C'(默认B), limit?:数字(默认40)}",
-    readOnly: true,
-    run: async (a) => {
-      const args = ["--query"];
-      if (a.hours) args.push("--hours", String(a.hours));
-      if (a.minCred) args.push("--min-cred", String(a.minCred));
-      if (a.limit) args.push("--limit", String(a.limit));
-      return runPyScript("news_db.py", args, 60_000);
-    },
+  news_query: async (a) => {
+    const args = ["--query"];
+    if (a.hours) args.push("--hours", String(a.hours));
+    if (a.minCred) args.push("--min-cred", String(a.minCred));
+    if (a.limit) args.push("--limit", String(a.limit));
+    return runPyScript("news_db.py", args, 60_000);
   },
-  {
-    id: "news_fetch",
-    name: "消息采集",
-    description:
-      "从金十数据抓取新闻/快讯/财经日历，自动分级（impact/credibility/direction）并标记需交叉验证的条目。",
-    args: "{hours?:数字(默认24), limit?:数字(默认20)}",
-    readOnly: true,
-    run: async (a) => {
-      const args = ["--out", "state/news_input.json"];
-      if (a.hours) args.push("--hours", String(a.hours));
-      if (a.limit) args.push("--limit", String(a.limit));
-      return runPyScript("news_fetch.py", args, 240_000);
-    },
+  news_fetch: async (a) => {
+    const args = ["--out", "state/news_input.json"];
+    if (a.hours) args.push("--hours", String(a.hours));
+    if (a.limit) args.push("--limit", String(a.limit));
+    return runPyScript("news_fetch.py", args, 240_000);
   },
-  {
-    id: "news_verify",
-    name: "消息双源交叉验证",
-    description:
-      "对消息中的关键数字做第二信源验证（经 playwright 抓搜索引擎）。命中则升 A 级（具备否决权），否则维持 B 级。用于满足章程 §10.3。",
-    args: '{text:"消息文本", numbers?:["3.8","62.2"]}  或  {fromInput:"state/news_input.json"}',
-    readOnly: true,
-    run: async (a) => {
-      if (a.fromInput) {
-        return runPyScript(
-          "news_verify.py",
-          ["--from-input", String(a.fromInput), "--out", "state/news_verify.json"],
-          300_000
-        );
+  news_verify: async (a) => {
+    if (a.fromInput) {
+      return runPyScript(
+        "news_verify.py",
+        ["--from-input", String(a.fromInput), "--out", "state/news_verify.json"],
+        300_000
+      );
+    }
+    if (!a.text) return { ok: false, output: "", error: "缺少 text 参数" };
+    const nums = Array.isArray(a.numbers) ? (a.numbers as string[]) : [];
+    const args = ["--text", String(a.text)];
+    if (nums.length) args.push("--numbers", ...nums.map(String));
+    return runPyScript("news_verify.py", args, 300_000);
+  },
+  polymarket_sentiment: async (a) => {
+    const args = [];
+    if (a.limit) args.push("--limit", String(a.limit));
+    return runPyScript("polymarket_sentiment.py", args, 120_000);
+  },
+  backtest: async (a) => {
+    const args = [];
+    if (a.inst) args.push("--inst", String(a.inst));
+    if (a.hours) args.push("--hours", String(a.hours));
+    return runPyScript("backtest.py", args, 300_000);
+  },
+  news_log: async (a) => {
+    const args = ["--input", "state/news_input.json"];
+    if (a.dryRun) args.push("--dry-run");
+    if (a.roundId) args.push("--round-id", String(a.roundId));
+    return runPyScript("news_log.py", args);
+  },
+  order_id: async (a) => {
+    const args = ["--round", String(a.roundId ?? "R000000"), "--seq", String(a.seq ?? 1)];
+    if (a.params) args.push("--params", JSON.stringify(a.params));
+    return runPyScript("order_id.py", args, 60_000);
+  },
+  read_charter: async (a) => {
+    const p = path.join(ROOT, "AGENT_TRADING_RULES.md");
+    if (!fs.existsSync(p)) return { ok: false, output: "", error: "章程文件不存在" };
+    const txt = fs.readFileSync(p, "utf8");
+    const max = Number(a.maxChars ?? 6000);
+    const sec = a.section ? String(a.section) : "";
+    if (!sec) return { ok: true, output: txt.slice(0, max) };
+    const idx = txt.indexOf(sec);
+    if (idx === -1) return { ok: false, output: "", error: `未找到章节 ${sec}` };
+    const rest = txt.slice(idx + sec.length);
+    const nextH = rest.search(/\n#{1,3} /);
+    return { ok: true, output: rest.slice(0, nextH > 0 ? Math.min(nextH, max) : max) };
+  },
+};
+
+// ── 扫描加载（同 experts.loadExpertDefs 的结构） ──
+const SKILLS_DIR = path.join(AGENT_ROOT, "skills");
+
+function loadSkillDefs(): SkillDef[] {
+  if (!fs.existsSync(SKILLS_DIR)) return [];
+  const out: SkillDef[] = [];
+  for (const entry of fs.readdirSync(SKILLS_DIR).sort()) {
+    const full = path.join(SKILLS_DIR, entry);
+    if (fs.statSync(full).isDirectory()) {
+      const jp = path.join(full, "skill.json");
+      if (fs.existsSync(jp)) {
+        try {
+          out.push(JSON.parse(fs.readFileSync(jp, "utf8")) as SkillDef);
+        } catch {
+          /* 忽略坏文件 */
+        }
       }
-      if (!a.text) return { ok: false, output: "", error: "缺少 text 参数" };
-      const nums = Array.isArray(a.numbers) ? (a.numbers as string[]) : [];
-      const args = ["--text", String(a.text)];
-      if (nums.length) args.push("--numbers", ...nums.map(String));
-      return runPyScript("news_verify.py", args, 300_000);
-    },
-  },
-  {
-    id: "polymarket_sentiment",
-    name: "Polymarket 情绪",
-    description:
-      "从 Polymarket 预测市场拉取加密/宏观相关事件的隐含概率与成交量（市场情绪）。价格=市场集体判断的概率(0-1)。",
-    args: "{limit?:数字(默认12)}",
-    readOnly: true,
-    run: async (a) => {
-      const args = [];
-      if (a.limit) args.push("--limit", String(a.limit));
-      return runPyScript("polymarket_sentiment.py", args, 120_000);
-    },
-  },
-  {
-    id: "backtest",
-    name: "策略回测",
-    description:
-      "在 OKX 历史 K 线上回放因子策略（共振分/趋势/量比/区间分位），量化胜率、盈亏比、最大回撤、夏普，验证策略有效性。",
-    args: "{inst?:'BTC-USDT-SWAP', hours?:数字(默认720=30天)}",
-    readOnly: true,
-    run: async (a) => {
-      const args = [];
-      if (a.inst) args.push("--inst", String(a.inst));
-      if (a.hours) args.push("--hours", String(a.hours));
-      return runPyScript("backtest.py", args, 300_000);
-    },
-  },
-  {
-    id: "news_log",
-    name: "消息入库",
-    description: "把采集到的消息写入 news/news.jsonl（只追加）并生成当日投影与当轮简报。",
-    args: '{dryRun?:布尔, roundId?:"R000001"}',
-    readOnly: false,
-    run: async (a) => {
-      const args = ["--input", "state/news_input.json"];
-      if (a.dryRun) args.push("--dry-run");
-      if (a.roundId) args.push("--round-id", String(a.roundId));
-      return runPyScript("news_log.py", args);
-    },
-  },
-  {
-    id: "order_id",
-    name: "生成合规 clOrdId",
-    description:
-      "生成符合 OKX 规范的客户端订单 ID（字母开头、仅字母数字、≤32 位、禁 _ 与 -）。开仓前必须调用，禁止手写。",
-    args: '{roundId:"R000001", seq:1, params?:{instId:"BTC-USDT-SWAP", sz:13.48}}',
-    readOnly: true,
-    run: async (a) => {
-      const args = ["--round", String(a.roundId ?? "R000000"), "--seq", String(a.seq ?? 1)];
-      if (a.params) args.push("--params", JSON.stringify(a.params));
-      return runPyScript("order_id.py", args, 60_000);
-    },
-  },
-  {
-    id: "read_charter",
-    name: "查阅交易章程",
-    description:
-      "读取 AGENT_TRADING_RULES.md 的指定章节（如 §4 开仓基准、§10 消息面、§9 风控）。专家对规则有疑问时调用。",
-    args: '{section?:"§10"（不传则返回前 6000 字）, maxChars?:数字}',
-    readOnly: true,
-    run: async (a) => {
-      const p = path.join(ROOT, "AGENT_TRADING_RULES.md");
-      if (!fs.existsSync(p)) return { ok: false, output: "", error: "章程文件不存在" };
-      const txt = fs.readFileSync(p, "utf8");
-      const max = Number(a.maxChars ?? 6000);
-      const sec = a.section ? String(a.section) : "";
-      if (!sec) return { ok: true, output: txt.slice(0, max) };
-      // 定位章节标题，取到下一个同级标题为止
-      const idx = txt.indexOf(sec);
-      if (idx === -1) return { ok: false, output: "", error: `未找到章节 ${sec}` };
-      const rest = txt.slice(idx + sec.length);
-      const nextH = rest.search(/\n#{1,3} /);
-      return { ok: true, output: rest.slice(0, nextH > 0 ? Math.min(nextH, max) : max) };
-    },
-  },
-];
+      continue;
+    }
+    if (entry.endsWith(".json")) {
+      try {
+        out.push(JSON.parse(fs.readFileSync(full, "utf8")) as SkillDef);
+      } catch {
+        /* 忽略坏文件 */
+      }
+    }
+  }
+  return out;
+}
+
+/** 组装：元数据来自 JSON，执行逻辑来自 RUNNERS（id 匹配） */
+export const SKILLS: Skill[] = (() => {
+  return loadSkillDefs()
+    .map((d) => {
+      const runner = RUNNERS[d.id];
+      return runner ? ({ ...d, run: runner } as Skill) : null;
+    })
+    .filter((s): s is Skill => s !== null);
+})();
 
 export function getSkill(id: string): Skill | undefined {
   return SKILLS.find((s) => s.id === id);

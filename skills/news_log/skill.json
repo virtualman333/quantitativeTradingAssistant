@@ -1,0 +1,7 @@
+{
+  "id": "news_log",
+  "name": "消息入库",
+  "description": "把采集到的消息写入 news/news.jsonl（只追加）并生成当日投影与当轮简报。",
+  "args": "{dryRun?:布尔, roundId?:\"R000001\"}",
+  "readOnly": false
+}
