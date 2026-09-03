@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, confirmAlgo, setLeverage, closePosition, runPy } from "./okx.js";
 import { AgentState, buildGraphWithMcp } from "./graph.js";
+import { evolveExpert } from "./experts.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
 
 // 间隔优先级：环境变量（界面/命令行指定）> store 设置 > 默认 5 分钟
@@ -253,6 +254,26 @@ async function runRound() {
     log(`归档完成 ${roundId}`);
   } catch (e) {
     log(`归档失败（不回滚）: ${String(e).slice(0, 200)}`);
+  }
+
+  // ⑥ 专家自动进化：把本轮各专家观点 + 主 Agent 决策 + 执行结果沉淀回各自知识库
+  try {
+    const decisionText = decision ? `${decision.decision}: ${decision.summary.slice(0, 100)}` : "无决策";
+    const outcome = execResults.join(" | ").slice(0, 200);
+    for (const o of final.opinions ?? []) {
+      evolveExpert(o.expert, {
+        roundId,
+        time: ts(),
+        stance: o.stance,
+        confidence: o.confidence,
+        summary: o.summary,
+        decision: decisionText,
+        outcome: outcome || undefined,
+      });
+    }
+    log(`专家知识库已进化（${(final.opinions ?? []).length} 位）`);
+  } catch (e) {
+    log(`专家进化失败: ${String(e).slice(0, 150)}`);
   }
 
   log(`===== 轮次 ${roundId} 结束 =====`);

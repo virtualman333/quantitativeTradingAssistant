@@ -20,3 +20,8 @@ export function trace(e: Record<string, unknown>): void {
 export function traceRound(label: string, model?: string): void {
   trace({ source: "agent", kind: "round", label, ...(model ? { model } : {}) });
 }
+
+/** 流式思考链增量（agent 轮次：专家/调度/拍板的 decide 实时回调） */
+export function traceReasoning(text: string): void {
+  trace({ source: "agent", kind: "reasoning", text });
+}

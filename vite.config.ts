@@ -26,7 +26,12 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000,
   },
   server: {
-    port: 5173,
+    // 端口由 dev-ui.mjs 探测后经 UI_DEV_PORT 传入（8088 被占用会自动换），
+    // strictPort 保持 true，避免 Vite 自己静默换端口导致 Electron 指向错误。
+    // host 固定 127.0.0.1：默认 localhost 在 Windows 会解析到 IPv6 ::1，
+    // 而 dev-ui.mjs 用 127.0.0.1 探测端口就绪，两者地址族不一致会永远等不到。
+    host: "127.0.0.1",
+    port: Number(process.env.UI_DEV_PORT) || 8088,
     strictPort: true,
   },
 });

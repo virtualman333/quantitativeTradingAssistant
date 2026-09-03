@@ -11,12 +11,21 @@
  * 上层（专家/主 Agent）不关心底层是哪个厂。
  */
 import type { ModelConfig } from "./store.js";
+import { OBF_PREAMBLE, obfuscate, deobfuscate } from "./obfuscate.js";
+
+export interface DecideOpts {
+  /** 流式思考链回调：推理模型每吐一段 reasoning_content 就推一次（观测页实时用） */
+  onReasoning?: (text: string) => void;
+}
 
 export interface LlmProvider {
   readonly name: string;
   readonly modelId: string;
-  decide(systemPrompt: string, userPrompt: string): Promise<string>;
+  decide(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
 }
+
+/** 统一注入中文：推理模型默认可能用英文思考，加一句约束尽量让思考与回答都走中文 */
+const LANG_HINT = "\n\n【语言】请全程使用简体中文进行思考与回答。";
 
 function extractJson(text: string): string {
   const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -32,7 +41,7 @@ function extractJson(text: string): string {
  * max_tokens=2000 时思考链占满、正文为 0。所以默认值给得足够宽，
  * 界面里仍可按模型单独覆盖。
  */
-const DEFAULT_MAX_TOKENS = 16000;
+export const DEFAULT_MAX_TOKENS = 16000;
 
 /**
  * 只支持流式协议的网关（如 copilot.tencent.com 会返回
@@ -57,7 +66,8 @@ class OpenAICompatProvider implements LlmProvider {
   private async callOnce(
     msgs: ChatMessage[],
     maxTokens: number,
-    stream: boolean
+    stream: boolean,
+    onReasoning?: (text: string) => void
   ): Promise<{
     ok: boolean;
     status: number;
@@ -98,6 +108,7 @@ class OpenAICompatProvider implements LlmProvider {
         const c = j.choices?.[0];
         content = c?.message?.content ?? "";
         reasoning = c?.message?.reasoning_content ?? "";
+        if (reasoning) onReasoning?.(reasoning);
         finish = c?.finish_reason ?? "";
       } catch {
         /* 非 JSON 响应按空正文处理，交给上层报错 */
@@ -124,7 +135,10 @@ class OpenAICompatProvider implements LlmProvider {
       const ch = j?.choices?.[0];
       const d = ch?.delta || {};
       if (typeof d.content === "string") content += d.content;
-      if (typeof d.reasoning_content === "string") reasoning += d.reasoning_content;
+      if (typeof d.reasoning_content === "string") {
+        reasoning += d.reasoning_content;
+        onReasoning?.(d.reasoning_content);
+      }
       if (ch?.finish_reason) finish = ch.finish_reason;
     }
     return { ok: true, status: r.status, raw: "", content, reasoning, finish };
@@ -136,16 +150,17 @@ class OpenAICompatProvider implements LlmProvider {
    *   1. 只吃流式的网关：非流式 400 / 11101 → 自动改走流式；
    *   2. 推理模型：思考链占用 max_tokens，正文被截断 → 自动翻倍预算重试。
    */
-  async decide(sys: string, user: string): Promise<string> {
+  async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
     const msgs: ChatMessage[] = [
-      { role: "system", content: sys },
+      { role: "system", content: sys + LANG_HINT },
       { role: "user", content: user },
     ];
     const budget = this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const onReasoning = opts?.onReasoning;
 
     // ① 非流式优先（更快更省）；已知只吃流式的网关直接跳过
     if (!streamOnlyModels.has(this.cfg.id)) {
-      const r = await this.callOnce(msgs, budget, false);
+      const r = await this.callOnce(msgs, budget, false, onReasoning);
       if (r.ok) {
         // 正文非空即交付；空正文只有「被预算截断」才需要重试，其余照常返回
         if (r.content || r.finish !== "length") return extractJson(r.content);
@@ -161,7 +176,7 @@ class OpenAICompatProvider implements LlmProvider {
     let tokens = budget;
     let last: { reasoning: string; finish: string } = { reasoning: "", finish: "" };
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await this.callOnce(msgs, tokens, true);
+      const r = await this.callOnce(msgs, tokens, true, onReasoning);
       if (!r.ok) throw new Error(`${this.cfg.name} HTTP ${r.status}: ${r.raw.slice(0, 300)}`);
       last = r;
       if (r.content) return extractJson(r.content);
@@ -184,7 +199,7 @@ class AnthropicProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
-  async decide(sys: string, user: string): Promise<string> {
+  async decide(sys: string, user: string, _opts?: DecideOpts): Promise<string> {
     const base = (this.cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
     const r = await fetch(`${base}/v1/messages`, {
       method: "POST",
@@ -197,7 +212,7 @@ class AnthropicProvider implements LlmProvider {
         model: this.cfg.model,
         max_tokens: this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: this.cfg.temperature ?? 0.2,
-        system: sys,
+        system: sys + LANG_HINT,
         messages: [{ role: "user", content: user }],
       }),
     });
@@ -217,7 +232,7 @@ class MockProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
-  async decide(sys: string): Promise<string> {
+  async decide(sys: string, _user?: string, _opts?: DecideOpts): Promise<string> {
     if (sys.includes("调度模块")) {
       return JSON.stringify({ experts: ["trading", "factor"] });
     }
@@ -244,17 +259,32 @@ class MockProvider implements LlmProvider {
   }
 }
 
-/** 按模型配置创建 provider */
-export function createProvider(cfg: ModelConfig): LlmProvider {
+/** 按模型配置创建 provider。obfuscated=false 用于「测试连接」等无需混淆的场景。 */
+export function createProvider(cfg: ModelConfig, obfuscated = true): LlmProvider {
+  let p: LlmProvider;
   switch (cfg.provider) {
     case "anthropic":
-      return new AnthropicProvider(cfg);
+      p = new AnthropicProvider(cfg);
+      break;
     case "mock":
-      return new MockProvider(cfg);
+      p = new MockProvider(cfg);
+      break;
     case "openai-compatible":
     default:
-      return new OpenAICompatProvider(cfg);
+      p = new OpenAICompatProvider(cfg);
   }
+  // mock 不发网络、无需混淆；真实 provider 统一做「发送前混淆 + 返回后还原」。
+  if (!obfuscated || cfg.provider === "mock") return p;
+  const inner = p.decide.bind(p);
+  return {
+    name: p.name,
+    modelId: p.modelId,
+    async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+      // 在 system 最前面注入代号约定，并对正文做敏感标识混淆
+      const raw = await inner(OBF_PREAMBLE + "\n\n" + obfuscate(sys), obfuscate(user), opts);
+      return deobfuscate(raw);
+    },
+  };
 }
 
 /**
@@ -433,13 +463,14 @@ async function* anthropicChat(
   cfg: ModelConfig,
   messages: ChatMessage[],
   tools: ToolSpec[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): AsyncGenerator<ChatChunk> {
   const base = (cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
   const { system, msgs } = toAnthropicMessages(messages);
   const body: Record<string, unknown> = {
     model: cfg.model,
-    max_tokens: cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: maxTokens ?? cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
     temperature: cfg.temperature ?? 0.3,
     system,
     messages: msgs,
@@ -554,17 +585,22 @@ export async function* streamChat(
   cfg: ModelConfig,
   messages: ChatMessage[],
   tools: ToolSpec[] = [],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): AsyncGenerator<ChatChunk> {
+  // 统一注入中文要求（推理模型默认可能英文思考）
+  const msgs = messages.map((m) =>
+    m.role === "system" ? { ...m, content: m.content + LANG_HINT } : m
+  );
   if (cfg.provider === "mock") {
-    yield* mockChat(messages, tools);
+    yield* mockChat(msgs, tools);
     return;
   }
   if (cfg.provider === "anthropic") {
-    yield* anthropicChat(cfg, messages, tools, signal);
+    yield* anthropicChat(cfg, msgs, tools, signal, maxTokens);
     return;
   }
-  yield* openaiChat(cfg, messages, tools, signal);
+  yield* openaiChat(cfg, msgs, tools, signal, maxTokens);
 }
 
 export async function testModel(cfg: ModelConfig): Promise<{
@@ -575,7 +611,7 @@ export async function testModel(cfg: ModelConfig): Promise<{
 }> {
   const t0 = Date.now();
   try {
-    const p = createProvider(cfg);
+    const p = createProvider(cfg, false);
     const r = await p.decide("You reply with a short JSON only.", 'Reply exactly: {"ok":true}');
     return { ok: true, latencyMs: Date.now() - t0, reply: r.slice(0, 200) };
   } catch (e) {

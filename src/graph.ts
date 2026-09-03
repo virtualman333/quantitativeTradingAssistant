@@ -32,8 +32,8 @@
 import { Annotation, Send, StateGraph, START, END } from "@langchain/langgraph";
 import { allExperts, getExpert, type ExpertOpinion } from "./experts.js";
 import { connectMcp, type McpTool } from "./mcp.js";
-import { createProvider } from "./llm.js";
-import { trace, traceRound } from "./trace.js";
+import { createProvider, type DecideOpts } from "./llm.js";
+import { trace, traceReasoning, traceRound } from "./trace.js";
 import { getModel, getSettings, listRoles, resolveModel, type ModelConfig } from "./store.js";
 import type { Decision, TradeIntent } from "./types.js";
 
@@ -71,7 +71,7 @@ export type State = typeof AgentState.State;
 
 /** 专家需要的极简 provider 接口（与 llm.ts 的 LlmProvider 形状一致） */
 export interface LlmProviderLike {
-  decide(systemPrompt: string, userPrompt: string): Promise<string>;
+  decide(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
   /** 模型显示名（观测页展示用，mock 兜底无） */
   model?: string;
 }
@@ -94,9 +94,9 @@ export function makeStoreLlmProvider(modelId?: string, mainAgent = false): LlmPr
   const p = createProvider(cfg);
   return {
     model: cfg.name,
-    decide: async (sys, user) => {
+    decide: async (sys, user, opts) => {
       try {
-        return await p.decide(sys, user);
+        return await p.decide(sys, user, opts);
       } catch (e) {
         trace({ source: "agent", kind: "error", message: `模型 ${cfg!.name} 调用失败: ${String(e).slice(0, 180)}` });
         return JSON.stringify({
@@ -157,21 +157,31 @@ async function planNode(s: State): Promise<Partial<State>> {
   const enabledIds = enabled.map((e) => e.id);
   const settings = getSettings();
 
+  // 必召集合：由专家定义的 alwaysInvoke 字段决定（如 news 消息面事件闸门，空仓也要看）
+  const mandatory = enabled.filter((e) => e.alwaysInvoke).map((e) => e.id);
+
   let ids: string[] = [];
   if (settings.roleStrategy === "fixed") {
     const picked = (settings.fixedRoles ?? []).filter((id) => enabledIds.includes(id));
-    ids = picked.length ? picked : enabledIds;
+    // 固定模式同样保证必召专家在列（空仓也要看消息面）
+    ids = [...new Set([...picked, ...mandatory])];
+    if (!ids.length) ids = enabledIds;
   } else {
+    // LLM 只决定「交易类」专家；消息面必召，不交给 LLM 拍脑袋
+    const optional = enabled.filter((e) => !mandatory.includes(e.id));
     const llm = makeStoreLlmProvider(undefined, true);
-    const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些专家。
-可选：${enabled.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ")}
-规则：有持仓或可能开仓 → trading + factor；临近事件或消息面有影响 → news；
-持仓亏损/回撤/高敞口 → risk。没必要别全召。
+    const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些「交易类」专家。
+必召专家（无需你决定，代码已强制）：${mandatory.join(", ") || "（无）"} —— 消息面是事件闸门/否决权，空仓也要采集看有无临近事件。
+可选交易类专家：${optional.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ") || "（无）"}
+规则：有持仓或可能开仓 → trading + factor；持仓亏损/回撤/高敞口 → risk。没必要别全召。
 只输出 JSON：{"experts":["trading","factor"]}`;
     try {
       traceRound("调度·决定召唤专家", llm.model);
-      const raw = await llm.decide(sys, s.sharedContext);
-      ids = ((outJson(raw).experts as string[]) ?? []).filter((x) => enabledIds.includes(x));
+      const raw = await llm.decide(sys, s.sharedContext, { onReasoning: traceReasoning });
+      const picked = ((outJson(raw).experts as string[]) ?? []).filter((x) =>
+        optional.some((o) => o.id === x)
+      );
+      ids = [...new Set([...mandatory, ...picked])];
     } catch {
       trace({ source: "agent", kind: "error", message: "调度输出解析失败，回退全部专家" });
       ids = [];
@@ -255,7 +265,7 @@ async function adjudgeNode(s: State): Promise<Partial<State>> {
 
   try {
     traceRound("主Agent·拍板", llm.model);
-    const raw = await llm.decide(sys, user);
+    const raw = await llm.decide(sys, user, { onReasoning: traceReasoning });
     const j = outJson(raw);
     const d: Decision = {
       roundId: s.roundId,

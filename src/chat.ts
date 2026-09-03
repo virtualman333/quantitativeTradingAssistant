@@ -9,7 +9,7 @@
  *   5. 不抛异常：所有错误都以事件形式回传，界面永远拿得到反馈
  */
 import { resolveModel, type ModelConfig } from "./store.js";
-import { streamChat, type ChatMessage, type ToolCall, type ToolSpec } from "./llm.js";
+import { streamChat, DEFAULT_MAX_TOKENS, type ChatMessage, type ToolCall, type ToolSpec } from "./llm.js";
 import { specsOf, runTool } from "./tools/index.js";
 import type { ToolContext } from "./tools/types.js";
 import { PROJECT_ROOT } from "./tools/paths.js";
@@ -116,17 +116,33 @@ export async function runChat(opts: ChatOptions): Promise<ChatRunResult> {
     let calls: ToolCall[] = [];
     let errMsg = "";
 
-    for await (const chunk of streamChat(cfg, msgs, active, signal)) {
-      if (chunk.type === "delta") {
-        text += chunk.text;
-        onEvent({ type: "delta", text: chunk.text });
-      } else if (chunk.type === "reasoning") {
-        onEvent({ type: "reasoning", text: chunk.text });
-      } else if (chunk.type === "tool_calls") {
-        calls = chunk.calls;
-      } else if (chunk.type === "error") {
-        errMsg = chunk.message;
+    // 推理模型（如 Hy3）思考链会吃满 max_tokens，把正文截断成空（finish_reason=length）。
+    // 首轮用模型默认预算；若「正文为空 + 无工具调用 + 被预算截断」则翻倍预算重试，
+    // 与 llm.decide() 的兜底一致，最多翻倍两次（封顶 128k）。
+    let budget: number | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) break;
+      text = "";
+      calls = [];
+      let finishReason = "";
+      for await (const chunk of streamChat(cfg, msgs, active, signal, budget)) {
+        if (chunk.type === "delta") {
+          text += chunk.text;
+          onEvent({ type: "delta", text: chunk.text });
+        } else if (chunk.type === "reasoning") {
+          onEvent({ type: "reasoning", text: chunk.text });
+        } else if (chunk.type === "tool_calls") {
+          calls = chunk.calls;
+        } else if (chunk.type === "error") {
+          errMsg = chunk.message;
+        } else if (chunk.type === "done") {
+          finishReason = chunk.finishReason ?? "";
+        }
       }
+      if (errMsg || signal?.aborted) break;
+      // 有正文 / 有工具调用 / 并非被预算截断 → 本轮有效，直接交付
+      if (text.trim() || calls.length || finishReason !== "length") break;
+      budget = Math.min((budget ?? (cfg.maxTokens ?? DEFAULT_MAX_TOKENS)) * 2, 128000);
     }
 
     if (errMsg) {
@@ -134,6 +150,15 @@ export async function runChat(opts: ChatOptions): Promise<ChatRunResult> {
       return { messages: msgs, aborted: !!signal?.aborted, error: errMsg };
     }
     if (signal?.aborted) break;
+
+    // 翻倍重试后仍无正文且无工具调用：推理模型把预算全花在思考链上，正文被截断
+    if (!text.trim() && !calls.length) {
+      const msg =
+        `模型只产出了思考过程、没有正文（max_tokens 可能被思考链吃满，已尝试翻倍到 ${budget}）。` +
+        `请在「模型」页把该模型的 maxTokens 调大后重试。`;
+      onEvent({ type: "error", message: msg });
+      return { messages: msgs, aborted: false, error: msg };
+    }
 
     if (calls.length) {
       msgs.push({ role: "assistant", content: text || "", tool_calls: calls });

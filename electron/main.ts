@@ -35,6 +35,13 @@ const PROJECT_ROOT = path.resolve(AGENT_ROOT, "..");
 const APP_NAME = "OKX 交易 Agent";
 app.name = APP_NAME;
 
+// 关闭 Chromium 后台联网（组件更新 / Safe Browsing / 遥测等 Google 服务）。
+// 这些在访问不到 Google 的网络环境下会反复 SSL 握手失败刷日志（net_error -107），
+// 与本项目业务无关（LLM / MCP / 下单全走 Node 侧），关掉减少噪声。
+app.commandLine.appendSwitch("disable-background-networking");
+app.commandLine.appendSwitch("disable-component-update");
+app.commandLine.appendSwitch("disable-features", "OptimizationHints,Translate,MediaRouter");
+
 // 动态导入 store（编译后路径为 dist/src/store.js）
 const storePath = path.join(AGENT_ROOT, "dist", "src", "store.js");
 const srcStorePath = path.join(AGENT_ROOT, "src", "store.ts");
@@ -66,17 +73,25 @@ function pushLog(line: string) {
 // ── agent 子进程 ────────────────────────────────────────────
 function spawnAgent(extraArgs: string[], onExit?: (code: number | null) => void) {
   const isWin = process.platform === "win32";
-  const tsxBin = path.join(AGENT_ROOT, "node_modules", ".bin", isWin ? "tsx.cmd" : "tsx");
-  const useBin = fs.existsSync(tsxBin);
-  const cmd = useBin ? tsxBin : isWin ? "npx.cmd" : "npx";
+  // 路径含空格（本仓库位于 "OKX Trader" 下）时，绝对路径 .cmd + shell:true 会被 cmd
+  // 按空格拆断，报「'C:\...\OKX' 不是内部或外部命令」。改为把 node_modules/.bin 塞进
+  // PATH，用裸命令名 tsx.cmd / npx.cmd 交给 shell 解析，彻底规避（同 dev-ui.mjs）。
+  const binDir = path.join(AGENT_ROOT, "node_modules", ".bin");
+  const useBin = fs.existsSync(path.join(binDir, isWin ? "tsx.cmd" : "tsx"));
+  const cmd = useBin ? (isWin ? "tsx.cmd" : "tsx") : isWin ? "npx.cmd" : "npx";
   const args = useBin
     ? [path.join("src", "main.ts"), ...extraArgs]
     : ["tsx", path.join("src", "main.ts"), ...extraArgs];
 
-  pushLog(`启动: ${path.basename(cmd)} ${args.join(" ")}`);
+  pushLog(`启动: ${cmd} ${args.join(" ")}`);
   return spawn(cmd, args, {
     cwd: AGENT_ROOT,
-    env: { ...(process.env as Record<string, string>), AGENT_UI: "1", PYTHONIOENCODING: "utf-8" },
+    env: {
+      ...(process.env as Record<string, string>),
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AGENT_UI: "1",
+      PYTHONIOENCODING: "utf-8",
+    },
     windowsHide: true,
     shell: isWin, // Windows .cmd 垫片必须 shell:true，否则 EINVAL（实测踩过）
     stdio: ["ignore", "pipe", "pipe"],
@@ -127,7 +142,7 @@ function startAgent() {
   if (agentProc) return { ok: false, msg: "已在运行" };
   const st = loadSettingsSync();
   // 演练模式必须作为 --dry-run 传给子进程，否则只是打印一行日志、实际仍会下单
-  const dry = st?.dryRun !== false;
+  const dry = st?.dryRun === true;
   if (dry) pushLog("演练模式开启：不会下真实单");
 
   agentProc = spawnAgent(dry ? ["--dry-run"] : []);
@@ -232,7 +247,8 @@ function createWindow() {
   });
 
   // 界面来源：dev server（npm run ui:dev）> 构建产物（dist/ui）> 报错
-  const devUrl = process.env.UI_DEV === "1" ? "http://localhost:5173" : "";
+  const devPort = process.env.UI_DEV_PORT || "8088";
+  const devUrl = process.env.UI_DEV === "1" ? `http://127.0.0.1:${devPort}` : "";
   const distUi = path.join(AGENT_ROOT, "dist", "ui", "index.html");
   if (devUrl) {
     win.loadURL(devUrl);
@@ -270,10 +286,34 @@ ipcMain.handle("models:test", async (_e, m) =>
   })
 );
 
-// 角色
-ipcMain.handle("roles:list", () => withStore((s) => s.listRoles()));
+// 角色（专家）：列表 = 文件专家(experts/*.json) + store 覆盖 + 自定义角色
+ipcMain.handle("roles:list", async () => {
+  const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "experts.js").replace(/\\/g, "/"));
+  return mod.listExpertRoles();
+});
 ipcMain.handle("roles:upsert", (_e, r) => withStore((s) => s.upsertRole(r)));
-ipcMain.handle("roles:delete", (_e, id) => withStore((s) => s.deleteRole(id)));
+ipcMain.handle("roles:delete", async (_e, id) => {
+  // 内置专家（源在 experts/*.json）不可真正删除，删除=写「禁用」覆盖层；
+  // 自定义角色（store 里文件没有的）则真正从 store.roles 删除。
+  const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "experts.js").replace(/\\/g, "/"));
+  const defs: any[] = mod.loadExpertDefs();
+  const builtin = defs.find((d) => d.id === id);
+  if (builtin) {
+    return withStore((s) =>
+      s.upsertRole({
+        id: builtin.id,
+        name: builtin.name,
+        duty: builtin.duty,
+        systemPrompt: builtin.systemPrompt,
+        skills: builtin.skills,
+        mcpServers: builtin.mcpServers,
+        enabled: false,
+        createdAt: new Date().toISOString(),
+      })
+    );
+  }
+  return withStore((s) => s.deleteRole(id));
+});
 
 // MCP
 ipcMain.handle("mcp:list", () => withStore((s) => s.listMcpServers()));
@@ -330,8 +370,8 @@ ipcMain.handle("agent:stop", () => stopAgent());
 /** 跑一轮（--once）：界面按钮与顶层菜单共用同一实现 */
 function runOnceAgent(): Promise<{ ok: boolean; code?: number | null; out?: string; error?: string }> {
   const st = loadSettingsSync();
-  // 设置缺失时按演练处理，避免误下真实单
-  const args = ["--once", ...(st?.dryRun !== false ? ["--dry-run"] : [])];
+  // 只有显式开启演练才加 --dry-run（默认真实，由设置 dryRun 显式控制）
+  const args = ["--once", ...(st?.dryRun === true ? ["--dry-run"] : [])];
   return new Promise((resolve) => {
     const p = spawnAgent(args);
     let out = "";
@@ -393,7 +433,6 @@ let portfolioAbort: AbortController | null = null;
 const pendingConfirms = new Map<string, (v: boolean) => void>();
 
 // ── 全局 LLM 调用观测（拒绝黑盒）：对话/持仓的 LLM 行为统一广播到「观测」页签 ──
-const traceReasoning: Record<string, string> = { chat: "", portfolio: "" };
 function emitTrace(e: unknown) {
   win?.webContents.send("llm:trace", e);
 }
@@ -402,13 +441,6 @@ function traceTs(): string {
   const p = (n: number, l = 2) => String(n).padStart(l, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
 }
-function flushTraceReasoning(source: string) {
-  const buf = traceReasoning[source] || "";
-  if (buf) {
-    emitTrace({ ts: traceTs(), source, kind: "reasoning", text: buf });
-    traceReasoning[source] = "";
-  }
-}
 /** 业务事件同时转发到全局观测流；原 send 照常（对话/持仓页签继续渲染） */
 function wrapTrace(source: string, send: (ev: unknown) => void) {
   return (ev: any) => {
@@ -416,14 +448,13 @@ function wrapTrace(source: string, send: (ev: unknown) => void) {
     if (!ev || !ev.type) return;
     switch (ev.type) {
       case "round":
-        flushTraceReasoning(source);
         emitTrace({ ts: traceTs(), source, kind: "round", model: ev.model, round: ev.n, msgCount: ev.msgs });
         break;
       case "reasoning":
-        traceReasoning[source] += ev.text || "";
+        // 流式直发：思考链每一段增量实时进观测，前端把同源连续段合并到同一行
+        emitTrace({ ts: traceTs(), source, kind: "reasoning", text: ev.text || "" });
         break;
       case "tool_start":
-        flushTraceReasoning(source);
         emitTrace({ ts: traceTs(), source, kind: "tool_call", name: ev.name, args: ev.args });
         break;
       case "tool_result":
@@ -433,11 +464,9 @@ function wrapTrace(source: string, send: (ev: unknown) => void) {
         emitTrace({ ts: traceTs(), source, kind: "confirm", name: ev.title });
         break;
       case "done":
-        flushTraceReasoning(source);
         emitTrace({ ts: traceTs(), source, kind: "done", aborted: !!ev.aborted, rounds: ev.rounds });
         break;
       case "error":
-        flushTraceReasoning(source);
         emitTrace({ ts: traceTs(), source, kind: "error", message: ev.message });
         break;
       case "info":
@@ -729,7 +758,7 @@ app.whenReady().then(() => {
   pushLog("界面就绪");
   const st = loadSettingsSync();
   const auto = autoStartEnabled();
-  const dry = st?.dryRun !== false;
+  const dry = st?.dryRun === true;
   if (auto) {
     pushLog("自动启动服务中…");
     if (dry) pushLog("（演练模式：不下真实单）");

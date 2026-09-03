@@ -93,17 +93,17 @@ export const getStatusTool: Tool = {
 /** 触发一轮自主决策（默认演练，绝不直接真下单） */
 export const runRoundTool: Tool = {
   name: "run_round",
-  description: "触发一轮完整决策流程（collect→专家→裁决→执行→归档）。默认演练模式；真下单需显式 dryRun=false 并二次确认。",
+  description: "触发一轮完整决策流程（collect→专家→裁决→执行→归档）。默认真实下单；演练需显式 dryRun=true 并二次确认。",
   danger: true,
   parameters: {
     type: "object",
     properties: {
-      dryRun: { type: "boolean", description: "true=演练（默认），false=真实下单" },
+      dryRun: { type: "boolean", description: "true=演练，false=真实下单（默认）" },
     },
     required: [],
   },
   run: async (a, ctx) => {
-    const dry = a.dryRun !== false;
+    const dry = a.dryRun === true;
     const ok = (await ctx.confirm?.({
       id: `round:${dry}`,
       title: dry ? "跑一轮（演练）" : "⚠ 跑一轮（真实下单）",
@@ -114,9 +114,11 @@ export const runRoundTool: Tool = {
     if (!ok) return { ok: false, output: "", error: "用户取消" };
 
     const isWin = process.platform === "win32";
-    const tsxBin = path.join(AGENT_ROOT, "node_modules", ".bin", isWin ? "tsx.cmd" : "tsx");
-    const useBin = fs.existsSync(tsxBin);
-    const cmd = useBin ? tsxBin : isWin ? "npx.cmd" : "npx";
+    // 同 electron/main.ts：路径含空格（"OKX Trader"）时绝对路径 .cmd + shell:true 会被
+    // cmd 按空格拆断，报「不是内部或外部命令」。改为把 .bin 塞进 PATH，用裸命令名解析。
+    const binDir = path.join(AGENT_ROOT, "node_modules", ".bin");
+    const useBin = fs.existsSync(path.join(binDir, isWin ? "tsx.cmd" : "tsx"));
+    const cmd = useBin ? (isWin ? "tsx.cmd" : "tsx") : isWin ? "npx.cmd" : "npx";
     const args = useBin
       ? [path.join("src", "main.ts"), "--once", ...(dry ? ["--dry-run"] : [])]
       : ["tsx", path.join("src", "main.ts"), "--once", ...(dry ? ["--dry-run"] : [])];
@@ -125,7 +127,11 @@ export const runRoundTool: Tool = {
     return new Promise((resolve) => {
       const p = spawn(cmd, args, {
         cwd: AGENT_ROOT,
-        env: { ...(process.env as Record<string, string>), PYTHONIOENCODING: "utf-8" },
+        env: {
+          ...(process.env as Record<string, string>),
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          PYTHONIOENCODING: "utf-8",
+        },
         windowsHide: true,
         shell: isWin,
         stdio: ["ignore", "pipe", "pipe"],

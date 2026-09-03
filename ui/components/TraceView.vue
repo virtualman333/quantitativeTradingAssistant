@@ -58,6 +58,15 @@ function scroll() {
 
 function onEvent(ev) {
   const e = ev || {};
+  // 流式思考链：同源连续 reasoning 合并到同一行实时增长，避免几百条增量刷屏
+  if (e.kind === "reasoning" && entries.value.length) {
+    const last = entries.value[entries.value.length - 1];
+    if (last.kind === "reasoning" && last.source === e.source) {
+      last.text = (last.text || "") + (e.text || "");
+      scroll();
+      return;
+    }
+  }
   entries.value.push(e);
   if (entries.value.length > cap) entries.value.splice(0, entries.value.length - cap);
   scroll();
@@ -117,7 +126,7 @@ onBeforeUnmount(() => {
           <template v-else-if="e.kind === 'tool_result'">
             <b class="name">{{ e.name }}</b>
             <span :class="['badge', e.ok ? 'ok' : 'bad']">{{ e.ok ? "成功" : "失败" }}</span>
-            <pre class="out" v-if="(e.output || e.error)">{{ e.error || e.output }}</pre>
+            <pre class="out" v-if="(e.output || e.error)">{{ e.error || pretty(e.output) }}</pre>
           </template>
           <template v-else-if="e.kind === 'reasoning'">
             <details class="reason">

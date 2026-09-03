@@ -19,11 +19,13 @@
  * 执行模型（ReAct 简化版）：
  *   专家可先调工具 → 拿到结果 → 再输出结论。最多 MAX_TOOL_CALLS 次，防失控。
  */
+import fs from "node:fs";
+import path from "node:path";
 import type { LlmProvider } from "./llm.js";
 import { SKILLS, getSkill, skillCatalog } from "./skills.js";
 import type { McpTool } from "./mcp.js";
-import { listRoles, isSkillEnabled, type RoleConfig } from "./store.js";
-import { trace, traceRound } from "./trace.js";
+import { AGENT_ROOT, listRoles, isSkillEnabled, type RoleConfig } from "./store.js";
+import { trace, traceReasoning, traceRound } from "./trace.js";
 
 export interface ExpertOpinion {
   expert: string;
@@ -53,7 +55,21 @@ export interface Expert {
   skills: string[];
   /** 可使用的 MCP server id（空 = 不用 MCP） */
   mcpServers: string[];
+  /** 每轮必召（如消息面事件闸门），不交给调度模块裁量 */
+  alwaysInvoke?: boolean;
   run(llm: LlmProvider, ctx: ExpertContext): Promise<ExpertOpinion>;
+}
+
+/** 专家声明式定义（来自 experts/*.json，不含 run 逻辑，run 统一由 invoke 提供） */
+export interface ExpertDef {
+  id: string;
+  name: string;
+  duty: string;
+  systemPrompt: string;
+  skills: string[];
+  mcpServers: string[];
+  enabled: boolean;
+  alwaysInvoke?: boolean;
 }
 
 const MAX_TOOL_CALLS = 4;
@@ -106,6 +122,8 @@ async function invoke(
       ? ctx.mcpTools.map((t) => `- ${t.name}：${(t.description ?? "").replace(/\s+/g, " ").slice(0, 90)}`).join("\n")
       : "（无）";
 
+  // 知识库注入：本专家目录下的经验库（过往轮次沉淀 + 领域最佳实践）
+  const kb = loadKnowledge(expert.id);
   const sys = `${expert.systemPrompt}
 
 【你可调用的 Skill】
@@ -113,7 +131,7 @@ ${skillList}
 
 【你可调用的 MCP 工具】
 ${mcpList}
-
+${kb ? `\n【你的经验库（专家专属知识，仅供参考，可据本轮实际数据反驳）】\n${kb}\n` : ""}
 ${OUTPUT_CONTRACT}`;
 
   let user = ctx.sharedContext + (ctx.focus ? `\n【主 Agent 聚焦问题】${ctx.focus}` : "");
@@ -122,7 +140,7 @@ ${OUTPUT_CONTRACT}`;
 
   for (let i = 0; i <= MAX_TOOL_CALLS; i++) {
     traceRound(`${expert.name}·第 ${i + 1} 次调用`, modelName);
-    const raw = await llm.decide(sys, user + `\n${OUTPUT_CONTRACT}`);
+    const raw = await llm.decide(sys, user + `\n${OUTPUT_CONTRACT}`, { onReasoning: traceReasoning });
     const call = parseToolCall(raw);
 
     if (call && i < MAX_TOOL_CALLS) {
@@ -259,6 +277,7 @@ const newsBase: Omit<Expert, "run"> = {
 - 只评估美国宏观事件对加密的影响；加拿大、澳洲、越南等非美事件一般不阻塞。`,
   skills: ["news_fetch", "news_verify", "news_log", "read_charter"],
   mcpServers: [],
+  alwaysInvoke: true, // 消息面是事件闸门，空仓也要看
 };
 
 // ────────────────────────────────────────────────────────────
@@ -330,39 +349,184 @@ export const EXPERTS: Expert[] = [
   { ...riskBase, run: (llm, ctx) => invoke(llm, riskBase, ctx) },
 ];
 
-// ── 动态角色：从 store 读取（界面可增删改），与内置角色合并 ────
+// ── 可插拔专家：定义文件在 experts/*.json，程序启动时扫描加载 ────
 /**
- * 角色解析顺序：
- *   1. store 里有同名 id → 用 store 的定义（含界面改过的 prompt/skills/mcp）
- *   2. 否则用内置定义
- * 这样界面改了角色立刻生效，不必改代码。
+ * 专家定义的三层来源：
+ *   1. experts/*.json —— 内置声明式定义（项目目录下，可版本控制，是「源」）
+ *   2. store.roles    —— 运行时覆盖层（界面编辑过的 prompt/skills/mcp/enabled 优先）
+ *   3. EXPERTS        —— 兜底（experts/ 目录缺失或为空时用，保证程序不崩）
+ *
+ * 可插拔：新增专家 = 在 experts/ 放一个 JSON；删除专家 = 删掉对应 JSON。
+ * 无需改任何 TS 代码，重启即生效。
  */
-export function allExperts(): Expert[] {
-  let stored: RoleConfig[] = [];
-  try {
-    stored = listRoles().filter((r) => r.enabled);
-  } catch {
-    stored = [];
+const EXPERTS_DIR = path.join(AGENT_ROOT, "experts");
+
+export function loadExpertDefs(): ExpertDef[] {
+  if (!fs.existsSync(EXPERTS_DIR)) return [];
+  const out: ExpertDef[] = [];
+  for (const entry of fs.readdirSync(EXPERTS_DIR).sort()) {
+    const full = path.join(EXPERTS_DIR, entry);
+    // 新结构：experts/<id>/expert.json（每个专家一个目录，可带 knowledge/）
+    if (fs.statSync(full).isDirectory()) {
+      const defFile = path.join(full, "expert.json");
+      if (!fs.existsSync(defFile)) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(defFile, "utf8")) as ExpertDef;
+        if (j && typeof j.id === "string" && j.id) out.push(j);
+      } catch {
+        trace({ source: "agent", kind: "error", message: `专家定义解析失败: ${entry}` });
+      }
+      continue;
+    }
+    // 兼容旧扁平结构：experts/*.json
+    if (entry.endsWith(".json")) {
+      try {
+        const j = JSON.parse(fs.readFileSync(full, "utf8")) as ExpertDef;
+        if (j && typeof j.id === "string" && j.id) out.push(j);
+      } catch {
+        trace({ source: "agent", kind: "error", message: `专家定义解析失败: ${entry}` });
+      }
+    }
   }
-  const out: Expert[] = [];
-  for (const r of stored) {
-    const builtin = EXPERTS.find((e) => e.id === r.id);
-    const base: Omit<Expert, "run"> = {
-      id: r.id,
-      name: r.name,
-      duty: r.duty,
-      systemPrompt: r.systemPrompt,
-      skills: r.skills,
-      mcpServers: r.mcpServers,
-    };
+  return out;
+}
+
+// ── 专家知识库（可插拔 + 自动进化） ─────────────────────────
+/**
+ * 每个专家可有一个独立知识库目录 experts/<id>/knowledge/，里面放若干 .md：
+ *   · 00-*.md 等 —— 领域最佳实践（我预置，来自公开资料/踩坑经验）
+ *   · lessons.md —— 自动进化沉淀（evolveExpert 每轮追加，只增不删）
+ * 运行时把整个知识库注入该专家的 systemPrompt，作为「专家专属经验」。
+ */
+
+/** 专家知识库目录 */
+export function knowledgeDir(id: string): string {
+  return path.join(EXPERTS_DIR, id, "knowledge");
+}
+
+/** 读取专家知识库全部 .md（按文件名排序），截断到 maxBytes，避免撑爆上下文 */
+export function loadKnowledge(id: string, maxBytes = 12000): string {
+  const dir = knowledgeDir(id);
+  if (!fs.existsSync(dir)) return "";
+  const chunks: string[] = [];
+  for (const f of fs.readdirSync(dir).sort()) {
+    if (!f.endsWith(".md")) continue;
+    try {
+      chunks.push(`## ${f}\n${fs.readFileSync(path.join(dir, f), "utf8")}`);
+    } catch {
+      /* 忽略坏文件 */
+    }
+  }
+  let text = chunks.join("\n\n");
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    text = text.slice(0, maxBytes) + "\n…（知识库过长已截断）";
+  }
+  return text;
+}
+
+/** 自动进化：一条经验记录（每轮沉淀到该专家 knowledge/lessons.md） */
+export interface EvolutionEntry {
+  roundId: string;
+  time: string;
+  stance: string;
+  confidence: number;
+  summary: string;
+  decision?: string;
+  outcome?: string;
+  adopted?: boolean;
+}
+
+/** 把本轮专家的判断 + 主 Agent 决策 + 执行结果追加到其知识库（只追加，不覆盖） */
+const MAX_LESSONS_BYTES = 60 * 1024; // lessons.md 上限，超出裁掉最旧一半，防无限膨胀
+
+export function evolveExpert(id: string, entry: EvolutionEntry): void {
+  try {
+    const dir = knowledgeDir(id);
+    fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, "lessons.md");
+    if (!fs.existsSync(f)) {
+      fs.writeFileSync(f, "# 教训与进化记录（每轮自动追加，只增不删）\n\n", "utf8");
+    } else if (fs.statSync(f).size > MAX_LESSONS_BYTES) {
+      // 超限：只保留较新的后半段，避免文件无限增长
+      const buf = fs.readFileSync(f, "utf8");
+      fs.writeFileSync(f, buf.slice(-(MAX_LESSONS_BYTES >> 1)), "utf8");
+    }
+    const line = [
+      `- ${entry.time} [${entry.roundId}] stance=${entry.stance} conf=${entry.confidence}`,
+      `  观点: ${entry.summary.slice(0, 200)}`,
+      entry.decision ? `  主Agent决策: ${entry.decision}` : "",
+      entry.outcome ? `  结果: ${entry.outcome}` : "",
+      entry.adopted !== undefined ? `  是否采纳: ${entry.adopted ? "是" : "否"}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    fs.appendFileSync(f, line + "\n\n", "utf8");
+  } catch (e) {
+    trace({ source: "agent", kind: "error", message: `专家进化写入失败 ${id}: ${String(e).slice(0, 120)}` });
+  }
+}
+
+/**
+ * 完整角色列表（供 UI「角色」页与 allExperts 共用）：
+ *   · 文件专家（experts/*.json）= 源，含 enabled 默认值
+ *   · store.roles 同 id = 覆盖层（界面改过 prompt/skills/enabled/modelId 优先）
+ *   · store.roles 里文件没有的 = 用户在界面「新增」的自定义角色
+ * 每项都带 enabled，供 UI 展示与启停。
+ */
+export function listExpertRoles(): RoleConfig[] {
+  const defs = loadExpertDefs();
+  let overrides: RoleConfig[] = [];
+  try {
+    overrides = listRoles();
+  } catch {
+    overrides = [];
+  }
+  const out: RoleConfig[] = [];
+  const seen = new Set<string>();
+  for (const d of defs) {
+    const ov = overrides.find((r) => r.id === d.id);
+    seen.add(d.id);
     out.push({
-      ...base,
-      // 保留内置实现（工具循环）；内置角色也可能被界面改 prompt，仍以 store 为准
-      run: (llm, ctx) => invoke(llm, base, ctx),
-      ...(builtin ? {} : {}),
+      id: d.id,
+      name: ov?.name ?? d.name,
+      duty: ov?.duty ?? d.duty,
+      systemPrompt: ov?.systemPrompt ?? d.systemPrompt,
+      skills: ov?.skills ?? d.skills,
+      mcpServers: ov?.mcpServers ?? d.mcpServers,
+      enabled: ov?.enabled ?? d.enabled,
+      modelId: ov?.modelId,
+      createdAt: ov?.createdAt ?? "",
     });
   }
-  return out.length ? out : EXPERTS;
+  // 界面新增的自定义角色（文件里没有）
+  for (const r of overrides) {
+    if (!seen.has(r.id)) out.push(r);
+  }
+  return out;
+}
+
+export function allExperts(): Expert[] {
+  const roles = listExpertRoles();
+  if (!roles.length) {
+    // 兜底：experts/ 目录与 store 都为空时用内置 EXPERTS（4 个原始专家）
+    return EXPERTS;
+  }
+  const defs = loadExpertDefs();
+  const alwaysById = new Map(defs.map((d) => [d.id, d.alwaysInvoke === true]));
+  return roles
+    .filter((r) => r.enabled)
+    .map((r) => {
+      const base: Omit<Expert, "run"> = {
+        id: r.id,
+        name: r.name,
+        duty: r.duty,
+        systemPrompt: r.systemPrompt,
+        skills: r.skills,
+        mcpServers: r.mcpServers,
+        alwaysInvoke: alwaysById.get(r.id),
+      };
+      return { ...base, run: (llm, ctx) => invoke(llm, base, ctx) };
+    });
 }
 
 export function getExpert(id: string): Expert | undefined {

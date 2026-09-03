@@ -147,48 +147,8 @@ function defaults(): StoreData {
         createdAt: NOW(),
       },
     ],
-    roles: [
-      {
-        id: "trading",
-        name: "交易系统专家",
-        duty: "负责持仓管理、开平仓判断、仓位与止损参数。",
-        systemPrompt: `你是【交易系统专家】。\n基于账户状态、持仓与其他专家观点，给出具体交易执行建议。\n\n输出（advice 字段）：\n{"actions":[{"inst":"BTC-USDT-SWAP","action":"hold|long|short|close","riskPct":0.012,"slDist":712.3,"tpRR":2.0,"reason":"理由（必填）"}]}\n\n纪律：\n- 「不交易」合法但需理由。\n- 已有持仓时优先判断持有/平仓/移动止损，而非默认加仓。\n- riskPct 建议 0.5%~2.5%；超 2% 在 flags 标注需人工确认。\n- 开仓必须给 slDist。只交易 BTC-USDT-SWAP 与 ETH-USDT-SWAP。`,
-        skills: ["order_id", "read_charter"],
-        mcpServers: ["okx-trade-mcp"],
-        enabled: true,
-        createdAt: NOW(),
-      },
-      {
-        id: "news",
-        name: "新闻资讯专家",
-        duty: "负责消息面：事件闸门、方向否决、关键数字交叉验证。",
-        systemPrompt: `你是【新闻资讯专家】。\n评估消息面对 BTC/ETH 的影响。消息面是否决权与仓位调节器，不提供开仓信号。\n\n建议流程：1) news_fetch 采集 2) 对 high/A 级条目用 news_verify 双源验证 3) 输出结论\n\n输出（advice）：\n{"gateOpen":true,"blockingEvents":["..."],"keyNews":[{"title":"...","direction":"bullish|bearish|neutral|mixed","impact":"high|mid|low","credibility":"A|B|C","verified":true,"note":"..."}],"reactionNote":"..."}\n\n规则：\n- 关键数字须 ≥2 独立信源才标 A/verified=true；单源只能 B，无否决权，须在 flags 注明。\n- 宏观预期数据超 48 小时须重验。\n- 加息定价环境下反应函数反转：就业强=鹰派=利空加密；就业弱=利多加密。\n- 只评估美国宏观事件；加拿大/澳洲等非美事件一般不阻塞。`,
-        skills: ["news_fetch", "news_verify", "news_log", "read_charter"],
-        mcpServers: [],
-        enabled: true,
-        createdAt: NOW(),
-      },
-      {
-        id: "factor",
-        name: "因子评分专家",
-        duty: "负责多周期技术因子评分与共振判断。",
-        systemPrompt: `你是【因子评分专家】。\n对 BTC-USDT-SWAP / ETH-USDT-SWAP 做多周期（4H/1H/15m）技术因子评分。\n先调 market_scan 拿行情再评分。\n\n输出（advice）：\n{"scores":{"BTC-USDT-SWAP":{"total":-35.2,"perBar":{"4H":-8,"1H":-72,"15m":-48},"trend":"down|up|range","volRatio":1.255,"rangePosPct":11.2,"rr":2.0,"funding":0.0001}},"thresholdCheck":{"BTC-USDT-SWAP":{"scoreOk":true,"trendOk":true,"volOk":true,"rangeOk":true,"rrOk":true,"fundingOk":true}}}\n\n基准：|共振分|≥28 才算信号；4H50%/1H30%/15m20% 加权；4H/1H 趋势不冲突；vol_ratio≥0.8；4H 区间分位避开 38%~62%；盈亏比≥1.6；|资金费率|≤0.05%。\n只给评分与达标判断，不给买卖指令。`,
-        skills: ["market_scan", "read_charter"],
-        mcpServers: [],
-        enabled: true,
-        createdAt: NOW(),
-      },
-      {
-        id: "risk",
-        name: "风控专家",
-        duty: "负责回撤、熔断、敞口与相关性风险。",
-        systemPrompt: `你是【风控专家】。\n从「活下来」的角度评估当前状态，给出风险约束建议。\n\n输出（advice）：\n{"drawdown":{"day":0.0,"month":0.0},"exposureX":1.12,"circuitBreaker":false,"suggestions":["..."]}\n\n关注：当日/月度回撤、总敞口倍数、BTC/ETH 同向持仓的相关性、连亏笔数、熔断阈值。优先保证「有下一笔」。`,
-        skills: ["read_charter"],
-        mcpServers: ["okx-trade-mcp"],
-        enabled: true,
-        createdAt: NOW(),
-      },
-    ],
+    // 专家定义已外置到 experts/*.json（可插拔），roles 仅作运行时覆盖层（界面编辑），默认空
+    roles: [],
     mcpServers: [
       {
         id: "okx-trade-mcp",
@@ -205,9 +165,9 @@ function defaults(): StoreData {
       requireToolConfirm: true,
       intervalMin: 5,
       autoStart: true,
-      dryRun: true,
+      dryRun: false,
       roleStrategy: "llm",
-      fixedRoles: ["trading", "news", "factor", "risk"],
+      fixedRoles: ["trading", "news", "factor", "risk", "funding", "onchain", "sentiment", "execution"],
       skillEnabled: {
         market_scan: true,
         news_fetch: true,
@@ -254,10 +214,23 @@ export function loadStore(): StoreData {
 export function saveStore(data?: StoreData): void {
   const d = data ?? cache ?? defaults();
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  // 原子写：先写临时文件再重命名，防写入中断导致配置损坏
+  const json = JSON.stringify(d, null, 2);
+  // 原子写：先写临时文件再重命名，防写入中断导致配置损坏。
+  // 但 Windows 下 rename 覆盖已存在文件时，若目标文件正被其他进程打开（哪怕只读），
+  // 会报 EPERM（实测复现）；此时退回直接写，writeFileSync 覆盖只读打开的文件没问题。
   const tmp = STORE_PATH + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(d, null, 2), "utf8");
-  fs.renameSync(tmp, STORE_PATH);
+  fs.writeFileSync(tmp, json, "utf8");
+  try {
+    fs.renameSync(tmp, STORE_PATH);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EEXIST" || code === "EBUSY" || code === "EACCES") {
+      fs.writeFileSync(STORE_PATH, json, "utf8");
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    } else {
+      throw e;
+    }
+  }
   cache = d;
 }
 

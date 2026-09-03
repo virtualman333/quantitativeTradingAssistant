@@ -45,4 +45,5 @@
 - 章程序言规定 AI 自主决策但 L1 边界不可逾越；`agent/` 的 TS 实现即该章程的工程化版本。
 - **Electron IPC 坑**：渲染进程传给 `ipcRenderer.invoke` 的参数若为 Vue `reactive`/`ref` 代理(Proxy)，`structuredClone` 会抛 `An object could not be cloned`。已统一在 `electron/preload.ts` 的 `safeInvoke` 里对参数做 `JSON.parse(JSON.stringify())` 拍成纯对象，所有 `api.*` 调用都走它。
 - **Electron preload 新旧产物坑（2026-09-03）**：`dist/electron/preload.js` 是早期配置的遗留旧产物（tsconfig.electron.json 现在只编 main.ts），缺新 API 会报 `api.xxx is not a function`。`resolvePreload()` 必须**优先选正规 CJS 产物 `dist/preload/preload.js`**，postbuild.mjs 会自动清理遗留文件。遇到「界面某功能报 not a function」先查加载到的 preload 是不是旧的（`npx tsc -p tsconfig.electron.json && node scripts/postbuild.mjs` 后重启应用）。
+- **Windows renameSync 覆盖坑（2026-09-03）**：`fs.renameSync(tmp, target)` 在 Windows 下覆盖已存在的 target 时，若 target 被其他进程打开（哪怕只读）会报 `EPERM`（`fs.writeFileSync` 直写则没事）。本地 JSON 持久化（store.ts 的 saveStore 等）原子写必须捕获 `EPERM/EEXIST/EBUSY/EACCES` 回退直写，否则界面「保存」会偶发/持续失败。
 - git 状态注意：agent 下 electron/、ui/、src/experts/graph/mcp/orchestrator/skills/store.ts、pnpm-lock/workspace 仍未提交（截至 2026-09-02）；package.json/main.ts/okx.ts/tsconfig.json 有修改；guard.ts 已删除（风控职责移入 orchestrator/graph 提示词 + L1 边界在类型/执行层）。
