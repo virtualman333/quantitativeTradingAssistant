@@ -14,6 +14,13 @@ const syncedAt = computed(() => {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 });
+// 上一轮归档时间（round_input 里的 time_cst："YYYY-MM-DD HH:MM:SS"）
+const roundTime = computed(() => {
+  const t = rd.value.time_cst || "";
+  if (!t) return "—";
+  const m = String(t).match(/^\d{4}-(\d{2}-\d{2}) (\d{2}:\d{2})/);
+  return m ? `${m[1]} ${m[2]}` : String(t);
+});
 </script>
 
 <template>
@@ -28,6 +35,10 @@ const syncedAt = computed(() => {
     <div class="card">
       <div class="k">最近轮次</div>
       <div class="v">{{ rd.round_id || status.runtime?.last_round_id || "—" }}</div>
+    </div>
+    <div class="card">
+      <div class="k">上一轮时间</div>
+      <div class="v">{{ roundTime }}</div>
     </div>
     <div class="card"><div class="k">本日止损</div><div class="v">{{ status.runtime?.day_sl_count || 0 }}</div></div>
   </div>

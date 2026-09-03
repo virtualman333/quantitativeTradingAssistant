@@ -176,6 +176,7 @@ function defaults(): StoreData {
       fixedRoles: ["trading", "news", "factor", "risk", "funding", "onchain", "sentiment", "execution"],
       skillEnabled: {
         market_scan: true,
+        news_query: true,
         news_fetch: true,
         news_verify: true,
         news_log: true,
@@ -211,11 +212,23 @@ export function loadStore(): StoreData {
       return cache;
     }
   } catch {
-    /* 损坏则用默认 */
+    /* 文件存在但损坏：用默认值（不写回，避免覆盖损坏文件） */
   }
   cache = defaults();
-  saveStore(cache);
+  // 仅当文件不存在时创建（损坏文件保留，交给人工恢复）
+  if (!fs.existsSync(STORE_PATH)) {
+    try {
+      saveStore(cache);
+    } catch {
+      /* 写失败不影响内存使用 */
+    }
+  }
   return cache;
+}
+
+/** 清除缓存，强制下次 loadStore 重新读文件。常驻进程每轮调用，让界面改动即时生效。 */
+export function reloadStore(): void {
+  cache = null;
 }
 
 export function saveStore(data?: StoreData): void {

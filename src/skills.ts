@@ -97,6 +97,21 @@ export const SKILLS: Skill[] = [
     },
   },
   {
+    id: "news_query",
+    name: "查可信消息库",
+    description:
+      "从 SQLite 消息库查询最近 N 小时已入库的可信消息（A=双源已验证 / B=单一专业源），无需重新抓取与二次验证。优先用它复用历史可信消息。",
+    args: "{hours?:数字(默认24), minCred?:'A'|'B'|'C'(默认B), limit?:数字(默认40)}",
+    readOnly: true,
+    run: async (a) => {
+      const args = ["--query"];
+      if (a.hours) args.push("--hours", String(a.hours));
+      if (a.minCred) args.push("--min-cred", String(a.minCred));
+      if (a.limit) args.push("--limit", String(a.limit));
+      return runPyScript("news_db.py", args, 60_000);
+    },
+  },
+  {
     id: "news_fetch",
     name: "消息采集",
     description:
@@ -143,6 +158,20 @@ export const SKILLS: Skill[] = [
       const args = [];
       if (a.limit) args.push("--limit", String(a.limit));
       return runPyScript("polymarket_sentiment.py", args, 120_000);
+    },
+  },
+  {
+    id: "backtest",
+    name: "策略回测",
+    description:
+      "在 OKX 历史 K 线上回放因子策略（共振分/趋势/量比/区间分位），量化胜率、盈亏比、最大回撤、夏普，验证策略有效性。",
+    args: "{inst?:'BTC-USDT-SWAP', hours?:数字(默认720=30天)}",
+    readOnly: true,
+    run: async (a) => {
+      const args = [];
+      if (a.inst) args.push("--inst", String(a.inst));
+      if (a.hours) args.push("--hours", String(a.hours));
+      return runPyScript("backtest.py", args, 300_000);
     },
   },
   {

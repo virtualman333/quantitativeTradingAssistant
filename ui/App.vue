@@ -58,7 +58,24 @@ const views = {
 };
 const currentView = computed(() => views[tab.value] || DashboardView);
 
+// ── 主题：默认浅色，可切深色，localStorage 持久化 ──
+const theme = ref("light");
+const ICON_MOON = svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>');
+const ICON_SUN = svg('<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>');
+function applyTheme(t) {
+  theme.value = t;
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem("okx-agent-theme", t); } catch { /* ignore */ }
+}
+function toggleTheme() {
+  applyTheme(theme.value === "light" ? "dark" : "light");
+}
+
 onMounted(async () => {
+  // 主题初始化放最前，避免首屏闪色
+  let saved = "light";
+  try { saved = localStorage.getItem("okx-agent-theme") || "light"; } catch { /* ignore */ }
+  applyTheme(saved === "dark" ? "dark" : "light");
   await initApp();
 });
 onBeforeUnmount(dispose);
@@ -77,6 +94,9 @@ onBeforeUnmount(dispose);
       <span class="hint">模型</span>{{ currentModel.name }}
     </span>
     <span class="spacer"></span>
+    <button class="theme-btn" :title="theme === 'light' ? '切换到深色' : '切换到浅色'" @click="toggleTheme">
+      <span class="theme-ico" v-html="theme === 'light' ? ICON_MOON : ICON_SUN"></span>
+    </button>
     <button :disabled="status.busy" @click="runOnce">
       {{ status.busy ? '运行中…' : '跑一轮' }}
     </button>

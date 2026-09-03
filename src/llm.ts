@@ -55,6 +55,20 @@ function isNonStreamRejected(status: number, body: string): boolean {
   return status === 400 && /non-?stream|11101|only\s+stream|只支持流式|仅支持流式/i.test(body);
 }
 
+/**
+ * 带超时的 fetch。decide（专家/调度/拍板）是 agent 内部的同步等待，
+ * 若网关挂起不响应会永久卡死整轮 → 必须自身超时。默认 3 分钟。
+ */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 180_000): Promise<Response> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // ── OpenAI 兼容（覆盖 DeepSeek / OpenAI / 各类中转 / 本地 vLLM） ──
 class OpenAICompatProvider implements LlmProvider {
   readonly name = "openai-compatible";
@@ -85,7 +99,7 @@ class OpenAICompatProvider implements LlmProvider {
     };
     if (stream) body.stream = true;
 
-    const r = await fetch(`${base}/chat/completions`, {
+    const r = await fetchWithTimeout(`${base}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
       body: JSON.stringify(body),
@@ -201,7 +215,7 @@ class AnthropicProvider implements LlmProvider {
   }
   async decide(sys: string, user: string, _opts?: DecideOpts): Promise<string> {
     const base = (this.cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
-    const r = await fetch(`${base}/v1/messages`, {
+    const r = await fetchWithTimeout(`${base}/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -59,12 +59,16 @@ function scroll() {
 function onEvent(ev) {
   const e = ev || {};
   // 流式思考链：同源连续 reasoning 合并到同一行实时增长，避免几百条增量刷屏
-  if (e.kind === "reasoning" && entries.value.length) {
-    const last = entries.value[entries.value.length - 1];
-    if (last.kind === "reasoning" && last.source === e.source) {
-      last.text = (last.text || "") + (e.text || "");
-      scroll();
-      return;
+  if (e.kind === "reasoning") {
+    // 空思考链（0 字）不产生「思考过程（0 字）」条目
+    if (!(e.text || "").length) return;
+    if (entries.value.length) {
+      const last = entries.value[entries.value.length - 1];
+      if (last.kind === "reasoning" && last.source === e.source) {
+        last.text = (last.text || "") + e.text;
+        scroll();
+        return;
+      }
     }
   }
   entries.value.push(e);
@@ -128,7 +132,7 @@ onBeforeUnmount(() => {
             <span :class="['badge', e.ok ? 'ok' : 'bad']">{{ e.ok ? "成功" : "失败" }}</span>
             <pre class="out" v-if="(e.output || e.error)">{{ e.error || pretty(e.output) }}</pre>
           </template>
-          <template v-else-if="e.kind === 'reasoning'">
+          <template v-else-if="e.kind === 'reasoning' && (e.text || '').length">
             <details class="reason">
               <summary>思考过程（{{ (e.text || "").length }} 字）</summary>
               <pre>{{ e.text }}</pre>
