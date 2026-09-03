@@ -506,6 +506,69 @@ ipcMain.handle("account:get", async (_e, profile = "demo") => {
   }
 });
 ipcMain.handle("logs:get", () => logBuffer.slice(-500));
+
+// ── 报告入口（日报/周报 Markdown，位于 reports/daily|weekly） ──
+const REPORTS_DIR = path.join(AGENT_ROOT, "reports");
+
+function listReports() {
+  const scan = (sub: string) => {
+    const dir = path.join(REPORTS_DIR, sub);
+    try {
+      return fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith(".md"))
+        .sort()
+        .reverse() // 新的在前
+        .map((f) => {
+          const full = path.join(dir, f);
+          const st = fs.statSync(full);
+          return { name: f, sub, path: full, size: st.size, mtime: st.mtime.toISOString() };
+        });
+    } catch {
+      return [];
+    }
+  };
+  return { daily: scan("daily"), weekly: scan("weekly") };
+}
+
+ipcMain.handle("reports:list", () => listReports());
+
+/** 读报告内容（应用内预览），只允许 reports 目录内的文件 */
+ipcMain.handle("reports:read", (_e, p: string) => {
+  const full = path.resolve(p);
+  if (!full.startsWith(path.resolve(REPORTS_DIR))) return { ok: false, error: "路径越界" };
+  try {
+    return { ok: true, text: fs.readFileSync(full, "utf8").slice(0, 30_000) };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+});
+
+/** 用系统默认程序打开（Typora/VSCode 等） */
+ipcMain.handle("reports:open", (_e, p: string) => {
+  const full = path.resolve(p);
+  if (!full.startsWith(path.resolve(REPORTS_DIR))) return { ok: false, error: "路径越界" };
+  shell.openPath(full);
+  return { ok: true };
+});
+
+ipcMain.handle("reports:dir", () => {
+  shell.openPath(REPORTS_DIR);
+  return { ok: true };
+});
+
+/** 生成日报/周报（复用 scripts/report.py 的确定性统计） */
+ipcMain.handle("reports:gen", async (_e, kind: string) => {
+  try {
+    const mod: any = await import("file://" + path.join(AGENT_ROOT, "dist", "src", "okx.js").replace(/\\/g, "/"));
+    const day = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // CST 今天
+    const args = kind === "weekly" ? ["--weekly-end", day] : ["--daily", day];
+    const out = await mod.runPy("report.py", args, 60_000);
+    return { ok: true, out: out.slice(0, 1200), reports: listReports() };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 500) };
+  }
+});
 ipcMain.handle("open:folder", (_e, which: string) => {
   shell.openPath(which === "logs" ? path.join(PROJECT_ROOT, "logs") : path.join(PROJECT_ROOT, "state"));
   return { ok: true };
