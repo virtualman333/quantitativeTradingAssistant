@@ -1,7 +1,8 @@
 <script setup>
-/** 总览：权益卡片 + 持仓 + 最近决策 + 专家观点 */
-import { computed } from "vue";
+/** 总览：权益卡片 + 热门行情 + 持仓 + 最近决策 + 专家观点 */
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { status } from "../store/index.js";
+import { api } from "../lib/api.js";
 import { fmtNum, signCls, STANCE_TEXT } from "../lib/format.js";
 
 const rd = computed(() => status.latestRound || {});
@@ -28,6 +29,47 @@ const roundTime = computed(() => {
   const m = String(t).match(/^\d{4}-(\d{2}-\d{2}) (\d{2}:\d{2})/);
   return m ? `${m[1]} ${m[2]}` : String(t);
 });
+
+// ── 热门行情：按 24h 成交额取前 15 个 USDT 永续，15 秒轮询 ──
+const tickers = ref([]);
+const tickersErr = ref("");
+const tickersAt = ref("");
+let tickTimer = null;
+let ticking = false;
+
+async function loadTickers() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    const r = await api.marketTickers(15);
+    if (r?.ok) {
+      tickers.value = r.tickers || [];
+      tickersErr.value = "";
+      tickersAt.value = new Date(r.ts).toTimeString().slice(0, 8);
+    } else {
+      tickersErr.value = (r && r.error) || "行情获取失败";
+    }
+  } catch (e) {
+    tickersErr.value = String((e && e.message) || e);
+  } finally {
+    ticking = false;
+  }
+}
+function startTick() {
+  if (tickTimer) return;
+  loadTickers();
+  tickTimer = setInterval(loadTickers, 15_000);
+}
+function stopTick() {
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+}
+onMounted(startTick);
+onActivated(startTick); // KeepAlive 切回本页签时恢复轮询
+onDeactivated(stopTick);
+onUnmounted(stopTick);
 </script>
 
 <template>
@@ -50,6 +92,33 @@ const roundTime = computed(() => {
     <div class="card"><div class="k">本日止损</div><div class="v">{{ status.runtime?.day_sl_count || 0 }}</div></div>
   </div>
   <div class="hint" style="margin:-6px 0 14px">每 8 秒自动刷新 · 上次同步 {{ syncedAt }}</div>
+
+  <div class="panel">
+    <h2>
+      热门行情（USDT 永续 · 24h 成交额前 15）
+      <span class="hint" style="font-weight:400">每 15 秒刷新 · {{ tickersAt || "—" }}</span>
+    </h2>
+    <div class="body">
+      <div v-if="tickersErr" class="alert err" style="margin:0 0 8px">行情获取失败：{{ tickersErr }}</div>
+      <table v-if="tickers.length">
+        <thead>
+          <tr><th>交易对</th><th>最新价</th><th>24h 涨跌</th><th>24h 最高</th><th>24h 最低</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in tickers" :key="t.instId">
+            <td><b>{{ t.instId }}</b></td>
+            <td>{{ fmtNum(t.last) }}</td>
+            <td :class="signCls(t.changePct)">
+              {{ t.changePct >= 0 ? "+" : "" }}{{ t.changePct.toFixed(2) }}%
+            </td>
+            <td>{{ fmtNum(t.high24h) }}</td>
+            <td>{{ fmtNum(t.low24h) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else-if="!tickersErr" class="empty">加载中…</div>
+    </div>
+  </div>
 
   <div class="panel">
     <h2>持仓</h2>

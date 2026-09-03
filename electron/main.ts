@@ -569,6 +569,50 @@ ipcMain.handle("reports:gen", async (_e, kind: string) => {
     return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 500) };
   }
 });
+
+// ── 热门行情（OKX 公共 REST，免认证；域名回退 + 10s 缓存） ──
+let tickersCache: { at: number; rows: unknown[] } | null = null;
+ipcMain.handle("market:tickers", async (_e, limit = 15) => {
+  if (tickersCache && Date.now() - tickersCache.at < 10_000) {
+    return { ok: true, tickers: tickersCache.rows.slice(0, Number(limit) || 15), ts: tickersCache.at };
+  }
+  const bases = process.env.OKX_PUBLIC_BASE
+    ? [process.env.OKX_PUBLIC_BASE.replace(/\/+$/, "")]
+    : ["https://www.okx.com", "https://aws.okx.com", "https://okx.com"];
+  let lastErr = "";
+  for (const base of bases) {
+    try {
+      const r = await fetch(`${base}/api/v5/market/tickers?instType=SWAP`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const j: any = await r.json();
+      if (j.code !== "0") {
+        lastErr = `code=${j.code} ${j.msg ?? ""}`;
+        continue;
+      }
+      const rows = (j.data as any[])
+        .filter((t) => String(t.instId).endsWith("-USDT-SWAP"))
+        .sort((a, b) => Number(b.volCcy24h) - Number(a.volCcy24h)) // 按 24h 成交额排热门
+        .map((t) => {
+          const last = Number(t.last);
+          const open = Number(t.open24h);
+          return {
+            instId: String(t.instId),
+            last,
+            changePct: open ? ((last - open) / open) * 100 : 0,
+            volUsd: Number(t.volCcy24h),
+            high24h: Number(t.high24h),
+            low24h: Number(t.low24h),
+          };
+        });
+      tickersCache = { at: Date.now(), rows };
+      return { ok: true, tickers: rows.slice(0, Number(limit) || 15), ts: Date.now() };
+    } catch (e) {
+      lastErr = String((e as Error)?.message ?? e);
+    }
+  }
+  return { ok: false, error: lastErr.slice(0, 300) };
+});
 ipcMain.handle("open:folder", (_e, which: string) => {
   shell.openPath(which === "logs" ? path.join(PROJECT_ROOT, "logs") : path.join(PROJECT_ROOT, "state"));
   return { ok: true };

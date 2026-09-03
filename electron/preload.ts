@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld("api", {
   reportsOpen: (p: string) => safeInvoke("reports:open", p),
   reportsDir: () => safeInvoke("reports:dir"),
   reportsGen: (kind: string) => safeInvoke("reports:gen", kind),
+  // 热门行情（OKX 公共 REST）
+  marketTickers: (limit?: number) => safeInvoke("market:tickers", limit),
   openFolder: (w: string) => safeInvoke("open:folder", w),
   openStore: () => safeInvoke("open:store"),
   showError: (m: string) => safeInvoke("dialog:error", m),
