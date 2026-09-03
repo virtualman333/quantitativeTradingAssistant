@@ -227,8 +227,12 @@ async function executeOpen(
   const slPxStr = fmtTick(slPx, spec.tickSz);
   const tpPxStr = fmtTick(tpPx, spec.tickSz);
 
-  const cl = await genClOrdId(roundId, seq, { instId: inst, sz: size });
-  if (!cl) return { ok: false, msg: `${inst}: clOrdId 生成失败` };
+  const g = await genClOrdId(roundId, seq, { instId: inst, sz: size });
+  if (!g.clOrdId) {
+    log(`clOrdId 生成失败 ${inst}: ${g.error ?? "未知原因"}`);
+    return { ok: false, msg: `${inst}: clOrdId 生成失败（${g.error ?? "未知原因"}）` };
+  }
+  const cl = g.clOrdId;
 
   if (DRY_RUN) {
     return { ok: true, msg: `[DRY] ${inst} ${side} ${size}张 名义≈${notional.toFixed(0)} 杠杆≈${lever}x SL=${slPxStr} TP=${tpPxStr} id=${cl}` };

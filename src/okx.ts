@@ -87,12 +87,16 @@ export function unwrap(result: unknown): Record<string, unknown>[] {
   return [];
 }
 
-/** 生成合规 clOrdId（L1-8，必须用 order_id.py，禁止手写） */
+/**
+ * 生成合规 clOrdId（L1-8，必须用 order_id.py，禁止手写）。
+ * 返回 { clOrdId, error }：失败时带原因（order_id.py 拒绝重号时 error 含已有 ID）。
+ * 同 round+seq 已登记过时，按幂等约定复用已有 ID（order_id.py 的 existing.clOrdId）。
+ */
 export async function genClOrdId(
   roundId: string,
   seq: number,
   params: Record<string, unknown> = {}
-): Promise<string | null> {
+): Promise<{ clOrdId: string | null; error?: string }> {
   try {
     const out = await runPy("order_id.py", [
       "--round",
@@ -102,17 +106,26 @@ export async function genClOrdId(
       "--params",
       JSON.stringify(params),
     ]);
-    // order_id.py 输出 JSON（含 clOrdId）或裸字符串
     try {
-      const j = JSON.parse(out) as { clOrdId?: string };
-      if (j.clOrdId) return j.clOrdId;
+      const j = JSON.parse(out) as {
+        ok?: boolean;
+        clOrdId?: string;
+        error?: string;
+        existing?: { clOrdId?: string };
+      };
+      if (j.clOrdId) return { clOrdId: j.clOrdId };
+      // 幂等重试约定：同 round+seq 必须复用同一个 ID，order_id.py 已替我们记住
+      if (j.existing?.clOrdId) return { clOrdId: j.existing.clOrdId };
+      return { clOrdId: null, error: j.error || "order_id.py 返回失败" };
     } catch {
       /* 非 JSON，按裸字符串处理 */
+      const s = out.trim().split(/\r?\n/).pop()?.trim();
+      if (s && /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(s)) return { clOrdId: s };
+      return { clOrdId: null, error: `order_id.py 输出非 JSON: ${out.slice(0, 200)}` };
     }
-    const s = out.trim().split(/\r?\n/).pop()?.trim();
-    return /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(s ?? "") ? (s as string) : null;
-  } catch {
-    return null;
+  } catch (e) {
+    const err = e as { stderr?: string; message?: string };
+    return { clOrdId: null, error: String(err?.stderr || err?.message || e).slice(0, 300) };
   }
 }
 
