@@ -57,6 +57,78 @@ const groups = computed(() => {
   return gs;
 });
 
+// ── 批量回测：勾选 → 串行队列依次回测，结果回填到每行「最近回测」 ──
+/** 勾选集合（key = 策略 id；引擎默认行 key = "__engine"） */
+const selKeys = ref([]);
+const RES_KEY = "btBatchResV1";
+function loadRowRes() {
+  try {
+    return JSON.parse(sessionStorage.getItem(RES_KEY) || "null") || {};
+  } catch {
+    return {};
+  }
+}
+/** key -> { at, ok, summary?, error? }：该策略最近一次回测摘要（本会话保留） */
+const rowRes = ref(loadRowRes());
+function saveRowRes() {
+  try {
+    sessionStorage.setItem(RES_KEY, JSON.stringify(rowRes.value));
+  } catch {
+    /* ignore */
+  }
+}
+const keyOf = (s) => (s && s.engine ? "__engine" : (s && s.id) || "__engine");
+/** 当前筛选下出现的全部策略行（含引擎默认基准行） */
+const allRows = computed(() => groups.value.flatMap((g) => g.items));
+const isSel = (k) => selKeys.value.includes(k);
+const allSel = computed(() => allRows.value.length > 0 && allRows.value.every((s) => isSel(keyOf(s))));
+function toggleSel(k) {
+  const i = selKeys.value.indexOf(k);
+  if (i >= 0) selKeys.value.splice(i, 1);
+  else selKeys.value.push(k);
+}
+function toggleAllSel() {
+  selKeys.value = allSel.value ? [] : allRows.value.map((s) => keyOf(s));
+}
+function clearSel() {
+  selKeys.value = [];
+}
+function selNames() {
+  const m = new Map(allRows.value.map((s) => [keyOf(s), s.name]));
+  return selKeys.value.map((k) => m.get(k) || k).join("、");
+}
+function rowSummary(k) {
+  const r = rowRes.value[k];
+  return r && r.ok && r.summary ? r.summary : null;
+}
+function rowFailMsg(k) {
+  const r = rowRes.value[k];
+  return r && !r.ok ? String(r.error || "回测失败").slice(0, 120) : "";
+}
+function rowResAt(k) {
+  return rowRes.value[k]?.at || "";
+}
+/** 把一次回测结果写进行内记录（单跑 / 批量共用；无摘要的成功结果不算成功） */
+function noteRowRes(k, ok, payload) {
+  if (ok) {
+    const sum = payload && payload.summary;
+    if (!sum) return;
+    rowRes.value[k] = { at: new Date().toISOString(), ok: true, summary: sum };
+  } else {
+    rowRes.value[k] = { at: new Date().toISOString(), ok: false, error: String(payload || "回测失败").slice(0, 300) };
+  }
+  saveRowRes();
+}
+/** hero 统计 */
+const btOkCount = computed(() => Object.values(rowRes.value).filter((v) => v && v.ok).length);
+const btAllResCount = computed(() => Object.values(rowRes.value).filter((v) => v).length);
+
+// ── 批量队列状态 ──
+const batch = ref({ running: false, list: [], idx: -1, cancel: false, ok: 0, fail: 0, startedAt: 0, curKey: "", curName: "" });
+const live = ref({}); // key -> { st: 'wait'|'run', p, stage, msg }
+const batchStopped = ref(false);
+const btBusy = computed(() => batch.value.running || btRunning.value);
+
 const editModal = ref(null); // {mode:'new'|'edit', id, name, desc, idea, code}
 const genLoading = ref(false);
 const saveLoading = ref(false);
@@ -350,35 +422,44 @@ function onBtEvent(ev) {
     btRunning.value = false;
     btProgress.value = null;
     btResult.value = ev.result || null;
-    if (btResult.value) lastBtSummary.value = buildBtSummary(btResult.value);
+    if (btResult.value) {
+      lastBtSummary.value = buildBtSummary(btResult.value);
+      const sid = btForm.value.strategyId || "";
+      noteRowRes(sid ? sid : "__engine", !!btResult.value.summary, ev.result);
+    }
     if (btWatchdog) clearInterval(btWatchdog);
   } else if (ev.type === "error") {
     btRunning.value = false;
     btProgress.value = null;
     btError.value = ev.error || "回测失败";
+    const sid = btForm.value.strategyId || "";
+    noteRowRes(sid ? sid : "__engine", false, ev.error || "回测失败");
     if (btWatchdog) clearInterval(btWatchdog);
   }
 }
 
+/** 与批量队列共用一套回测参数（保证横向对比公平） */
+function btParams() {
+  return {
+    inst: String(btForm.value.inst || "BTC-USDT-SWAP").trim().toUpperCase(),
+    start: btForm.value.start ? btForm.value.start.replace("T", " ") + ":00" : "",
+    end: btForm.value.end ? btForm.value.end.replace("T", " ") + ":00" : "",
+    atrMult: Number(btForm.value.atrMult) || 2.5,
+    feeRate: Number(btForm.value.feeRate) || 0.0005,
+    notional: Number(btForm.value.notional) || 10000,
+    closeOnReversal: !!btForm.value.closeOnReversal,
+  };
+}
+
 async function runBacktest() {
+  if (batch.value.running) return; // 批量运行中不接受单跑
   if (btRunning.value) return;
   btRunning.value = true;
   btResult.value = null;
   btError.value = "";
   btProgress.value = { p: 1, stage: "启动", msg: "正在拉起回测进程…" };
   try {
-    const start = btForm.value.start ? btForm.value.start.replace("T", " ") + ":00" : "";
-    const end = btForm.value.end ? btForm.value.end.replace("T", " ") + ":00" : "";
-    const r = await api.scalperBtStart({
-      inst: String(btForm.value.inst || "BTC-USDT-SWAP").trim().toUpperCase(),
-      start,
-      end,
-      atrMult: Number(btForm.value.atrMult) || 2.5,
-      feeRate: Number(btForm.value.feeRate) || 0.0005,
-      notional: Number(btForm.value.notional) || 10000,
-      closeOnReversal: !!btForm.value.closeOnReversal,
-      strategyId: btForm.value.strategyId || "",
-    });
+    const r = await api.scalperBtStart({ ...btParams(), strategyId: btForm.value.strategyId || "" });
     if (!r?.ok) throw new Error(r?.error || "启动失败");
     btJobId = r.jobId;
     if (!offBt) offBt = api.onScalperBtEvent(onBtEvent);
@@ -406,6 +487,132 @@ async function runBacktest() {
   }
 }
 
+/** 等一个回测 job 收尾：期间把实时进度写进 live[key]（轮询兜底，后端 240s 自毙会广播 error） */
+function waitBtJob(jobId, key) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const poll = setInterval(async () => {
+      try {
+        const rr = await api.scalperBtGet(jobId);
+        if (!rr || rr.jobId !== jobId) return;
+        const lv = live.value[key];
+        if (rr.state === "running" && lv) {
+          lv.st = "run";
+          if (typeof rr.p === "number") lv.p = rr.p;
+          lv.stage = rr.stage || "";
+          lv.msg = rr.msg || "";
+        } else if (rr.state === "done") {
+          finish({ ok: true, result: rr.result || null });
+        } else if (rr.state === "error") {
+          finish({ ok: false, error: rr.error || rr.msg || "回测失败" });
+        }
+      } catch {
+        /* 下一轮再试 */
+      }
+    }, 2200);
+    const timer = setTimeout(() => finish({ ok: false, error: "等待回测结果超时" }), 246_000);
+  });
+}
+
+/** 批量串行回测队列：rows = [{ key, strategyId, name }] */
+async function runBatch(list) {
+  if (btRunning.value) {
+    toastErr(new Error("当前有单次回测在进行，请等它结束后再启动批量回测"), "无法批量回测");
+    return;
+  }
+  if (batch.value.running) return;
+  const rows = list.slice();
+  if (!rows.length) {
+    toastErr(new Error("没有可回测的策略"), "批量回测");
+    return;
+  }
+  const t0 = Date.now();
+  batch.value = { running: true, list: rows, idx: -1, cancel: false, ok: 0, fail: 0, startedAt: t0, curKey: "", curName: "" };
+  batchStopped.value = false;
+  const lv = {};
+  rows.forEach((r) => (lv[r.key] = { st: "wait", p: 0, stage: "", msg: "" }));
+  live.value = lv;
+  for (let i = 0; i < rows.length; i++) {
+    if (batch.value.cancel) break;
+    const row = rows[i];
+    batch.value.idx = i;
+    batch.value.curKey = row.key;
+    batch.value.curName = row.name;
+    const cur = live.value[row.key];
+    if (cur) {
+      cur.st = "run";
+      cur.p = 1;
+      cur.stage = "启动";
+      cur.msg = "";
+    }
+    try {
+      const r = await api.scalperBtStart({ ...btParams(), strategyId: row.strategyId || "" });
+      if (!r?.ok) throw new Error(r?.error || "启动失败");
+      const w = await waitBtJob(r.jobId, row.key);
+      if (w.ok) {
+        noteRowRes(row.key, true, w.result);
+        batch.value.ok += 1;
+      } else {
+        noteRowRes(row.key, false, w.error);
+        batch.value.fail += 1;
+      }
+    } catch (e) {
+      noteRowRes(row.key, false, errText(e));
+      batch.value.fail += 1;
+    } finally {
+      delete live.value[row.key];
+    }
+  }
+  const stopped = batch.value.cancel;
+  const okN = batch.value.ok;
+  const failN = batch.value.fail;
+  const dur = Math.round((Date.now() - t0) / 1000);
+  batch.value.running = false;
+  batchStopped.value = stopped;
+  toastOk(
+    `批量回测${stopped ? "已停止" : "完成"}：成功 ${okN}${failN ? `，失败 ${failN}` : ""}，用时 ${dur}s —— 结果已标记到各策略行`
+  );
+}
+
+function stopBatch() {
+  if (!batch.value.running || batch.value.cancel) return;
+  batch.value.cancel = true;
+  toastOk("当前策略结束后将停止批量回测（已完成的行内标记会保留）");
+}
+
+async function runSelBatch() {
+  if (batch.value.running || btRunning.value) return;
+  if (!selKeys.value.length) return;
+  const m = new Map(allRows.value.map((s) => [keyOf(s), s]));
+  const list = selKeys.value.map((k) => m.get(k)).filter(Boolean).map((s) => ({ key: keyOf(s), strategyId: s.id || "", name: s.name }));
+  if (!list.length) return;
+  if (list.length > 3 && !(await ask(`将按下方回测参数依次回测选中的 ${list.length} 个策略：${selNames()}。期间可停止后续队列。确认？`, { title: "批量回测", confirmText: "开始批量回测" }))) return;
+  await runBatch(list);
+}
+
+async function runAllBatch() {
+  if (batch.value.running || btRunning.value) return;
+  const list = allRows.value.map((s) => ({ key: keyOf(s), strategyId: s.id || "", name: s.name }));
+  if (!list.length) return;
+  if (!(await ask(`一键回测当前分类下全部 ${list.length} 个策略（含引擎内置基准），共用下方同一套标的/区间/参数。确认？`, { title: "全部回测", confirmText: "开始" }))) return;
+  await runBatch(list);
+}
+
+function batchPct() {
+  const b = batch.value;
+  if (!b.running || !b.list.length) return 0;
+  const lv = b.curKey ? live.value[b.curKey] : null;
+  const curP = lv && lv.p ? lv.p : 0;
+  return Math.max(1, Math.min(100, Math.round(((b.idx + curP / 100) / b.list.length) * 100)));
+}
+
 function fmtTs(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -423,11 +630,23 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="alert info" style="margin-bottom:12px">
-    策略库与回测已独立为「交易 → 策略回测」板块。策略「应用到循环」后，超短线实盘循环在下一个 tick 生效。
+  <div class="bt-hero">
+    <div class="bt-hero-ic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h3l2-7 4 14 3-10 2 5h6" /></svg>
+    </div>
+    <div class="bt-hero-m">
+      <div class="bt-hero-t">策略实验室</div>
+      <div class="bt-hero-d">同一标的与回测参数下横向对比所有策略：勾选若干后「批量回测选中」，或一键「全部回测」。每跑完一个策略结果实时标记到行内，留存到本窗口关闭；把胜出的策略「应用到循环」投入超短线实盘。</div>
+    </div>
+    <div class="bt-hero-stats">
+      <div class="st"><b class="hl">{{ allRows.length }}</b><span>策略</span></div>
+      <div class="st"><b>{{ builtinCount }}</b><span>内置</span></div>
+      <div class="st"><b>{{ customCount }}</b><span>我的</span></div>
+      <div class="st"><b :class="{ up: btOkCount > 0 }">{{ btOkCount }}<template v-if="btAllResCount">/{{ btAllResCount }}</template></b><span>已回测</span></div>
+    </div>
   </div>
 
-  <!-- ── 策略库：多策略 / LLM 生成 / 应用实盘 ── -->
+  <!-- ── 策略库：多策略 / 批量回测 / LLM 生成 / 应用实盘 ── -->
   <div class="panel">
     <h2>策略库<span class="spacer"></span>
       <span v-if="currentStrategyId" class="tag t-info">实盘循环：{{ currentStrategyId }}</span>
@@ -444,38 +663,99 @@ onBeforeUnmount(() => {
         >
           {{ c || "全部" }}<span v-if="c" class="cnt">{{ catCounts[c] || 0 }}</span>
         </button>
-        <span class="hint" style="margin-left:auto">
-          {{ strategies.length }} 个 · 内置 {{ builtinCount }} / 自定义 {{ customCount }}
-        </span>
+        <span class="hint" style="margin-left:auto">全部 {{ allRows.length }} · 内置 {{ builtinCount }} / 自定义 {{ customCount }}</span>
+      </div>
+
+      <div class="bt-bar">
+        <label class="bt-sel">
+          <input type="checkbox" :checked="allSel" @change="toggleAllSel" />
+          <span>{{ filterCat ? "全选本分类" : "全选" }}</span>
+        </label>
+        <span class="hint">已选 <b>{{ selKeys.length }}</b></span>
+        <button class="primary sm" :disabled="btBusy || !selKeys.length" @click="runSelBatch">批量回测选中</button>
+        <button class="sm" :disabled="btBusy" @click="runAllBatch">回测全部</button>
+        <button v-if="selKeys.length" class="sm" @click="clearSel">清空勾选</button>
+        <span v-if="selKeys.length" class="sel-tip hint" :title="selNames()">{{ selNames() }}</span>
+        <span class="spacer"></span>
+        <span class="hint">标的/区间/ATR/费率等共用下方「回测控制台」</span>
+      </div>
+
+      <div v-if="batch.running" class="bt-strip">
+        <div class="bt-strip-h">
+          <span class="tag t-info">批量回测 {{ batch.idx + 1 }}/{{ batch.list.length }}</span>
+          <b>{{ batch.curName }}</b>
+          <span class="hint">成功 {{ batch.ok }} · 失败 {{ batch.fail }}</span>
+          <span class="spacer"></span>
+          <button class="sm" :disabled="batch.cancel" @click="stopBatch">停止后续</button>
+        </div>
+        <div class="bt-track"><div class="bt-fill" :style="{ width: batchPct() + '%' }"></div></div>
+        <div class="hint" style="margin-top:3px">{{ live[batch.curKey]?.stage || "" }}{{ live[batch.curKey]?.msg ? " · " + live[batch.curKey].msg : "" }}</div>
+      </div>
+      <div v-else-if="batchStopped" class="hint" style="margin:-2px 0 8px">
+        上次批量已手动停止，行内保留已完成的结果标记；可重新勾选未完成的策略继续。
       </div>
 
       <table v-if="groups.length">
         <thead>
-          <tr><th>策略</th><th>说明</th><th>更新时间</th><th>实盘循环</th><th>操作</th></tr>
+          <tr>
+            <th class="ck"><input type="checkbox" :checked="allSel" @change="toggleAllSel" title="全选" /></th>
+            <th>策略</th><th>说明</th><th>最近回测</th><th>实盘循环</th><th>操作</th>
+          </tr>
         </thead>
         <tbody v-for="g in groups" :key="g.cat">
             <tr class="cat-row">
-              <td colspan="5">
+              <td colspan="6">
                 <span class="tag t-hold">{{ g.cat }}</span>
                 <span class="hint">{{ g.items.length }} 个策略</span>
                 <span v-if="g.items.some((s) => s.engine)" class="hint" style="margin-left:6px">含引擎默认趋势规则</span>
               </td>
             </tr>
-            <tr v-for="s in g.items" :key="s.id || 'engine'">
+            <tr v-for="s in g.items" :key="s.id || 'engine'" :class="{ sel: isSel(keyOf(s)) }">
+              <td class="ck">
+                <input type="checkbox" :checked="isSel(keyOf(s))" :title="'选择 ' + s.name" @change="toggleSel(keyOf(s))" />
+              </td>
               <td>
                 <div class="s-name">
                   <b>{{ s.name }}</b>
                   <span v-if="s.engine" class="tag t-hold">引擎内置</span>
                   <span v-else-if="s.builtin" class="tag t-info">内置</span>
                   <span v-else class="tag t-buy">我的</span>
+                  <span v-if="currentStrategyId === s.id" class="tag t-on">实盘中</span>
                 </div>
-                <div class="hint">{{ s.engine ? "engine-default" : s.id }}</div>
+                <div class="hint">{{ s.engine ? "engine-default" : s.id }}<template v-if="s.updatedAt"> · {{ fmtTs(s.updatedAt) }} 更新</template></div>
               </td>
               <td class="wrap">{{ s.desc || "—" }}</td>
-              <td class="nowrap">{{ s.updatedAt ? fmtTs(s.updatedAt) : "—" }}</td>
-              <td><span v-if="currentStrategyId === s.id" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
+              <td class="bt-cell">
+                <template v-if="live[keyOf(s)]">
+                  <div :class="['bt-live', live[keyOf(s)].st === 'run' ? 'on' : 'wait']">
+                    <span class="bt-dot"></span>
+                    <template v-if="live[keyOf(s)].st === 'run'">
+                      <b class="pmin">{{ live[keyOf(s)].p || 1 }}%</b>
+                      <span class="hint">{{ live[keyOf(s)].stage || "回测中" }}</span>
+                    </template>
+                    <template v-else>排队中…</template>
+                  </div>
+                </template>
+                <template v-else-if="rowSummary(keyOf(s))">
+                  <div class="bt-metrics">
+                    <span :class="['m-net', (rowSummary(keyOf(s)).totalNetPnlPct ?? 0) >= 0 ? 'up' : 'down']">
+                      {{ fmtNum(rowSummary(keyOf(s)).totalNetPnlPct ?? 0, 3) }}%
+                    </span>
+                    <span class="hint">
+                      {{ rowSummary(keyOf(s)).trades ?? 0 }} 笔 · 胜率 {{ rowSummary(keyOf(s)).winRate ?? "-" }}% · PF {{ fmtNum(rowSummary(keyOf(s)).profitFactor ?? 0, 2) }} · 回撤 {{ fmtNum(rowSummary(keyOf(s)).maxDrawdownPct ?? 0, 2) }}%
+                    </span>
+                  </div>
+                  <div class="hint bt-at">净 {{ fmtNum(rowSummary(keyOf(s)).totalNetPnlUsdt ?? 0, 1) }} USDT · {{ fmtTs(rowResAt(keyOf(s))) }}</div>
+                </template>
+                <template v-else-if="rowFailMsg(keyOf(s))">
+                  <span class="tag t-sell">失败</span>
+                  <span class="hint bt-at">{{ rowFailMsg(keyOf(s)) }}</span>
+                </template>
+                <span v-else class="hint">—</span>
+              </td>
+              <td class="nowrap"><span v-if="currentStrategyId === s.id" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
               <td class="nowrap">
-                <button class="sm" @click="btForStrategy(s.id)">回测</button>
+                <button class="sm" :disabled="btBusy" @click="btForStrategy(s.id)">回测</button>
                 <button v-if="s.engine" class="sm" :disabled="!currentStrategyId" @click="applyStrat('')">
                   恢复引擎默认
                 </button>
