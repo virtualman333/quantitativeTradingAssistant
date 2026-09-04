@@ -22,7 +22,8 @@
 
 ## 超短线策略系统（2026-09-04 定）
 - 产品形态（用户原话）：超短线回测支持进度显示 / LLM 分析改进 / 多策略——自己写策略脚本（用 LLM 写，内置规则约束），写完可回测或应用到超短线量化循环。
-- 存储 `agent/strategies/<id>/{strategy.py,meta.json}`（含内置示例 sample-trend）；TS 管理 src/strategies.ts（CRUD/apply/validate/generateStrategy），LLM 生成/改写走 `llm.complete()`（decide 的 extractJson 会截断代码），system 注入接口规范+安全红线+参考模板，取 ```python 代码块。
+- 存储 `agent/strategies/<id>/{strategy.py,meta.json}`，meta 含 `category`（趋势跟踪/均值回归/突破通道/自定义）与 `builtin?`；TS 管理 src/strategies.ts（CRUD/apply/validate/generateStrategy/backfillMetaFromCode），LLM 生成/改写走 `llm.complete()`，system 注入接口规范+安全红线+参考模板。
+- 内置策略（2026-09-05 起 7 个：斜率顺势/双均线/MACD/布林回归/RSI 反转/唐奇安突破/放量突破）以 `BUILTIN_STRATEGIES` 为唯一事实源，`ensureBuiltins()` 还原磁盘镜像（electron loadStrategies 每次先调）；内置不可删除、不可覆盖保存（UI 提供「复制为自定义」另存）。
 - 策略=仅一个 `signal(ctx)->{direction:long|short|flat,reason,atr_mult?,rr?}`；ctx 传全量序列引用+n(当前根)+atr+price，无未来数据；脚本策略接口经 scripts/strategy_loader.py（call_signal 兜底 flat）；scripts/strategy_check.py 做语法/红线 import/冒烟 gate。
 - scalper.py（实盘信号）与 scalper_backtest.py（回测）同加 `--strategy <dir>`：同一定义源既回测也实盘；store.scalper.strategyId 空=内置趋势（行为不变）。
 - 回测 job+进度：scalper_backtest.py `--job-id` 向 stderr 周期写 {"p","stage","msg"}；main.ts scalper:btStart spawn（PYTHONIOENCODING=utf-8、240s 看门狗、btJobs Map），`scalper:btEvent` 广播全窗口，UI 进度条+轮询兜底 scalper:btGet。回测缓存库 data/scalper_candles.db（已 gitignore）。

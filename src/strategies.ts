@@ -12,8 +12,9 @@
  *   回测  scalper_backtest.py --strategy <id 目录>
  *   实盘  scalper.py          --strategy <id 目录>（src/scalper.ts fetchSignal 自动带上）
  *
- * LLM 生成「内置规则」在 generateSystemPrompt()：约定接口 + 可用数据 + 安全红线 +
- * 与内置策略完全一致的参考模板，保证生成的代码能过 strategy_check.py 并直接被引擎加载。
+ * LLM 生成「内置规则」在 generateSystemPrompt()：资深量化研究员角色定位 + 「以用户思路为唯一
+ * 需求、不许偷换成经典套路」的自查要求 + 平台接口/安全红线 + 仅演示 ctx 字段与返回结构的
+ * 接口骨架（刻意不放可抄的完整策略示例，避免生成物千篇一律），保证代码能过 strategy_check.py。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -459,29 +460,47 @@ export async function validateStrategy(id: string): Promise<{
 
 // ── LLM 生成策略 ─────────────────────────────────────────────
 
-/** 策略参考模板：与内置策略（默认）行为完全一致，LLM 可在此之上改 */
-const REFERENCE_TEMPLATE = `# 参考模板（平台内置趋势策略的等价实现，可在此基础上改）
+/** 接口骨架：只演示 ctx 字段怎么读 / 返回值怎么写，刻意不含任何方向判断——
+ *  不放"完整可抄的策略示例"，防止 LLM 照抄示例逻辑导致生成物千篇一律。 */
+const INTERFACE_SKELETON = `# ⚠️ 以下是"接口骨架"而非策略示例：只为演示 ctx 怎么读、结果怎么写。
+# 它没有任何可抄的算法——你写的 signal() 必须严格按【用户思路】设计条件，
+# 禁止沿用骨架/任何经典策略的判断逻辑、注释与中文提示语（如"顺势""样本不足"这类泛化理由请按思路重写）。
 def signal(ctx):
-    closes = ctx["closes"]
-    n = ctx["n"]
-    if n < 6:
+    closes = ctx["closes"]      # 已收盘序列，旧→新
+    highs = ctx["highs"]
+    lows = ctx["lows"]
+    vols = ctx["vols"]
+    n = ctx["n"]                # 已收盘根数，n == len(closes)
+    atr = ctx["atr"]            # 1m ATR14
+    price = ctx["price"]        # 最新收盘价
+
+    # 只在有足够历史后再计算指标，样本不足一律 flat：
+    if n < 20:
         return {"direction": "flat", "reason": "样本不足，观望"}
-    wins = closes[n - 5:n]                 # 最近 5 根 1m 收盘价
-    price = closes[n - 1] or 1e-9
-    slope = (wins[-1] - wins[0]) / 4 / price   # 平均每根相对斜率
-    if slope >= 0.0002:
-        return {"direction": "long", "reason": f"5根斜率{slope * 1e4:.1e}/根，强势上行"}
-    if slope <= -0.0002:
-        return {"direction": "short", "reason": f"5根斜率{slope * 1e4:.1e}/根，强势下行"}
-    return {"direction": "long" if slope >= 0 else "short", "reason": "弱趋势，顺势方向"}`
-;
+
+    # ……把用户的策略思路拆成条件写在这里：决定 long / short / flat……
+    #
+    # 想收紧/放大风险：return {"direction": "long", "reason": "...", "atr_mult": 2.0, "rr": 2.0}
+    # 想精确给进出点位：return {"direction": "short", "reason": "...", "sl": price * 1.01, "tp": price * 0.99}`;
 
 function generateSystemPrompt(needImprove: boolean): string {
-  const improve = needImprove
-    ? `当前已有策略代码。结合用户给的改进方向与最近一次回测摘要，重写 signal() 使逻辑更稳健。
-   只输出最终完整 strategy.py 的代码，不要解释。`
-    : `按用户的策略思路编写 signal()，只输出完整 strategy.py 代码，不要解释。`;
-  return `你是加密货币超短线（1 分钟 K 线，USDT 永续）策略工程师。请用 Python 编写一个策略文件。
+  const job = needImprove
+    ? `## 本次任务：按改进方向优化现有策略（改进模式）
+- 以【用户思路】+【现有策略代码】为基线，先理解原代码每个判断在抓什么行情，再围绕改进方向做针对性增强；
+  保留原有识别出的核心行情特征与有效滤网。
+- 只在改进方向明确要求时才改变持仓逻辑；若方向模糊，宁可做稳健性微调（补滤网/改阈值/加防抖），
+  也不要推翻重写成另一套陌生风格。
+- 只输出最终完整 strategy.py 的代码，不要解释。`
+    : `## 本次任务：把用户思路实现成策略（新建模式）
+- 用户的策略思路是你唯一的需求来源，必须逐条完整落地：
+  思路里提到的每一个开多/开空/观望条件，都要能在代码里找到对应实现。
+- 严禁偷换成通用经典套路（均线金叉、布林、RSI、MACD、通道突破、趋势斜率等），除非用户思路里明确提到。
+- 只输出完整 strategy.py 代码，不要解释。`;
+  return `你是资深加密货币量化研究员，擅长把交易员的实战想法翻译成严谨、可回测、可实盘的
+1 分钟超短线（USDT 永续）策略。你从不套模板：先精确复刻用户的判断逻辑，再用规范、
+防御性的 Python 实现落地；输出前会自查是否忠实还原了用户的每个条件。
+
+${job}
 
 ## 平台约定（必须严格遵守，违反会被直接拒绝）
 1. 文件只能定义辅助函数与一个 \`signal(ctx)\`，不允许顶层执行代码（除常量定义）。
@@ -497,7 +516,14 @@ function generateSystemPrompt(needImprove: boolean): string {
    想完全自控进出点位：同时返回 "sl" 与 "tp"（以 ctx.price 为参照的绝对价格），引擎直接采用。
 4. 禁止：import os/sys/json/subprocess/socket/requests/urllib/pathlib/open()/eval/exec；
    只能 import math/statistics/collections/itertools/functools/operator/random/bisect 等纯计算库。
-5. 策略必须对 n 很小的早期数据安全（例如 n<5 返回 flat），并处理除零。
+5. 策略必须对 n 很小的早期数据安全（例如样本不足时返回 flat），并处理除零
+   （除以可能为 0 的均值/价差前先判 0，或加 1e-12）。
+
+## 写码前自查（心里过一遍再输出）
+- 用户思路总共提到几个条件？代码里是否每个都在？丢掉任何一个条件 = 不合格；
+- reason 里写出真实触发依据（如 "RSI=23 超卖"、动量比 1.8），拒绝空泛套话；
+- 阈值优先用相对量（ATR 倍数、近 N 根均值/波动率比、价格比例），别拍脑袋写绝对价；
+- 检查是否在不经意间用到了"下一根/未来"的数据。
 
 ## 止盈止损（默认引擎统一算，也可由策略直接给点位）
 引擎默认用 ATR×atr_mult 定止损、止损距离×rr 定止盈，策略核心任务是判方向。
@@ -507,13 +533,10 @@ function generateSystemPrompt(needImprove: boolean): string {
 若不满足会被回退成默认 ATR 距离，所以给点位时务必同时考虑 price 当前值。
 
 ## 设计建议
-- 组合 2~3 个互不冗余的条件（趋势 + 波动率滤网 + 动量确认），宁可 flat 也不硬开；
-- 阈值用相对值（与价格/ATR 比），不要写死绝对价格；
-- 不要太复杂：避免超过 80 行，避免对 120 根以内的窗口做长周期指标（周期 > 30 会失真）。
+- 组合 2~3 个互不冗余的条件（主信号 + 滤网 + 确认），宁可 flat 也不硬开；
+- 别写超过 80 行；长周期指标在窗口不足时会失真，周期别超过 30，且窗口不足时先 flat。
 
-${improve}
-
-${REFERENCE_TEMPLATE}`;
+${INTERFACE_SKELETON}`;
 }
 
 /** 从 LLM 完整输出里提取 ```python 代码块（失败则原样返回） */
@@ -547,17 +570,25 @@ export async function generateStrategy(p: {
   let user = "";
   if (improve) {
     user = `【策略名】${p.name}
-【本轮改进方向/思路】${idea}
-${p?.lastSummary ? `【最近一次回测摘要，请针对性优化】\n${p.lastSummary}` : ""}
+【用户想要改进的方向】${idea}
+${p?.lastSummary ? `【最近一次回测摘要，请针对其中的薄弱点优化】\n${p.lastSummary}` : ""}
 【现有策略代码】
 \`\`\`python
 ${p.existingCode}
 \`\`\`
-请按改进方向重写。只输出代码块。`;
+请围绕改进方向重写 signal(ctx)：先弄清原代码每个条件想抓什么，再做针对性增强；
+除非改进方向明确要求，否则不要引入与用户思路无关的新条件、不要改写成另一套经典策略风格。
+只输出代码块。`;
   } else {
     user = `【策略名】${p.name}
-【用户想要的策略思路】${idea}
-请把思路落地成 signal(ctx)。只输出代码块。`;
+【用户想要的策略思路】
+${idea}
+
+要求：
+1. 上面的思路是你唯一的需求来源，请逐条落地为代码条件——不许自行换成均线金叉/布林/RSI/MACD/通道突破/斜率顺势等思路里没提到的经典套路；
+2. 思路没给参数的环节，选一套与你逻辑自洽的参数并在注释里说明选择理由；
+3. 写完自查：思路里的每个条件是否都有对应实现，方向依据是否都写进了 reason。
+只输出代码块。`;
   }
 
   const llm = createProvider(cfg);
