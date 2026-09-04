@@ -26,8 +26,10 @@ export interface LlmProvider {
   complete(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
 }
 
-/** 统一注入中文：推理模型默认可能用英文思考，加一句约束尽量让思考与回答都走中文 */
-const LANG_HINT = "\n\n【语言】请全程使用简体中文进行思考与回答。";
+/** 轮次决策（专家/调度/拍板）英文优先：LLM 英文处理更省 token、表现更稳 */
+const LANG_HINT_EN = "\n\n【Language】Please reason and respond in English.";
+/** 报告/对话/汇总（面向中文用户）用中文 */
+const LANG_HINT_ZH = "\n\n【语言】请全程使用简体中文进行思考与回答。";
 
 function extractJson(text: string): string {
   const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -166,10 +168,10 @@ class OpenAICompatProvider implements LlmProvider {
    *   1. 只吃流式的网关：非流式 400 / 11101 → 自动改走流式；
    *   2. 推理模型：思考链占用 max_tokens，正文被截断 → 自动翻倍预算重试。
    */
-  /** 取一次完整正文（不做 JSON 提取），供 decide/complete 共用 */
-  private async raw(sys: string, user: string, opts?: DecideOpts): Promise<string> {
+  /** 取一次完整正文（不做 JSON 提取），供 decide/complete 共用。lang 控制输出语言 */
+  private async raw(sys: string, user: string, opts?: DecideOpts, lang = LANG_HINT_ZH): Promise<string> {
     const msgs: ChatMessage[] = [
-      { role: "system", content: sys + LANG_HINT },
+      { role: "system", content: sys + lang },
       { role: "user", content: user },
     ];
     const budget = this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
@@ -209,7 +211,7 @@ class OpenAICompatProvider implements LlmProvider {
   }
 
   async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
-    return extractJson(await this.raw(sys, user, opts));
+    return extractJson(await this.raw(sys, user, opts, LANG_HINT_EN));
   }
 
   async complete(sys: string, user: string, opts?: DecideOpts): Promise<string> {
@@ -224,7 +226,7 @@ class AnthropicProvider implements LlmProvider {
   get modelId() {
     return this.cfg.id;
   }
-  async complete(sys: string, user: string, _opts?: DecideOpts): Promise<string> {
+  async complete(sys: string, user: string, _opts?: DecideOpts, lang = LANG_HINT_ZH): Promise<string> {
     const base = (this.cfg.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
     const r = await fetchWithTimeout(`${base}/v1/messages`, {
       method: "POST",
@@ -237,7 +239,7 @@ class AnthropicProvider implements LlmProvider {
         model: this.cfg.model,
         max_tokens: this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: this.cfg.temperature ?? 0.2,
-        system: sys + LANG_HINT,
+        system: sys + lang,
         messages: [{ role: "user", content: user }],
       }),
     });
@@ -250,7 +252,7 @@ class AnthropicProvider implements LlmProvider {
   }
 
   async decide(sys: string, user: string, opts?: DecideOpts): Promise<string> {
-    return extractJson(await this.complete(sys, user, opts));
+    return extractJson(await this.complete(sys, user, opts, LANG_HINT_EN));
   }
 }
 
@@ -625,9 +627,9 @@ export async function* streamChat(
   signal?: AbortSignal,
   maxTokens?: number
 ): AsyncGenerator<ChatChunk> {
-  // 统一注入中文要求（推理模型默认可能英文思考）
+  // 对话面向中文用户，统一注入中文要求（推理模型默认可能英文思考）
   const msgs = messages.map((m) =>
-    m.role === "system" ? { ...m, content: m.content + LANG_HINT } : m
+    m.role === "system" ? { ...m, content: m.content + LANG_HINT_ZH } : m
   );
   if (cfg.provider === "mock") {
     yield* mockChat(msgs, tools);

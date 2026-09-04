@@ -95,6 +95,9 @@ contextBridge.exposeInMainWorld("api", {
   openFolder: (w: string) => safeInvoke("open:folder", w),
   openStore: () => safeInvoke("open:store"),
   showError: (m: string) => safeInvoke("dialog:error", m),
+  // 观测持久化（SQLite）
+  obsHistory: (limit?: number) => safeInvoke("obs:history", limit),
+  obsClear: () => safeInvoke("obs:clear"),
   // 三个监听器都返回取消函数，组件卸载时能真正解绑（否则 KeepAlive 反复挂载会重复绑定）
   onLog: (cb: (l: string) => void) => {
     const h = (_e: unknown, l: string) => cb(l);

@@ -13,6 +13,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawn, exec, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 
 // 本文件编译为 ESM（preload 才需要 CJS），因此没有内置 __dirname，自行推导。
 // ESM 是关键：主进程要用 `await import("file://...")` 加载 dist/src 下的模块，
@@ -548,6 +549,27 @@ ipcMain.handle("account:get", async (_e, profile = "demo") => {
 });
 ipcMain.handle("logs:get", () => logBuffer.slice(-500));
 
+// ── 观测历史（SQLite 持久化读取 / 清空） ─────────────────────
+ipcMain.handle("obs:history", (_e, limit?: number) => {
+  try {
+    const db = obsDbInit();
+    if (!db) return [];
+    const n = Math.min(5000, Math.max(1, Number(limit) || 500));
+    const rows = db.prepare(`SELECT payload FROM observations ORDER BY id DESC LIMIT ?`).all(n) as { payload: string }[];
+    return rows.map((r) => { try { return JSON.parse(r.payload); } catch { return null; } }).filter(Boolean).reverse();
+  } catch {
+    return [];
+  }
+});
+ipcMain.handle("obs:clear", () => {
+  try {
+    obsDbInit()?.exec(`DELETE FROM observations`);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+});
+
 // ── 独立窗口（K 线 / 报告等）──────────────────────────────────
 // 内容还是同一套 UI，靠 URL hash 路由（#/win/kline?instId=xxx）决定渲染什么，
 // 好处是窗口内所有 api（行情、报告）都能直接用，不用再传数据过去。
@@ -942,8 +964,46 @@ let portfolioAbort: AbortController | null = null;
 const pendingConfirms = new Map<string, (v: boolean) => void>();
 
 // ── 全局 LLM 调用观测（拒绝黑盒）：对话/持仓的 LLM 行为统一广播到「观测」页签 ──
+// ── 观测持久化（SQLite）：内存广播之外，把观测事件追加落盘，重启不丢 ──
+let obsDb: DatabaseSync | null = null;
+let obsDbFailed = false;
+function obsDbInit(): DatabaseSync | null {
+  if (obsDb) return obsDb;
+  if (obsDbFailed) return null;
+  try {
+    const file = path.join(AGENT_ROOT, "data", "observations.db");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const db = new DatabaseSync(file);
+    db.exec(`CREATE TABLE IF NOT EXISTS observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
+      payload TEXT NOT NULL, created_at TEXT NOT NULL
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_obs_id ON observations(id)`);
+    obsDb = db;
+    return db;
+  } catch (e) {
+    obsDbFailed = true;
+    pushLog(`观测 SQLite 初始化失败（观测降级为仅内存）: ${String(e).slice(0, 160)}`);
+    return null;
+  }
+}
+function persistObservation(e: unknown) {
+  try {
+    const db = obsDbInit();
+    if (!db) return;
+    const o = (e ?? {}) as Record<string, unknown>;
+    db.prepare(
+      `INSERT INTO observations (ts, source, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)`
+    ).run(String(o.ts ?? ""), String(o.source ?? ""), String(o.kind ?? ""), JSON.stringify(o), new Date().toISOString());
+  } catch {
+    /* 持久化失败不影响观测展示 */
+  }
+}
+
 function emitTrace(e: unknown) {
   win?.webContents.send("llm:trace", e);
+  persistObservation(e);
 }
 function traceTs(): string {
   const d = new Date();

@@ -78,10 +78,22 @@ function onEvent(ev) {
 
 function clearAll() {
   entries.value = [];
+  // 同时清空 SQLite 持久化，避免下次启动又加载回来
+  if (hasBridge) api.obsClear().catch(() => {});
 }
 
-onMounted(() => {
-  if (hasBridge) offEvent = api.onLlmTrace(onEvent);
+onMounted(async () => {
+  if (hasBridge) {
+    offEvent = api.onLlmTrace(onEvent);
+    // 先加载历史持久化观测，再接着收实时事件
+    try {
+      const hist = (await api.obsHistory(500)) || [];
+      entries.value = hist;
+      scroll();
+    } catch {
+      /* 历史加载失败不影响实时观测 */
+    }
+  }
 });
 onBeforeUnmount(() => {
   try {
