@@ -12,7 +12,7 @@ const props = defineProps({ params: { type: Object, default: () => ({}) } });
 /** K 线周期（图的间隔）：1m / 5m 等短周期到 1D */
 const BARS = ["1m", "5m", "15m", "1H", "4H", "1D"];
 /** 自动刷新固定秒级（行情要实时，不用分钟级长间隔） */
-const RELOAD_MS = 10_000;
+const RELOAD_MS = 1_000; // 1 秒（REST 轮询下限；更实时需 WebSocket 推送）
 
 /** 输入容错：BTC / btc-usdt / BTC-USDT 都能补成 BTC-USDT-SWAP */
 function normInst(s) {
@@ -32,6 +32,7 @@ const updated = ref("");
 let timer = null;
 
 async function load() {
+  if (busy.value) return; // 防重入：1 秒轮询时上一次未完成就跳过本轮，避免请求重叠
   busy.value = true;
   err.value = "";
   try {
