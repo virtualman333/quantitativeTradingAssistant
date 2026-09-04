@@ -1,7 +1,7 @@
 {
   "id": "cross_market",
-  "name": "跨市场关联分析",
-  "description": "诊断 ETH/BTC 等标的的领先-滞后关系，并回测「比价动量」策略（ETH/BTC 比价过去 N 小时变化定方向做 BTC），验证跨市场 alpha。",
-  "args": "{hours?:数字(默认2160=90天)}",
+  "name": "Cross-market Correlation Analysis",
+  "description": "Diagnose lead-lag between ETH/BTC etc., and backtest a \"ratio momentum\" strategy (ETH/BTC ratio change over past N hours decides direction, trade BTC) to validate cross-market alpha.",
+  "args": "{hours?:number(default 2160=90 days)}",
   "readOnly": true
 }

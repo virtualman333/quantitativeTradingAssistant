@@ -1,7 +1,7 @@
 {
   "id": "report",
-  "name": "绩效报告",
-  "description": "从 ledger/trades.csv + logs/rounds.jsonl 确定性统计核心指标（胜率/盈亏比/回撤/期望值），生成日报或周报。",
-  "args": "{daily?:'2026-09-01', weeklyEnd?:'2026-09-06'(该日所在周), json?:布尔机读}",
+  "name": "Performance Report",
+  "description": "Deterministically compute core metrics (win rate/profit factor/drawdown/expectancy) from ledger/trades.csv + logs/rounds.jsonl; generate a daily or weekly report.",
+  "args": "{daily?:'2026-09-01', weeklyEnd?:'2026-09-06'(week containing this day), json?:boolean machine-readable}",
   "readOnly": true
 }

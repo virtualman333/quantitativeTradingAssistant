@@ -188,7 +188,7 @@ def analyze_bar(inst: str, bar: str) -> dict:
     live = rows[-1] if rows and rows[-1][6] == 0 else None
     closed = [r for r in rows if r[6] == 1]
     if len(closed) < 60:
-        raise RuntimeError(f"{inst} {bar}: 已收盘K线不足 ({len(closed)})")
+        raise RuntimeError(f"{inst} {bar}: insufficient closed candles ({len(closed)})")
 
     o = [r[1] for r in closed]
     h = [r[2] for r in closed]
@@ -373,21 +373,21 @@ def digest(inst: str, item: dict) -> str:
     fr_s = f"{fr:+.4f}%" if isinstance(fr, (int, float)) else "?"
 
     parts = [
-        f"{inst} 价{last_s}({chg_s})",
-        f"共振{conf.get('score', '?')}",
+        f"{inst} px{last_s}({chg_s})",
+        f"score{conf.get('score', '?')}",
         f"4H:{trend('4H')}/1H:{trend('1H')}/15m:{trend('15m')}",
         f"RSI(1H){rsi1h if isinstance(rsi1h, (int, float)) else '?'}",
-        f"量比{vr if isinstance(vr, (int, float)) else '?'}",
+        f"volR{vr if isinstance(vr, (int, float)) else '?'}",
         f"ATR%{atrp if isinstance(atrp, (int, float)) else '?'}",
-        f"分位{rp}",
-        f"费{fr_s}",
+        f"range{rp}",
+        f"fund{fr_s}",
     ]
     if spec:
         parts.append(
-            f"spec(面值{spec.get('ctVal')} 步长{spec.get('lotSz')} 最小{spec.get('minSz')} 价格步{spec.get('tickSz')})"
+            f"spec(ctVal{spec.get('ctVal')} lotSz{spec.get('lotSz')} minSz{spec.get('minSz')} tickSz{spec.get('tickSz')})"
         )
     if item.get("error"):
-        parts.append(f"错误:{item['error'][:60]}")
+        parts.append(f"err:{item['error'][:60]}")
     return " | ".join(parts)
 
 
@@ -466,7 +466,7 @@ def scan(insts: list[str], specs: dict[str, dict]) -> dict:
                 results[i] = item
     # 保持 insts 原始顺序输出
     for inst in insts:
-        item = results.get(inst, {"error": "扫描失败"})
+        item = results.get(inst, {"error": "scan failed"})
         out["instruments"][inst] = item
         out["digest"].append(digest(inst, item))
     return out

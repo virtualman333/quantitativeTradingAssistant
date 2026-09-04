@@ -13,12 +13,12 @@ import { isSkillEnabled } from "../store.js";
 export const runSkillTool: Tool = {
   name: "run_skill",
   description:
-    "调用本项目已沉淀的 Skill：market_scan(行情扫描)、news_fetch(消息采集)、news_verify(双源验证)、news_log(消息入库)、order_id(生成合规clOrdId)、read_charter(查交易章程)。",
+    "Call a project Skill: market_scan(market scan), news_fetch(news collection), news_verify(dual-source verification), news_log(persist news), order_id(generate compliant clOrdId), read_charter(read trading charter).",
   parameters: {
     type: "object",
     properties: {
       id: { type: "string", description: "Skill id" },
-      args: { type: "object", description: "Skill 参数对象" },
+      args: { type: "object", description: "Skill args object" },
     },
     required: ["id"],
   },
@@ -47,7 +47,7 @@ export const runSkillTool: Tool = {
 /** 读账户与最近一轮决策 */
 export const getStatusTool: Tool = {
   name: "get_status",
-  description: "读取账户权益、持仓、最近一轮决策摘要与待人工确认项。",
+  description: "Read account equity, positions, latest round decision summary and pending approval items.",
   parameters: { type: "object", properties: {}, required: [] },
   run: async () => {
     const stateDir = path.join(PROJECT_ROOT, "state");
@@ -93,12 +93,12 @@ export const getStatusTool: Tool = {
 /** 触发一轮自主决策（默认演练，绝不直接真下单） */
 export const runRoundTool: Tool = {
   name: "run_round",
-  description: "触发一轮完整决策流程（collect→专家→裁决→执行→归档）。默认真实下单；演练需显式 dryRun=true 并二次确认。",
+  description: "Trigger a full decision round (collect→experts→adjudge→execute→archive). Defaults to real orders; for dry-run set dryRun=true with a second confirmation.",
   danger: true,
   parameters: {
     type: "object",
     properties: {
-      dryRun: { type: "boolean", description: "true=演练，false=真实下单（默认）" },
+      dryRun: { type: "boolean", description: "true=dry-run, false=real orders (default)" },
     },
     required: [],
   },
@@ -172,10 +172,10 @@ export const runRoundTool: Tool = {
 /** 列出最近轮次文件，便于复盘 */
 export const listRoundsTool: Tool = {
   name: "list_rounds",
-  description: "列出 state/ 下最近若干轮输入文件与归档日志尾部。",
+  description: "List the most recent round input files under state/ and the tail of the archive log.",
   parameters: {
     type: "object",
-    properties: { limit: { type: "number", description: "条数，默认 10" } },
+    properties: { limit: { type: "number", description: "count, default 10" } },
     required: [],
   },
   run: async (a) => {

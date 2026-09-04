@@ -1,7 +1,7 @@
 {
   "id": "deviation_stats",
-  "name": "偏离绩效统计",
-  "description": "扫描 logs/rounds.jsonl 的 deviations[]，统计基准单与裁量单的胜率/盈亏比/期望值，识别被反复偏离的基准条目。",
-  "args": "{list?:布尔逐条列出, round?:'R000004'指定轮次, json?:布尔机读输出}",
+  "name": "Deviation Performance Stats",
+  "description": "Scan deviations[] in logs/rounds.jsonl, compute win rate/profit factor/expectancy of baseline vs discretionary trades, identify repeatedly-deviated baseline items.",
+  "args": "{list?:boolean list items, round?:'R000004' specific round, json?:boolean machine-readable}",
   "readOnly": true
 }

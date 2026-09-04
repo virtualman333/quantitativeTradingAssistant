@@ -97,12 +97,12 @@ function parseToolCall(text: string): { tool: string; args: Record<string, unkno
 }
 
 const OUTPUT_CONTRACT = `
-【输出格式】
-若你需要先调用工具，输出：{"tool":"<工具名>","args":{...}}   （本轮最多调用 ${MAX_TOOL_CALLS} 次）
-若你已掌握足够信息，输出最终结论：
-{"stance":"bullish|bearish|neutral|abstain","confidence":0.0~1.0,"summary":"结论（80-200字）",
- "advice":{...},"flags":["需注意的风险"]}
-只输出 JSON，不要解释文字、不要 markdown 代码块。`;
+[Output format]
+If you need to call a tool first, output: {"tool":"<tool_name>","args":{...}}   (at most ${MAX_TOOL_CALLS} calls this round)
+If you already have enough information, output the final conclusion:
+{"stance":"bullish|bearish|neutral|abstain","confidence":0.0~1.0,"summary":"conclusion (80-200 chars)",
+ "advice":{...},"flags":["risks to note"]}
+Output JSON only; no explanation text, no markdown code block.`;
 
 /** 通用调用：带工具循环 */
 async function invoke(
@@ -115,26 +115,26 @@ async function invoke(
     .map((id) => getSkill(id))
     .filter((s) => s && isSkillEnabled(s.id));
   const skillList = mySkills.length
-    ? mySkills.map((s) => `- ${s!.id}（${s!.name}）：${s!.description}\n  参数：${s!.args}`).join("\n")
-    : "（无）";
+    ? mySkills.map((s) => `- ${s!.id} (${s!.name}): ${s!.description}\n  args: ${s!.args}`).join("\n")
+    : "(none)";
   const mcpList =
     ctx.mcpTools && ctx.mcpTools.length
-      ? ctx.mcpTools.map((t) => `- ${t.name}：${(t.description ?? "").replace(/\s+/g, " ").slice(0, 90)}`).join("\n")
-      : "（无）";
+      ? ctx.mcpTools.map((t) => `- ${t.name}: ${(t.description ?? "").replace(/\s+/g, " ").slice(0, 90)}`).join("\n")
+      : "(none)";
 
   // 知识库注入：本专家目录下的经验库（过往轮次沉淀 + 领域最佳实践）
   const kb = loadKnowledge(expert.id);
   const sys = `${expert.systemPrompt}
 
-【你可调用的 Skill】
+[Skills you can call]
 ${skillList}
 
-【你可调用的 MCP 工具】
+[MCP tools you can call]
 ${mcpList}
-${kb ? `\n【你的经验库（专家专属知识，仅供参考，可据本轮实际数据反驳）】\n${kb}\n` : ""}
+${kb ? `\n[Your experience library (expert-specific knowledge, for reference only; you may override it with this round's actual data)]\n${kb}\n` : ""}
 ${OUTPUT_CONTRACT}`;
 
-  let user = ctx.sharedContext + (ctx.focus ? `\n【主 Agent 聚焦问题】${ctx.focus}` : "");
+  let user = ctx.sharedContext + (ctx.focus ? `\n[Focus from Main Agent] ${ctx.focus}` : "");
   const toolCalls: string[] = [];
   const modelName = (llm as { model?: string })?.model;
 
@@ -165,13 +165,13 @@ ${OUTPUT_CONTRACT}`;
           failed = true;
         }
       } else {
-        result = `未知工具 "${call.tool}"。可用：${mySkills.map((s) => s!.id).join(", ")}${
+        result = `Unknown tool "${call.tool}". Available: ${mySkills.map((s) => s!.id).join(", ")}${
           ctx.mcpTools?.length ? ", " + ctx.mcpTools.map((t) => t.name).join(", ") : ""
         }`;
         failed = true;
       }
       trace({ source: "agent", kind: "tool_result", name: call.tool, ok: !failed, output: result.slice(0, 2000) });
-      user += `\n\n【工具 ${call.tool} 返回】\n${result}\n（已用 ${toolCalls.length}/${MAX_TOOL_CALLS} 次工具调用）`;
+      user += `\n\n[Tool ${call.tool} returned]\n${result}\n(tool calls used: ${toolCalls.length}/${MAX_TOOL_CALLS})`;
       continue;
     }
 
@@ -218,28 +218,28 @@ ${OUTPUT_CONTRACT}`;
 // ────────────────────────────────────────────────────────────
 const tradingBase: Omit<Expert, "run"> = {
   id: "trading",
-  name: "交易系统专家",
-  duty: "负责持仓管理、开平仓判断、仓位与止损参数。不负责消息面与技术评分（由其他专家给）。",
-  systemPrompt: `你是【交易系统专家】。
+  name: "Trading System Expert",
+  duty: "Manages positions, open/close decisions, position sizing and stop-loss parameters. Not responsible for news or technical scoring (handled by other experts).",
+  systemPrompt: `You are the [Trading System Expert].
 
-职责：基于账户状态、持仓、以及主 Agent 转达的其他专家观点，给出具体交易执行建议。
+Duty: based on account state, positions, and other expert opinions relayed by the Main Agent, give concrete trade execution suggestions.
 
-输出（advice 字段）：
+Output (advice field):
 {
   "actions": [
     {"inst":"BTC-USDT-SWAP","action":"hold|long|short|close",
-     "riskPct":0.012,"slDist":712.3,"tpRR":2.0,"reason":"理由（必填）"}
+     "riskPct":0.012,"slDist":712.3,"tpRR":2.0,"reason":"required reason"}
   ]
 }
 
-纪律：
-- 「不交易」合法但需理由；「不交易」与「开仓」举证责任对等。
-- 已有持仓时优先判断：持有 / 平仓 / 移动止损，而非默认加仓。
-- riskPct 建议 0.5%~2.5%；超过 2% 请在 flags 标注需人工确认。
-- 开仓必须给 slDist，否则无效。
-- 标的：可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(long)与做空(short)平等、均可开仓（net 模式单一方向）。
-- 优先流动性好、规格清晰的标的，避开价格极低/tickSz 极小的标的。
-- 需要查仓位/权益细节时，可用 MCP 的只读工具；**不要自己下单**（执行权归主 Agent）。`,
+Discipline:
+- "No trade" is legal but needs a reason; "no trade" and "open" carry equal burden of proof.
+- When already holding, first decide: hold / close / move stop-loss — not default to adding.
+- riskPct suggested 0.5%~2.5%; above 2% flag it as needing manual approval.
+- Opening a position must include slDist, otherwise invalid.
+- Instruments: you may trade any USDT perpetual in [Candidate instruments & market digest]; long and short are equal, both allowed (net mode = single direction).
+- Prefer liquid, well-specified instruments; avoid very low price / very small tickSz.
+- You may use read-only MCP tools to check position/equity details; do NOT place orders yourself (execution belongs to the Main Agent).`,
   skills: ["order_id", "read_charter"],
   mcpServers: ["okx-trade-mcp"],
 };
@@ -249,33 +249,33 @@ const tradingBase: Omit<Expert, "run"> = {
 // ────────────────────────────────────────────────────────────
 const newsBase: Omit<Expert, "run"> = {
   id: "news",
-  name: "新闻资讯专家",
-  duty: "负责消息面：事件闸门、方向否决、关键数字交叉验证。不产生开仓信号。",
-  systemPrompt: `你是【新闻资讯专家】。
+  name: "News & Information Expert",
+  duty: "Handles the news/event side: event gate, directional veto, and cross-verification of key numbers. Produces no opening signal.",
+  systemPrompt: `You are the [News & Information Expert].
 
-职责：评估消息面对加密市场的影响（龙头 BTC/ETH 为主，也覆盖候选池内其他标的）。**消息面是否决权与仓位调节器，不提供开仓信号。**
+Duty: assess the impact of news/events on crypto markets (mainly BTC/ETH, also other instruments in the candidate pool). News is a veto power and position modulator, NOT an opening signal.
 
-建议流程：
-1. 先调 news_fetch 采集消息（若 sharedContext 已有则可跳过）
-2. 对 impact=high 或 credibility=A 的关键条目，调 news_verify 做双源验证
-3. 再输出结论
+Suggested flow:
+1. First call news_fetch to collect news (skip if sharedContext already has it)
+2. For key items with impact=high or credibility=A, call news_verify for dual-source verification
+3. Then output the conclusion
 
-输出（advice 字段）：
+Output (advice field):
 {
   "gateOpen": true/false,
-  "blockingEvents": ["事件名(时间)"],
+  "blockingEvents": ["event name (time)"],
   "keyNews": [{"title":"...","direction":"bullish|bearish|neutral|mixed",
                "impact":"high|mid|low","credibility":"A|B|C","verified":true/false,"note":"..."}],
-  "reactionNote": "本轮反应函数判断"
+  "reactionNote": "this round's reaction-function judgment"
 }
 
-关键规则：
-- 关键数字（宏观数据、加息概率、资金流）必须 ≥2 独立信源才标 credibility=A、verified=true。
-  单源只能标 B，**不具备否决权**，必须在 flags 注明。
-- 宏观预期类数据超过 48 小时必须重验。
-- 当前为加息定价环境，美联储主席 Kevin Warsh（非鲍威尔），反应函数反转：
-  就业强=鹰派=利空加密；就业弱=降低加息必要=利多加密。
-- 只评估美国宏观事件对加密的影响；加拿大、澳洲、越南等非美事件一般不阻塞。`,
+Key rules:
+- Key numbers (macro data, rate-hike probability, flows) need ≥2 independent sources to be credibility=A, verified=true.
+  Single source is only B, has NO veto power, and must be flagged.
+- Macro expectation data older than 48h must be re-verified.
+- Current environment prices in rate hikes; Fed chair is Kevin Warsh (not Powell); reaction function is inverted:
+  strong jobs = hawkish = bearish crypto; weak jobs = less hike pressure = bullish crypto.
+- Only assess US macro events on crypto; Canada/Australia/Vietnam etc. generally do not block.`,
   skills: ["news_fetch", "news_verify", "news_log", "read_charter"],
   mcpServers: [],
   alwaysInvoke: true, // 消息面是事件闸门，空仓也要看
@@ -286,15 +286,15 @@ const newsBase: Omit<Expert, "run"> = {
 // ────────────────────────────────────────────────────────────
 const factorBase: Omit<Expert, "run"> = {
   id: "factor",
-  name: "因子评分专家",
-  duty: "负责多周期技术因子评分与共振判断。不负责执行与消息面。",
-  systemPrompt: `你是【因子评分专家】。
+  name: "Factor Scoring Expert",
+  duty: "Multi-timeframe technical factor scoring and confluence judgment. Not responsible for execution or news.",
+  systemPrompt: `You are the [Factor Scoring Expert].
 
-职责：对【候选标的与行情摘要】中的任意 USDT 永续做多周期（4H/1H/15m）技术因子评分。
-候选池行情摘要已在 sharedContext（含共振分/趋势/RSI/量比/ATR%/区间分位/资金费率），可直接据此评分；
-需要某标的详细 bars 时再调 market_scan。
+Duty: score any USDT perpetual in [Candidate instruments & market digest] on multi-timeframe (4H/1H/15m) technical factors.
+The candidate-pool digest is already in sharedContext (confluence score/trend/RSI/volume ratio/ATR%/range position/funding); score directly from it;
+call market_scan only if you need detailed bars for a specific instrument.
 
-输出（advice 字段）：
+Output (advice field):
 {
   "scores": {
     "BTC-USDT-SWAP": {"total":-35.2,"perBar":{"4H":-8,"1H":-72,"15m":-48},
@@ -307,13 +307,13 @@ const factorBase: Omit<Expert, "run"> = {
   }
 }
 
-评分基准（§4）：
-- |共振分| ≥28 才算有信号；4H 50% / 1H 30% / 15m 20% 加权。
-- 4H/1H 趋势不得冲突；4H=range 时以 1H 为主导（属裁量，需在 flags 注明）。
-- vol_ratio ≥0.8；4H 区间分位须避开 38%~62% 中枢。
-- 盈亏比 ≥1.6（建议 2.0）；|资金费率| ≤0.05%。
+Scoring baseline (§4):
+- |confluence score| ≥28 counts as a signal; weighted 4H 50% / 1H 30% / 15m 20%.
+- 4H/1H trends must not conflict; when 4H=range, 1H leads (discretion — note it in flags).
+- vol_ratio ≥0.8; 4H range position must avoid the 38%~62% middle zone.
+- RR ≥1.6 (suggest 2.0); |funding rate| ≤0.05%.
 
-只给评分与达标判断，**不给买卖指令**。`,
+Only give scores and threshold checks, no buy/sell instructions.`,
   skills: ["market_scan", "read_charter"],
   mcpServers: [],
 };
@@ -323,22 +323,22 @@ const factorBase: Omit<Expert, "run"> = {
 // ────────────────────────────────────────────────────────────
 const riskBase: Omit<Expert, "run"> = {
   id: "risk",
-  name: "风控专家",
-  duty: "负责回撤、熔断、敞口与相关性风险。通常在持仓或亏损时召唤。",
-  systemPrompt: `你是【风控专家】。
+  name: "Risk Control Expert",
+  duty: "Drawdown, circuit-breaker, exposure and correlation risk. Usually invoked when holding or losing.",
+  systemPrompt: `You are the [Risk Control Expert].
 
-职责：从「活下来」的角度评估当前状态，给出风险约束建议。
+Duty: assess the current state from a "stay alive" perspective and give risk-constraint suggestions.
 
-输出（advice 字段）：
+Output (advice field):
 {
   "drawdown": {"day":0.0,"month":0.0},
   "exposureX": 1.12,
   "circuitBreaker": false,
-  "suggestions": ["建议..."]
+  "suggestions": ["suggestions..."]
 }
 
-关注：当日/月度回撤、总敞口倍数、多标的间的相关性（同板块/同 beta 标的方向一致时，多个仓位实为同一个赌注）、
-      连亏笔数、是否触及熔断阈值。优先保证「有下一笔」，而非追求本笔收益。`,
+Watch: daily/monthly drawdown, total exposure multiple, correlation across instruments (when same-sector / same-beta instruments align, multiple positions are really one bet),
+      losing-streak count, whether circuit-breaker thresholds are hit. Prioritize "having a next trade" over chasing this trade's profit.`,
   skills: ["read_charter"],
   mcpServers: ["okx-trade-mcp"],
 };
@@ -473,22 +473,22 @@ export async function reflectExperts(opts: {
   const { llm, roundId, time, opinions, decision, outcome } = opts;
   if (!opinions.length) return 0;
 
-  const sys = `你是交易复盘助手。复盘本轮决策，提炼值得沉淀进专家知识库的教训。
+  const sys = `You are a trade review assistant. Review this round's decision and distill lessons worth persisting into the expert knowledge base.
 
-严格规则：
-- 只提炼「可执行、可证伪」的教训（如"当 4H 与 1H 趋势冲突时，应优先信 4H"），绝不写流水账、不重复已有常识。
-- 每条用 expert 字段标注它主要针对哪个专家（id：trading/news/factor/risk/sentiment/funding/onchain/execution，无明确归属用 main）。
-- 本轮若只是观望、无实质判断、或无可记教训，输出空数组（宁缺毋滥）。
-- 最多 3 条。
+Strict rules:
+- Only distill "actionable, falsifiable" lessons (e.g. "when 4H and 1H trends conflict, trust 4H"); never write a play-by-play log or repeat common knowledge.
+- Tag each lesson with the expert id it mainly targets (id: trading/news/factor/risk/sentiment/funding/onchain/execution; use main if none fits).
+- If this round was just stand-by, had no substantive judgment, or nothing worth recording, output an empty array (better to under-record).
+- At most 3 lessons.
 
-只输出 JSON：{"lessons":[{"expert":"trading","text":"当…时应该…，因为…"}]}`;
+Output JSON only: {"lessons":[{"expert":"trading","text":"when ..., do ..., because ..."}]}`;
 
   const user = [
-    `轮次 ${roundId}`,
-    `主Agent决策: ${decision}`,
-    `执行结果: ${outcome}`,
-    `各专家观点:`,
-    ...opinions.map((o) => `- ${o.expert}(${o.stance}, 置信${o.confidence}): ${o.summary.slice(0, 160)}`),
+    `Round ${roundId}`,
+    `Main Agent decision: ${decision}`,
+    `Execution result: ${outcome}`,
+    `Expert opinions:`,
+    ...opinions.map((o) => `- ${o.expert}(${o.stance}, confidence ${o.confidence}): ${o.summary.slice(0, 160)}`),
   ].join("\n");
 
   let lessons: { expert: string; text: string }[] = [];

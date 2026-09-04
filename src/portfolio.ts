@@ -25,35 +25,35 @@ export type PortfolioEvent =
   | { type: "reasoning"; text: string };
 
 /** 统一 schema 的人/LLM 可读描述（塞进 system prompt） */
-const SCHEMA_SPEC = `统一 schema（LLM 输出必须贴合）：
+const SCHEMA_SPEC = `Unified schema (the LLM output must match):
 - accounts[]: { exchange, equityUsd, availableUsd, marginUsedUsd, totalUplUsd }
-    equityUsd=账户总权益(美元); availableUsd=可用; marginUsedUsd=已用保证金; totalUplUsd=未实现盈亏合计
+    equityUsd=account total equity (USD); availableUsd=available; marginUsedUsd=used margin; totalUplUsd=total unrealized PnL
 - positions[]: { exchange, instId, market, side, size, entryPrice, markPrice, notionalUsd, upl, uplRatio, leverage, liqPrice, marginMode }
-    market: "swap"|"spot"|"other"; side: "long"|"short"|"net"; uplRatio 是 0~1 的小数(如 0.012 表示 1.2%)
+    market: "swap"|"spot"|"other"; side: "long"|"short"|"net"; uplRatio is a 0~1 decimal (e.g. 0.012 means 1.2%)
 - orders[]: { exchange, instId, ordType, side, size, slTrigger, tpTrigger, state }
-    ordType=订单类型(如 oco/limit); side: "buy"|"sell"|"long"|"short"|""; slTrigger/tpTrigger=止损/止盈触发价
-- exchanges: 所有已连接交易所的 server id 列表
-- generatedAt: 当前 ISO 时间字符串`;
+    ordType=order type (e.g. oco/limit); side: "buy"|"sell"|"long"|"short"|""; slTrigger/tpTrigger=stop-loss/take-profit trigger price
+- exchanges: list of all connected exchange server ids
+- generatedAt: current ISO time string`;
 
-const SYSTEM_PROMPT = `你是多交易所持仓汇总助手，运行在用户本机。
-已连接以下交易所（每个是一个 MCP server），并挂载了它们的只读工具：
+const SYSTEM_PROMPT = `You are a multi-exchange portfolio summary assistant running on the user's local machine.
+Connected exchanges (each is an MCP server) and their read-only tools:
 {TOOLS}
 
-任务：依次调用各交易所的「持仓 / 账户 / 挂单」只读工具，把数据归并成统一的 portfolio schema。
-注意：不同交易所工具名与返回字段不同，由你负责读懂并把它们映射到统一 schema；无法获取的数值填 null，不要编造。
+Task: call each exchange's read-only "positions / account / orders" tools in turn and merge the data into a unified portfolio schema.
+Note: different exchanges have different tool names and return fields; you are responsible for reading and mapping them to the unified schema; fill null when a value is unavailable — never fabricate.
 
-统一 schema 如下：
+Unified schema:
 {SCHEMA}
 
-输出要求（务必遵守）：
-1. 用如下 JSON 代码块给出结构化结果：
+Output requirements (must follow):
+1. Return the structured result in a JSON code block:
 \`\`\`json
-{ "schema": { "exchanges":[...], "accounts":[...], "positions":[...], "orders":[...], "generatedAt":"ISO时间" }, "notes":"中文解读与风险提示" }
+{ "schema": { "exchanges":[...], "accounts":[...], "positions":[...], "orders":[...], "generatedAt":"ISO time" }, "notes":"Chinese interpretation & risk notes" }
 \`\`\`
-2. JSON 代码块之外，不要再写多余内容（notes 字段已承载文字解读）。
-3. 没有持仓/挂单的交易所也要出现在 accounts（权益可为 null）。
-4. exchange 一律用 MCP server 的 id（如 okx-trade-mcp）。
-5. 工具返回为空就如实写空数组；绝不以自己猜测填充数字。`;
+2. Besides the JSON code block, output nothing else (the notes field carries the text interpretation).
+3. Exchanges with no positions/orders must still appear in accounts (equity may be null).
+4. Use the MCP server id as exchange (e.g. okx-trade-mcp).
+5. If a tool returns empty, write an empty array; never fill in numbers from your own guess.`;
 
 const MAX_ROUNDS = 6;
 const TRUNCATE = 12_000;
@@ -132,7 +132,7 @@ export async function summarizePortfolio(opts: SummarizeOptions): Promise<void> 
 
   const msgs: ChatMessage[] = [
     { role: "system", content: sysText },
-    { role: "user", content: "请汇总我所有已连接交易所的持仓、账户与挂单，按统一 schema 输出。" },
+    { role: "user", content: "Summarize positions, accounts and orders across all my connected exchanges and output per the unified schema." },
   ];
 
   try {

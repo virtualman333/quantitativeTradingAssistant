@@ -33,18 +33,18 @@ export interface OrchestratorResult {
 
 /** 第一步：让主 Agent 决定召唤哪些专家 */
 async function planExperts(llm: LlmProvider, ctx: string): Promise<string[]> {
-  const sys = `你是主 Agent 的调度模块。根据本轮情况，决定召唤哪些专家。
+  const sys = `You are the dispatcher module of the Main Agent. Decide which experts to invoke this round.
 
-可选专家：
-${EXPERTS.map((e) => `- ${e.id}（${e.name}）：${e.duty}`).join("\n")}
+Available experts:
+${EXPERTS.map((e) => `- ${e.id} (${e.name}): ${e.duty}`).join("\n")}
 
-规则：
-- 只要有持仓或有开仓可能，通常召唤 trading + factor。
-- 临近重大事件、或上一轮消息面有影响时召唤 news。
-- 持仓亏损、回撤扩大、或敞口较高时召唤 risk。
-- 没必要时不要召唤全部（省成本、降噪声）。
+Rules:
+- When holding or likely to open, usually invoke trading + factor.
+- When near a major event or last round's news had impact, invoke news.
+- When holding at a loss, drawdown widening, or high exposure, invoke risk.
+- Do not invoke all unless necessary (save cost, reduce noise).
 
-【输出】只输出 JSON：{"experts": ["trading","factor"]}`;
+[Output] Output JSON only: {"experts": ["trading","factor"]}`;
 
   const raw = await llm.decide(sys, ctx);
   try {
@@ -63,21 +63,21 @@ async function adjudicate(
   ctx: string,
   opinions: ExpertOpinion[]
 ): Promise<Decision | null> {
-  const sys = `你是主 Agent（最终决策者）。各专家已给出观点，你要综合权衡后拍板。
+  const sys = `You are the Main Agent (final decision-maker). The experts have given opinions; synthesize and make the final call.
 
-【你的权力与责任】
-- 专家观点只是输入，你可以不采纳任何一个，但必须在 summary 里说明理由。
-- 冲突时（如新闻利多 vs 因子看空），判断谁更可信：
-  通常「已双源验证(A级)的消息」>「技术因子」>「单源(B级)消息」。
-- 已有持仓时，默认倾向「持有并让 OCO 执行」，除非有充分理由平仓。
-- 「不交易」合法，但需理由。
+[Your powers & duties]
+- Expert opinions are only input; you may reject any, but must explain in summary.
+- On conflicts (e.g. bullish news vs bearish factor), judge who is more credible:
+  usually "dual-source-verified (A-grade) news" > "technical factor" > "single-source (B-grade) news".
+- When already holding, default to "hold and let OCO execute" unless there is strong reason to close.
+- "No trade" is legal but needs a reason.
 
-【必须输出】只输出 JSON，不要解释文字、不要 markdown：
+[Must output] Output JSON only, no explanation text, no markdown:
 {
   "decision": "OPEN" | "HOLD" | "CLOSE" | "STANDBY",
   "riskTier": "BASE" | "AGG" | "DEF",
-  "summary": "决策摘要与理由（100-300字，说明如何处理专家分歧）",
-  "conflicts": ["专家之间的冲突点"],
+  "summary": "decision summary & rationale (100-300 chars, explain how expert disagreements were resolved)",
+  "conflicts": ["conflict points between experts"],
   "intents": [
     {"inst":"BTC-USDT-SWAP","action":"hold|long|short|close",
      "riskPct":0.012,"slDist":712.3,"tpRR":2.0,"reason":"...",
@@ -87,20 +87,20 @@ async function adjudicate(
   "approvalReason": ""
 }
 
-【约束】
-- riskPct 不超过 0.025；单笔 >0.02 时把 needsApproval 设为 true 并写 approvalReason。
-- 开仓必须给 slDist。
-- 偏离章程基准时 deviations 五项必填（尤其 falsifier 可证伪预判）。
-- 可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(action=long)与做空(action=short)平等、均可开仓（net 模式单一方向）。
-- 优先流动性好、规格清晰的标的，避开价格极低/价格步长极小的标的。`;
+[Constraints]
+- riskPct no more than 0.025; single trade >0.02 → set needsApproval=true and write approvalReason.
+- Opening a position must include slDist.
+- Deviating from a charter baseline requires all five deviation fields (especially the falsifiable falsifier).
+- You may trade any USDT perpetual in [Candidate instruments & market digest]; long (action=long) and short (action=short) are equal, both allowed (net mode = single direction).
+- Prefer liquid, well-specified instruments; avoid very low price / very small tickSz.`;
 
   const user = [
     ctx,
     ``,
-    `【各专家观点】`,
+    `[Expert opinions]`,
     ...opinions.map(
       (o) =>
-        `── ${o.expert}（${o.stance}, 置信${o.confidence}）\n${o.summary}\nadvice: ${JSON.stringify(o.advice).slice(0, 1500)}${o.flags?.length ? `\nflags: ${o.flags.join("; ")}` : ""}`
+        `── ${o.expert}(${o.stance}, confidence ${o.confidence})\n${o.summary}\nadvice: ${JSON.stringify(o.advice).slice(0, 1500)}${o.flags?.length ? `\nflags: ${o.flags.join("; ")}` : ""}`
     ),
   ].join("\n");
 
@@ -145,9 +145,9 @@ export async function orchestrate(
         expert: exps[i].id,
         stance: "abstain",
         confidence: 0,
-        summary: `调用失败: ${String(r.reason).slice(0, 150)}`,
+        summary: `call failed: ${String(r.reason).slice(0, 150)}`,
         advice: {},
-        flags: ["专家调用失败"],
+        flags: ["expert call failed"],
       });
     }
   });

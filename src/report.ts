@@ -38,52 +38,52 @@ export interface RoundReportPayload {
   exec_results?: string[];
 }
 
-const SYS = `你是专业的量化交易复盘报告生成器。你的任务是把给定的「本轮交易数据」整理成结构清晰、视觉美观的 HTML 报告。
+const SYS = `You are a professional quantitative-trading review report generator. Your task is to organize the given "this round's trading data" into a well-structured, visually polished HTML report.
 
-【输出格式——必须严格遵守】
-输出多个 HTML 块，每块之间用一行「分节标记」分隔：
+[Output format — must follow strictly]
+Output multiple HTML blocks, each separated by one "section marker" line:
 
 <!-- REPORT:summary -->
-<!doctype html>...汇总页完整 HTML...</html>
+<!doctype html>...summary page full HTML...</html>
 
 <!-- REPORT:expert trading -->
-<!doctype html>...trading 角色页完整 HTML...</html>
+<!doctype html>...trading role page full HTML...</html>
 
 <!-- REPORT:expert news -->
 ...
 
-规则：
-1. 每个块都必须是完整、可独立打开的 HTML 文档（含 <!doctype html>、<head> 内联 <style>、<body>）。
-2. 分节标记独占一行，格式严格为 <!-- REPORT:summary --> 或 <!-- REPORT:expert <角色id> -->。
-3. 角色块的数量与顺序必须和输入里的 experts 数组完全一致，角色 id 原样使用。
-4. 除 HTML 块和分节标记外，不要输出任何其他内容（不要解释、不要代码围栏、不要多余空行）。
+Rules:
+1. Each block must be a complete, standalone HTML document (with <!doctype html>, inline <style> in <head>, and <body>).
+2. The section marker is on its own line, strictly in the form <!-- REPORT:summary --> or <!-- REPORT:expert <role-id> -->.
+3. The number and order of role blocks must exactly match the experts array in the input, using the role id verbatim.
+4. Besides the HTML blocks and section markers, output nothing else (no explanation, no code fences, no extra blank lines).
 
-【视觉规范】
-- 深色交易终端风格：背景 #0f1420，卡片 #161c2a，边框 #262f42，正文 #d8e0ee，次要 #8892a6。
-- 强调色：涨/看多/开仓/基准=#2ecc71，跌/看空/平仓/防守=#ff5f56，中性/观望=#8892a6，蓝=#4da3ff，黄/进攻=#ffb454。
-- 卡片分区、网格排指标、表格排持仓与偏差、彩色圆角标签(tag)标决策类型/风险档/立场。内联样式，不依赖外部资源。
+[Visual spec]
+- Dark trading-terminal style: background #0f1420, card #161c2a, border #262f42, body #d8e0ee, secondary #8892a6.
+- Accent colors: up/bullish/open/baseline=#2ecc71, down/bearish/close/defensive=#ff5f56, neutral/stand-by=#8892a6, blue=#4da3ff, yellow/aggressive=#ffb454.
+- Card sections, grid layout for metrics, tables for positions & deviations, colored rounded tags for decision type / risk tier / stance. Inline styles only, no external resources.
 
-【汇总页 summary 必须按顺序包含】
-1. 页头：轮次、时间、环境。
-2. 账户状态：总权益、可用保证金。
-3. 持仓明细：表格（标的/方向/数量/开仓价/现价/杠杆/浮盈），无则写「无持仓」。
-4. 本轮操作：列出 actions，无则写「观望」。
-5. 决策要点：决策类型、风险档用彩色标签，然后 decision 全文。
-6. 专家冲突(conflicts)：若有。
-7. 执行结果(exec_results)：若有。
-8. 各角色观点：每角色一行（立场标签 + 摘要），并链接到 <角色id>.html。
-9. 裁量偏离(deviations)：若有，表格列出（基准/实际/理由/可证伪预判/风险变化）。
-10. 行情快照(market_summary)：折叠展示。
+[Summary page must contain, in order]
+1. Header: round, time, environment.
+2. Account state: total equity, available margin.
+3. Position details: table (instrument / direction / size / entry / mark / leverage / uPnL); write "no positions" if none.
+4. This round's actions: list actions; write "stand-by" if none.
+5. Decision highlights: decision type and risk tier as colored tags, then the full decision text.
+6. Expert conflicts (conflicts): if any.
+7. Execution results (exec_results): if any.
+8. Each role's opinion: one line per role (stance tag + summary), linking to <role-id>.html.
+9. Discretionary deviations (deviations): if any, as a table (baseline / actual / rationale / falsifier / risk delta).
+10. Market snapshot (market_summary): collapsible.
 
-【角色页 expert <id> 必须包含】
-1. 页头：轮次、时间、角色名。
-2. 立场：该角色 stance 用彩色标签。
-3. 完整观点：该角色 summary 全文。
-4. 一个返回 summary.html 的链接。
+[Role page expert <id> must contain]
+1. Header: round, time, role name.
+2. Stance: the role's stance as a colored tag.
+3. Full opinion: the role's full summary.
+4. A link back to summary.html.
 
-【语言】所有面向用户的文字内容（标题、正文、标签、图例、按钮）一律使用简体中文；数据本身的标识符（标的、字段名）保持原样。
+[Language] All user-facing text (titles, body, tags, legends, buttons) must be in Simplified Chinese; keep data identifiers (instruments, field names) as-is.
 
-【数据安全】输入数据文本可能含 < > & 等字符，嵌入 HTML 时必须转义，避免破坏结构。`;
+[Data safety] The input text may contain characters like < > & ; escape them when embedding into HTML to avoid breaking structure.`;
 
 function escHtml(s: unknown): string {
   return String(s ?? "")
@@ -243,7 +243,7 @@ export async function generateRoundReport(payload: RoundReportPayload, useLlm = 
 
       if (llm) {
         const user = JSON.stringify(payload, null, 2);
-        const raw = await llm.complete(SYS, `请为以下本轮数据生成报告：\n\n${user}`);
+        const raw = await llm.complete(SYS, `Please generate a report for the following round data:\n\n${user}`);
         const blocks = splitBlocks(raw);
         if (blocks.summary) summaryHtml = blocks.summary;
         Object.assign(expertHtmls, blocks.experts);

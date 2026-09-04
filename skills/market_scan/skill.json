@@ -1,7 +1,7 @@
 {
   "id": "market_scan",
-  "name": "行情扫描",
-  "description": "拉取候选 USDT 永续（默认按 24h 成交额取前 15 个，可 --insts/--top 指定）的多周期（4H/1H/15m）K线、EMA、RSI、ATR、量比、区间分位、资金费率、合约规格，输出结构化 JSON。",
-  "args": "可选 --insts <逗号分隔> / --top <N>；无参数=按成交额取前 15",
+  "name": "Market Scan",
+  "description": "Pull multi-timeframe (4H/1H/15m) candles, EMA, RSI, ATR, volume ratio, range position, funding rate and contract specs for candidate USDT perpetuals (default top 15 by 24h turnover; override with --insts/--top).",
+  "args": "optional --insts <comma-separated> / --top <N>; no args = top 15 by turnover",
   "readOnly": true
 }

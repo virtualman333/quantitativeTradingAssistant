@@ -13,13 +13,13 @@ const TEXT_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|py|md|json|yml|yaml|toml|ini|txt|
 
 export const readFileTool: Tool = {
   name: "read_file",
-  description: "读取仓库内文本文件，返回带行号内容（可用 offset/limit 读片段）。",
+  description: "Read a text file in the repo, returning line-numbered content (use offset/limit to read a slice).",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "相对仓库根的路径，如 agent/src/main.ts" },
-      offset: { type: "number", description: "起始行（1 基，可空）" },
-      limit: { type: "number", description: "读取行数（可空）" },
+      path: { type: "string", description: "path relative to repo root, e.g. agent/src/main.ts" },
+      offset: { type: "number", description: "start line (1-based, optional)" },
+      limit: { type: "number", description: "number of lines (optional)" },
     },
     required: ["path"],
   },
@@ -39,14 +39,14 @@ export const readFileTool: Tool = {
 
 export const writeFileTool: Tool = {
   name: "write_file",
-  description: "写入文本文件（默认覆盖，append=true 追加）。目录不存在会自动创建。",
+  description: "Write a text file (overwrite by default; append=true appends). Directories are auto-created.",
   danger: true,
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "相对仓库根的路径" },
-      content: { type: "string", description: "文件内容" },
-      append: { type: "boolean", description: "true=追加，默认覆盖" },
+      path: { type: "string", description: "path relative to repo root" },
+      content: { type: "string", description: "file content" },
+      append: { type: "boolean", description: "true=append, default overwrite" },
     },
     required: ["path", "content"],
   },
@@ -70,12 +70,12 @@ export const writeFileTool: Tool = {
 
 export const listDirTool: Tool = {
   name: "list_dir",
-  description: "列出目录内容（类型与大小），用于定位文件。",
+  description: "List directory contents (type & size) to locate files.",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "相对仓库根的目录，默认仓库根" },
-      recursive: { type: "boolean", description: "是否递归（默认 false，深度上限 3）" },
+      path: { type: "string", description: "directory relative to repo root, default repo root" },
+      recursive: { type: "boolean", description: "recursive (default false, max depth 3)" },
     },
     required: [],
   },
@@ -120,14 +120,14 @@ export const listDirTool: Tool = {
 
 export const searchFilesTool: Tool = {
   name: "search_files",
-  description: "在仓库内按内容搜索（正则或纯文本），返回命中文件、行号与上下文。",
+  description: "Search the repo by content (regex or plain text), returning matching files, line numbers and context.",
   parameters: {
     type: "object",
     properties: {
-      pattern: { type: "string", description: "搜索内容，支持正则" },
-      path: { type: "string", description: "起始目录，默认 agent/ 源码区" },
-      ext: { type: "string", description: "限定扩展名，逗号分隔，如 ts,vue,py" },
-      maxResults: { type: "number", description: "最多命中条数，默认 40" },
+      pattern: { type: "string", description: "search text, supports regex" },
+      path: { type: "string", description: "start directory, default agent/ source area" },
+      ext: { type: "string", description: "limit extensions, comma-separated, e.g. ts,vue,py" },
+      maxResults: { type: "number", description: "max hits, default 40" },
     },
     required: ["pattern"],
   },

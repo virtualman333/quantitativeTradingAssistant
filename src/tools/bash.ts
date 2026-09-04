@@ -35,14 +35,14 @@ function denyReason(cmd: string): string | null {
 export const bashTool: Tool = {
   name: "bash",
   description:
-    "在仓库根目录内执行命令（git/node/pnpm/python/查看文件等）。危险命令被禁用，执行前需用户确认。",
+    "Run a command inside the repo root (git/node/pnpm/python/file viewing, etc.). Dangerous commands are blocked; requires user confirmation.",
   danger: true,
   parameters: {
     type: "object",
     properties: {
-      command: { type: "string", description: "要执行的命令" },
-      cwd: { type: "string", description: "工作目录，默认仓库根" },
-      timeoutMs: { type: "number", description: "超时毫秒，默认 60000，上限 300000" },
+      command: { type: "string", description: "the command to run" },
+      cwd: { type: "string", description: "working directory, default repo root" },
+      timeoutMs: { type: "number", description: "timeout ms, default 60000, max 300000" },
     },
     required: ["command"],
   },

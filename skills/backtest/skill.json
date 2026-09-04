@@ -1,7 +1,7 @@
 {
   "id": "backtest",
-  "name": "策略回测",
-  "description": "在 OKX 历史 K 线上回放因子策略（共振分/趋势/量比/区间分位），量化胜率、盈亏比、最大回撤、夏普，验证策略有效性。",
-  "args": "{inst?:'BTC-USDT-SWAP', hours?:数字(默认720=30天)}",
+  "name": "Strategy Backtest",
+  "description": "Replay the factor strategy (confluence score/trend/volume ratio/range position) on OKX historical candles; quantify win rate, profit factor, max drawdown, Sharpe to validate effectiveness.",
+  "args": "{inst?:'BTC-USDT-SWAP', hours?:number(default 720=30 days)}",
   "readOnly": true
 }

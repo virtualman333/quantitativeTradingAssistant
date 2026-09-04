@@ -1,7 +1,7 @@
 {
   "id": "polymarket_sentiment",
-  "name": "Polymarket 情绪",
-  "description": "从 Polymarket 预测市场拉取加密/宏观相关事件的隐含概率与成交量（市场情绪）。价格=市场集体判断的概率(0-1)。",
-  "args": "{limit?:数字(默认12)}",
+  "name": "Polymarket Sentiment",
+  "description": "Pull implied probabilities and volume for crypto/macro events from Polymarket prediction markets (market sentiment). Price = market's collective judgment probability (0-1).",
+  "args": "{limit?:number(default 12)}",
   "readOnly": true
 }

@@ -112,9 +112,9 @@ export function makeStoreLlmProvider(modelId?: string, mainAgent = false): LlmPr
 }
 
 function mockReply(sys: string): string {
-  const isPlan = sys.includes("调度模块");
+  const isPlan = sys.includes("dispatcher");
   if (isPlan) return JSON.stringify({ experts: allExperts().map((e) => e.id) });
-  if (sys.includes("主 Agent")) {
+  if (sys.includes("Main Agent")) {
     return JSON.stringify({
       decision: "HOLD",
       riskTier: "BASE",
@@ -170,11 +170,11 @@ async function planNode(s: State): Promise<Partial<State>> {
     // LLM 只决定「交易类」专家；消息面必召，不交给 LLM 拍脑袋
     const optional = enabled.filter((e) => !mandatory.includes(e.id));
     const llm = makeStoreLlmProvider(undefined, true);
-    const sys = `你是主 Agent 的调度模块。根据本轮情况决定召唤哪些「交易类」专家。
-必召专家（无需你决定，代码已强制）：${mandatory.join(", ") || "（无）"} —— 消息面是事件闸门/否决权，空仓也要采集看有无临近事件。
-可选交易类专家：${optional.map((e) => `${e.id}（${e.name}）: ${e.duty}`).join(" | ") || "（无）"}
-规则：有持仓或可能开仓 → trading + factor；持仓亏损/回撤/高敞口 → risk。没必要别全召。
-只输出 JSON：{"experts":["trading","factor"]}`;
+    const sys = `You are the dispatcher module of the Main Agent. Decide which "trading" experts to invoke this round.
+Mandatory experts (not your call, enforced by code): ${mandatory.join(", ") || "(none)"} — news is the event gate / veto power; it must run even when flat, to watch for upcoming events.
+Optional trading experts: ${optional.map((e) => `${e.id} (${e.name}): ${e.duty}`).join(" | ") || "(none)"}
+Rule: holding or likely to open → trading + factor; losing position / drawdown / high exposure → risk. Do not over-invoke.
+Output JSON only: {"experts":["trading","factor"]}`;
     try {
       traceRound("调度·决定召唤专家", llm.model);
       const raw = await llm.decide(sys, s.sharedContext, { onReasoning: traceReasoning });
@@ -229,31 +229,31 @@ function makeExpertNode(id: string, allMcpTools: McpTool[] = [], llm?: LlmProvid
 // ── 节点：主 Agent 拍板 ───────────────────────────────────
 async function adjudgeNode(s: State): Promise<Partial<State>> {
   const llm = makeStoreLlmProvider(undefined, true); // 主 Agent 用专用模型
-  const sys = `你是主 Agent（最终决策者）。综合各专家观点后拍板。
-可以不采纳任何专家，但必须在 summary 说明如何处理分歧。
-冲突时参考权重：已双源验证的 A 级消息 > 技术因子 > 单源 B 级消息。
-已有持仓默认「持有并让 OCO 执行」，除非有充分理由平仓。「不交易」合法但需理由。
+  const sys = `You are the Main Agent (final decision-maker). Synthesize all expert opinions and make the final call.
+You may reject any expert, but must explain in summary how you resolved disagreements.
+On conflicts, weight: dual-source-verified A-grade news > technical factors > single-source B-grade news.
+Default for existing positions is "hold and let the OCO execute" unless there is strong reason to close. "No trade" is legal but needs a reason.
 
-只输出 JSON：
+Output JSON only:
 {"decision":"OPEN|HOLD|CLOSE|STANDBY","riskTier":"BASE|AGG|DEF",
- "summary":"100-300字，说明如何处理专家分歧","conflicts":["..."],
+ "summary":"100-300 chars, explain how expert disagreements were resolved","conflicts":["..."],
  "intents":[{"inst":"BTC-USDT-SWAP","action":"hold|long|short|close","riskPct":0.012,
    "slDist":712.3,"tpRR":2.0,"reason":"...",
    "deviations":[{"baseline":"","actual":"","rationale":"","falsifier":"","riskDelta":""}]}],
  "needsApproval":false,"approvalReason":""}
 
-约束：riskPct ≤0.025；>0.02 时 needsApproval=true 并写 reason；开仓必须给 slDist；
-偏离基准时 deviations 五项必填；
-标的与方向：可交易【候选标的与行情摘要】中的任意 USDT 永续；做多(action=long)与做空(action=short)平等、均可开仓（net 模式单一方向，勿双向）；
-优先流动性好、规格清晰的标的，避开价格极低/价格步长(tickSz)极小、张数换算易出错的标的。`;
+Constraints: riskPct ≤ 0.025; if > 0.02 set needsApproval=true and write the reason; opening a position must include slDist;
+deviating from a baseline requires all five deviation fields;
+instruments & direction: you may trade any USDT perpetual listed in [Candidate instruments & market digest]; long (action=long) and short (action=short) are equal, both allowed (net mode = single direction, never both);
+prefer liquid, well-specified instruments; avoid very low price / very small tickSz where contract-count math is error-prone.`;
 
   const user = [
     s.sharedContext,
     "",
-    "【各专家观点】",
+    "[Expert opinions]",
     ...s.opinions.map(
       (o) =>
-        `── ${o.expert}(${o.stance}, 置信${o.confidence})\n${o.summary}\nadvice: ${JSON.stringify(o.advice).slice(0, 1500)}${o.flags?.length ? `\nflags: ${o.flags.join("; ")}` : ""}`
+        `── ${o.expert}(${o.stance}, confidence ${o.confidence})\n${o.summary}\nadvice: ${JSON.stringify(o.advice).slice(0, 1500)}${o.flags?.length ? `\nflags: ${o.flags.join("; ")}` : ""}`
     ),
   ].join("\n");
 

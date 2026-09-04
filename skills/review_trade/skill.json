@@ -1,7 +1,7 @@
 {
   "id": "review_trade",
-  "name": "交易复盘",
-  "description": "列出待复盘亏损交易、生成复盘模板、统计归因分布；提交复盘教训时写章程/进化文档（写操作）。",
-  "args": "{prepare?:布尔列出待复盘, stats?:布尔归因统计, commit?:布尔提交复盘(需input)}",
+  "name": "Trade Review",
+  "description": "List pending losing trades to review, generate review templates, compute attribution distribution; committing a lesson writes the charter/evolution docs (write op).",
+  "args": "{prepare?:boolean list pending, stats?:boolean attribution stats, commit?:boolean commit review (needs input)}",
   "readOnly": false
 }

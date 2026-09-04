@@ -1,7 +1,7 @@
 {
   "id": "funding_backtest",
-  "name": "资金费率回测",
-  "description": "回测资金费率极值反转/极值趋势策略，验证资金费率拥挤信号是否可交易。",
-  "args": "{inst?:'BTC-USDT-SWAP', hours?:数字(默认2160=90天)}",
+  "name": "Funding Rate Backtest",
+  "description": "Backtest funding-rate extreme-reversal / extreme-trend strategies; validate whether funding crowding signals are tradable.",
+  "args": "{inst?:'BTC-USDT-SWAP', hours?:number(default 2160=90 days)}",
   "readOnly": true
 }

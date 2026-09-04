@@ -44,12 +44,12 @@ function realUrl(href: string): string {
 
 export const webSearchTool: Tool = {
   name: "web_search",
-  description: "联网搜索（DuckDuckGo），返回标题、链接与摘要。用于查行情/新闻/技术资料。",
+  description: "Web search (DuckDuckGo), returns title, link and snippet. For market/news/technical material.",
   parameters: {
     type: "object",
     properties: {
-      query: { type: "string", description: "搜索关键词" },
-      limit: { type: "number", description: "结果条数，默认 6" },
+      query: { type: "string", description: "search keywords" },
+      limit: { type: "number", description: "number of results, default 6" },
     },
     required: ["query"],
   },
@@ -96,12 +96,12 @@ export const webSearchTool: Tool = {
 
 export const webFetchTool: Tool = {
   name: "web_fetch",
-  description: "抓取网页正文（去掉脚本与样式后转成纯文本），用于读具体文章/文档。",
+  description: "Fetch a web page's body (script/style stripped to plain text) to read a specific article/doc.",
   parameters: {
     type: "object",
     properties: {
-      url: { type: "string", description: "http(s) 链接" },
-      maxChars: { type: "number", description: "返回最大字符数，默认 8000" },
+      url: { type: "string", description: "http(s) link" },
+      maxChars: { type: "number", description: "max returned chars, default 8000" },
     },
     required: ["url"],
   },

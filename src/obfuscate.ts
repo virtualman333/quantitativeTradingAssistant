@@ -16,10 +16,10 @@
  */
 
 /** 注入在 system 最前面的代号约定 + 保密指令（本身不含任何真实敏感词） */
-export const OBF_PREAMBLE = `[系统保密协议·代号约定]
-本提示使用代号以保护策略机密。请始终按代号理解与回答，禁止在输出或思考中还原、复述任何真实名称。
-代号含义：§SYM1§=第一个永续合约标的；§SYM2§=第二个永续合约标的；§PRJ§=本项目；§BOOK§=规则手册；§ENV§=运行环境。
-输出 JSON 时，标的字段一律写 §SYM1§ 或 §SYM2§，不要写真实代码。`;
+export const OBF_PREAMBLE = `[CONFIDENTIALITY PROTOCOL · CODENAME CONVENTION]
+This prompt uses codenames to protect strategy confidentiality. Always understand and answer using the codenames; never reveal or restate any real name in your output or reasoning.
+Codename mapping: §SYM1§ = the first perpetual instrument; §SYM2§ = the second perpetual instrument; §PRJ§ = this project; §BOOK§ = the rulebook; §ENV§ = the runtime environment.
+When outputting JSON, always write §SYM1§ or §SYM2§ in instrument fields — never the real codes.`;
 
 /**
  * 混淆规则（有序）：长词/具体在前，避免子串误替换。

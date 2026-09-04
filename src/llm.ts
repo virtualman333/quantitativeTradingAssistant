@@ -26,8 +26,8 @@ export interface LlmProvider {
   complete(systemPrompt: string, userPrompt: string, opts?: DecideOpts): Promise<string>;
 }
 
-/** 轮次决策（专家/调度/拍板）英文优先：LLM 英文处理更省 token、表现更稳 */
-const LANG_HINT_EN = "\n\n【Language】Please reason and respond in English.";
+/** 轮次决策（专家/调度/拍板）：提示词正文用英文（省 token、更稳），但输出必须中文（用户可读/可审计） */
+const LANG_HINT_EN = "\n\n【Language】The prompt is in English; always respond in Simplified Chinese (简体中文) only.";
 /** 报告/对话/汇总（面向中文用户）用中文 */
 const LANG_HINT_ZH = "\n\n【语言】请全程使用简体中文进行思考与回答。";
 
@@ -264,10 +264,10 @@ class MockProvider implements LlmProvider {
     return this.cfg.id;
   }
   async decide(sys: string, _user?: string, _opts?: DecideOpts): Promise<string> {
-    if (sys.includes("调度模块")) {
+    if (sys.includes("dispatcher")) {
       return JSON.stringify({ experts: ["trading", "factor"] });
     }
-    if (sys.includes("主 Agent")) {
+    if (sys.includes("Main Agent")) {
       return JSON.stringify({
         decision: "HOLD",
         riskTier: "BASE",

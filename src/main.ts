@@ -46,6 +46,21 @@ const STATE = path.join(ROOT, "state");
 const LOG_DIR = path.join(ROOT, "logs", "agent");
 
 /**
+ * 每轮注入给 LLM 的「角色认知 + 目标 + 硬边界」背景（英文，与 sharedContext 语言一致）。
+ * 每轮重复注入：各 LLM 调用无跨轮记忆。内容对齐 AGENT_TRADING_RULES 章程 §0（唯一目标）
+ * 与 §1（L1 硬约束），作为全局背景，不替代各 system prompt 的职责定义。
+ */
+const ROLE_MISSION = [
+  `[Role & Mission]`,
+  `You are part of an autonomous crypto perpetual-futures trading agent (a multi-expert decision loop). Sole objective: long-term steady equity growth — judged by equity-curve slope and max drawdown (monthly stretch goal ≥ +10%). "No trade" is a legal decision but must carry a reason.`,
+  `[Hard constraints — non-negotiable]`,
+  `- USDT-margined perpetuals only; leverage ≤ 5x; single-trade risk ≤ 2.5% of equity.`,
+  `- Every open position must have a stop-loss placed in the same round; never add to a losing position; never hold long+short simultaneously on one instrument.`,
+  `- Monthly drawdown ≥ 12% → stop opening new positions (only manage existing ones).`,
+  `- Live funds are strictly read-only; all execution happens in the demo (paper) environment.`,
+].join("\n");
+
+/**
  * 时间格式必须是 YYYY-MM-DD HH:MM:SS（CST）。
  * archive_round.py 用 datetime.strptime(..., "%Y-%m-%d %H:%M:%S") 严格解析，
  * toLocaleString 会给出 "2026/9/2 21:45:50" 导致 ValueError（实测踩过）。
@@ -167,7 +182,7 @@ function buildMarketDigest(mkt: unknown): string {
     }
     return JSON.stringify(d.instruments ?? {}).slice(0, 6000);
   } catch {
-    return "行情不可用";
+    return "market data unavailable";
   }
 }
 
@@ -284,14 +299,16 @@ async function runRound() {
   const marketDigest = buildMarketDigest(mkt.data);
   const knownInsts = knownInstsOf(mkt.data);
   const sharedContext = [
-    `轮次 ${roundId}，时间 ${ts()}，环境 demo（模拟盘）`,
+    ROLE_MISSION,
     ``,
-    `【账户】权益 ${snap.equityUsdt} USDT，可用 ${snap.availableUsdt}`,
-    `【持仓】${snap.positions.length ? JSON.stringify(snap.positions) : "无持仓"}`,
-    `【挂单】${snap.algoOrders.length ? JSON.stringify(snap.algoOrders) : "无"}`,
-    `【运行态】当日止损 ${rt.daySlCount} 次，当日盈亏 ${rt.dayPnlPct}%，月度回撤 ${rt.monthDdPct}%`,
+    `Round ${roundId}, time ${ts()}, environment demo (paper trading)`,
     ``,
-    `【候选标的与行情摘要】可交易其中任意 USDT 永续，做多/做空均可；优先流动性好、规格清晰的标的`,
+    `[Account] equity ${snap.equityUsdt} USDT, available ${snap.availableUsdt}`,
+    `[Positions] ${snap.positions.length ? JSON.stringify(snap.positions) : "none"}`,
+    `[Algo Orders] ${snap.algoOrders.length ? JSON.stringify(snap.algoOrders) : "none"}`,
+    `[Run State] day stop-loss ${rt.daySlCount}, day PnL ${rt.dayPnlPct}%, month drawdown ${rt.monthDdPct}%`,
+    ``,
+    `[Candidate instruments & market digest] You may trade any USDT perpetual below, long or short; prefer liquid, well-specified instruments.`,
     marketDigest,
   ].join("\n");
 

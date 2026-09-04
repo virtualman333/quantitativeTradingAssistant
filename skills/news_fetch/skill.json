@@ -1,7 +1,7 @@
 {
   "id": "news_fetch",
-  "name": "消息采集",
-  "description": "从金十数据抓取新闻/快讯/财经日历，自动分级（impact/credibility/direction）并标记需交叉验证的条目。",
-  "args": "{hours?:数字(默认24), limit?:数字(默认20)}",
+  "name": "News Collection",
+  "description": "Fetch news/flash/economic-calendar from Jin10, auto-grade (impact/credibility/direction) and flag items needing cross-verification.",
+  "args": "{hours?:number(default 24), limit?:number(default 20)}",
   "readOnly": true
 }

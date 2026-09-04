@@ -1,7 +1,7 @@
 {
   "id": "news_query",
-  "name": "查可信消息库",
-  "description": "从 SQLite 消息库查询最近 N 小时已入库的可信消息（A=双源已验证 / B=单一专业源），无需重新抓取与二次验证。优先用它复用历史可信消息。",
-  "args": "{hours?:数字(默认24), minCred?:'A'|'B'|'C'(默认B), limit?:数字(默认40)}",
+  "name": "Query Trusted News DB",
+  "description": "Query the SQLite news DB for trusted news from the last N hours (A=dual-source verified / B=single professional source); no re-fetch or re-verify needed. Prefer this to reuse trusted history.",
+  "args": "{hours?:number(default 24), minCred?:'A'|'B'|'C'(default B), limit?:number(default 40)}",
   "readOnly": true
 }

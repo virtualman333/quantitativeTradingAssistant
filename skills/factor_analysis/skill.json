@@ -1,7 +1,7 @@
 {
   "id": "factor_analysis",
-  "name": "因子消融测试",
-  "description": "对因子策略做消融：逐个关闭趋势/量比/区间过滤，对比完整策略与单一因子，量化每个因子的边际贡献。",
-  "args": "{hours?:数字(默认720=30天)}",
+  "name": "Factor Ablation Test",
+  "description": "Ablate the factor strategy: turn off trend/volume-ratio/range filters one by one, compare full strategy vs single factor, quantify each factor's marginal contribution.",
+  "args": "{hours?:number(default 720=30 days)}",
   "readOnly": true
 }
