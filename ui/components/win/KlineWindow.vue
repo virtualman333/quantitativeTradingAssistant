@@ -9,14 +9,10 @@ import KlineChart from "../KlineChart.vue";
 
 const props = defineProps({ params: { type: Object, default: () => ({}) } });
 
-const BARS = ["15m", "1H", "4H", "1D"];
-/** 自动刷新间隔选项（默认 30 秒） */
-const INTERVALS = [
-  { v: 15_000, t: "15 秒" },
-  { v: 30_000, t: "30 秒" },
-  { v: 60_000, t: "1 分" },
-  { v: 300_000, t: "5 分" },
-];
+/** K 线周期（图的间隔）：1m / 5m 等短周期到 1D */
+const BARS = ["1m", "5m", "15m", "1H", "4H", "1D"];
+/** 自动刷新固定秒级（行情要实时，不用分钟级长间隔） */
+const RELOAD_MS = 10_000;
 
 /** 输入容错：BTC / btc-usdt / BTC-USDT 都能补成 BTC-USDT-SWAP */
 function normInst(s) {
@@ -31,8 +27,7 @@ const bar = ref(BARS.includes(props.params.bar) ? props.params.bar : "15m");
 const candles = ref([]);
 const err = ref("");
 const busy = ref(false);
-const auto = ref(true); // 默认开启自动刷新
-const interval = ref(30_000);
+const auto = ref(true); // 默认开启自动刷新（秒级）
 const updated = ref("");
 let timer = null;
 
@@ -73,15 +68,11 @@ function stopAuto() {
 }
 function startAuto() {
   stopAuto();
-  if (auto.value) timer = setInterval(load, interval.value);
+  if (auto.value) timer = setInterval(load, RELOAD_MS);
 }
 function toggleAuto() {
   auto.value = !auto.value;
   startAuto();
-}
-function changeInterval(v) {
-  interval.value = Number(v) || 30_000;
-  if (auto.value) startAuto();
 }
 
 const last = computed(() => (candles.value.length ? candles.value[candles.value.length - 1] : null));
@@ -150,11 +141,8 @@ onUnmounted(stopAuto);
       <button @click="load" :disabled="busy">刷新</button>
       <label class="auto">
         <input type="checkbox" :checked="auto" @change="toggleAuto" />
-        自动刷新
+        自动刷新（10 秒）
       </label>
-      <select v-model="interval" class="interval" @change="changeInterval(interval)">
-        <option v-for="o in INTERVALS" :key="o.v" :value="o.v">{{ o.t }}</option>
-      </select>
       <span class="spacer"></span>
       <span v-if="busy" class="hint">加载中…</span>
       <span v-else-if="updated" class="hint">{{ updated }} · {{ candles.length }} 根</span>
@@ -206,10 +194,6 @@ onUnmounted(stopAuto);
   font-size: 13px; width: 220px;
 }
 .auto { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); cursor: pointer; }
-.interval {
-  padding: 5px 8px; border: 1px solid var(--border);
-  border-radius: var(--r-sm); background: var(--surface); color: inherit; font-size: 12px;
-}
 .sum { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
 .px { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .up { color: var(--green); }

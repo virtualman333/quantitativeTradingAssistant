@@ -19,7 +19,7 @@ const dir = ref("all"); // all | up | down
 const sortKey = ref("rank"); // rank | volUsd | changePct
 const shown = ref(50);
 
-const BARS = ["15m", "1H", "4H", "1D"];
+const BARS = ["1m", "5m", "15m", "1H", "4H", "1D"];
 const kInst = ref("");
 const kBar = ref("15m");
 const kCandles = ref([]);
