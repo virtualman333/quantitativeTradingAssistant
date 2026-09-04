@@ -43,6 +43,21 @@ contextBridge.exposeInMainWorld("api", {
   scalperStatus: () => safeInvoke("scalper:status"),
   scalperBacktest: (p: unknown) => safeInvoke("scalper:backtest", p),
   scalperCloseAll: () => safeInvoke("scalper:closeAll"),
+  // 自定义策略（多策略 / LLM 生成 / 回测 job）
+  strategyList: () => safeInvoke("strategy:list"),
+  strategyRead: (id: string) => safeInvoke("strategy:read", id),
+  strategySave: (p: unknown) => safeInvoke("strategy:save", p),
+  strategyDelete: (id: string) => safeInvoke("strategy:delete", id),
+  strategyValidate: (id: string) => safeInvoke("strategy:validate", id),
+  strategyGen: (p: unknown) => safeInvoke("strategy:gen", p),
+  strategyApply: (id: string) => safeInvoke("strategy:apply", id),
+  scalperBtStart: (p: unknown) => safeInvoke("scalper:btStart", p),
+  scalperBtGet: (jobId: string) => safeInvoke("scalper:btGet", jobId),
+  onScalperBtEvent: (cb: (e: unknown) => void) => {
+    const h = (_e: unknown, ev: unknown) => cb(ev);
+    ipcRenderer.on("scalper:btEvent", h);
+    return () => ipcRenderer.removeListener("scalper:btEvent", h);
+  },
   // 实时账户/持仓查看
   accountGet: (profile?: string) => safeInvoke("account:get", profile),
   storeReset: () => safeInvoke("store:reset"),

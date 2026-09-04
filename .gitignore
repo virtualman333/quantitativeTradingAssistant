@@ -16,3 +16,8 @@ electron/config.json
 
 # 专家自动进化产物（每轮 LLM 复盘追加到 knowledge/lessons.md，运行时生成，非手写领域知识）
 experts/*/knowledge/lessons.md
+
+# scalper backtest candles cache db
+data/scalper_candles.db
+__pycache__/
+*.pyc

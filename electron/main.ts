@@ -11,7 +11,7 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn, exec, ChildProcess } from "node:child_process";
+import { spawn, exec, execFileSync, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -546,6 +546,213 @@ ipcMain.handle("scalper:backtest", async (_e, args) => {
   } catch (e) {
     return { ok: false, error: String(e).slice(0, 300) };
   }
+});
+
+// ── 自定义策略管理（多策略 + LLM 生成） ─────────────────────
+async function loadStrategies(): Promise<any> {
+  return loadDist<any>("strategies.js");
+}
+ipcMain.handle("strategy:list", async () => {
+  try {
+    const mod = await loadStrategies();
+    return { ok: true, ...mod.listStrategies() };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("strategy:read", async (_e, id: string) => {
+  try {
+    const mod = await loadStrategies();
+    const s = mod.readStrategy(String(id ?? ""));
+    return { ok: true, strategy: s };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("strategy:save", async (_e, p) => {
+  try {
+    const mod = await loadStrategies();
+    const r = mod.saveStrategy(p ?? {});
+    return { ok: true, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("strategy:delete", async (_e, id: string) => {
+  try {
+    const mod = await loadStrategies();
+    const r = mod.deleteStrategy(String(id ?? ""));
+    return { ok: r.ok, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("strategy:validate", async (_e, id: string) => {
+  try {
+    const mod = await loadStrategies();
+    const r = await mod.validateStrategy(String(id ?? ""));
+    return { ok: !!r.ok, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+/** LLM 生成/改写策略：非流式，可能耗时 1~3 分钟，由界面展示 loading */
+ipcMain.handle("strategy:gen", async (_e, p) => {
+  try {
+    const mod = await loadStrategies();
+    const r = await mod.generateStrategy(p ?? {});
+    return { ok: r.ok, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 400) };
+  }
+});
+ipcMain.handle("strategy:apply", async (_e, id: string) => {
+  try {
+    const mod = await loadStrategies();
+    const r = mod.applyStrategy(String(id ?? ""));
+    return { ok: true, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+
+// ── 回测 job：带实时进度（python 逐根上报 → 广播 UI） ───────
+let _pyCmdMain: string | null = null;
+function pyCmdMain(): string {
+  if (_pyCmdMain) return _pyCmdMain;
+  for (const c of ["python", "py", "python3"]) {
+    try {
+      execFileSync(c, ["-c", "import sys"], { stdio: "ignore", timeout: 10_000 });
+      _pyCmdMain = c;
+      return c;
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  _pyCmdMain = "python";
+  return _pyCmdMain;
+}
+
+interface BtJob {
+  jobId: string;
+  ts: number;
+  state: "running" | "done" | "error";
+  p: number;
+  stage: string;
+  msg: string;
+  result?: Record<string, unknown> | null;
+  error?: string;
+}
+const btJobs = new Map<string, BtJob>();
+let btSeq = 0;
+/** 进度事件广播给所有窗口（主界面与超短线独立窗口共用同一页面） */
+function btBroadcast(ev: Record<string, unknown>) {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send("scalper:btEvent", ev);
+  }
+}
+/** 从 stdout 提取最后一段 JSON 对象（python 输出多行 indent 或夹杂警告） */
+function extractJsonish(text: string): string | null {
+  const t = text.trim();
+  try {
+    JSON.parse(t);
+    return t;
+  } catch {
+    /* 尝试截取最外层大括号 */
+  }
+  const s = t.lastIndexOf("{");
+  if (s === -1) return null;
+  return t.slice(s);
+}
+
+ipcMain.handle("scalper:btStart", async (_e, p: any = {}) => {
+  try {
+    const jobId = `bt${Date.now().toString(36)}${(++btSeq).toString(36)}`;
+    const rec: BtJob = { jobId, ts: Date.now(), state: "running", p: 1, stage: "data", msg: "启动回测…" };
+    btJobs.set(jobId, rec);
+    btBroadcast({ type: "start", ...rec });
+
+    const mod = await loadDist<any>("scalper.js");
+    const argv: string[] = mod.backtestArgv({ ...p, jobId });
+    const py = pyCmdMain();
+    const proc = spawn(py, [path.join("scripts", "scalper_backtest.py"), ...argv], {
+      cwd: AGENT_ROOT,
+      env: { ...(process.env as Record<string, string>), PYTHONIOENCODING: "utf-8" },
+      windowsHide: true,
+    });
+    let stdout = "";
+
+    proc.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    proc.stderr?.on("data", (d: Buffer) => {
+      for (const line of d.toString().split(/\r?\n/).filter(Boolean)) {
+        try {
+          const j = JSON.parse(line) as { p?: number; stage?: string; msg?: string };
+          if (typeof j.p === "number") {
+            rec.p = j.p;
+            rec.stage = j.stage || rec.stage;
+            rec.msg = j.msg || rec.msg;
+            btBroadcast({ type: "progress", ...rec });
+          }
+        } catch {
+          /* 非进度行忽略 */
+        }
+      }
+    });
+    proc.on("error", (e) => {
+      rec.state = "error";
+      rec.error = `回测进程异常: ${e.message.slice(0, 200)}`;
+      rec.msg = rec.error;
+      btBroadcast({ type: "error", ...rec });
+    });
+    proc.on("close", (code) => {
+      if (rec.state !== "running") return;
+      if (code === 0) {
+        const body = extractJsonish(stdout);
+        try {
+          rec.result = body ? JSON.parse(body) : null;
+          rec.state = "done";
+          rec.p = 100;
+          rec.msg = "回测完成";
+          btBroadcast({ type: "done", ...rec });
+          return;
+        } catch {
+          rec.state = "error";
+          rec.error = `回测输出解析失败: ${stdout.slice(0, 300)}`;
+        }
+      } else {
+        rec.state = "error";
+        rec.error = stdout.trim().slice(0, 400) || `回测进程退出码 ${code}`;
+      }
+      rec.msg = rec.error;
+      btBroadcast({ type: "error", ...rec });
+    });
+    // 看门狗：网络异常可能导致进程悬挂，240s 强杀
+    setTimeout(() => {
+      if (rec.state === "running") {
+        proc.kill();
+        rec.state = "error";
+        rec.error = "回测超时（240s）已终止";
+        rec.msg = rec.error;
+        btBroadcast({ type: "error", ...rec });
+      }
+    }, 240_000).unref();
+
+    // 只保留最近 20 个 job
+    if (btJobs.size > 20) {
+      const keys = [...btJobs.keys()].slice(0, btJobs.size - 20);
+      for (const k of keys) btJobs.delete(k);
+    }
+    return { ok: true, jobId };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("scalper:btGet", (_e, jobId: string) => {
+  const rec = btJobs.get(String(jobId ?? ""));
+  if (!rec) return { ok: false, error: "任务不存在" };
+  return { ok: true, ...rec };
 });
 /** 超短线回测：独立窗口打开（与主窗口同一份 UI，#scalp hash 直达页签；页签 k 是 scalp，不是 scalper） */
 ipcMain.handle("scalper:openWindow", () => {

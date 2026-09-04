@@ -142,6 +142,8 @@ export interface ScalperConfig {
   useLlm: boolean;
   /** 趋势反转平仓：true=判断到趋势反转且持仓方向相反时，先平掉再开新方向单 */
   closeOnReversal: boolean;
+  /** 应用的自定义策略 id（strategies/<id>）；空=内置趋势策略 */
+  strategyId: string;
 }
 
 export const DEFAULT_SCALPER: ScalperConfig = {
@@ -154,6 +156,7 @@ export const DEFAULT_SCALPER: ScalperConfig = {
   intervalSec: 60,
   useLlm: false,
   closeOnReversal: false,
+  strategyId: "",
 };
 
 export interface StoreData {

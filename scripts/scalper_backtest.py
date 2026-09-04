@@ -3,13 +3,22 @@
 """
 scalper_backtest.py — 超短线策略历史回测引擎
 
-与 scripts/scalper.py 的策略严格一致：
+默认内置策略与 scripts/scalper.py 严格一致：
   趋势  ：最近 5 根 1m 收盘价的最小二乘斜率（>0 做多，<0 做空，必出方向）
   止损  ：ATR(1m, 14) × atr-mult
   止盈  ：止损距离 × 凯利盈亏比 RR（强趋势胜率 0.60 / 弱 0.52，RR 夹 [1.5, 4.0]）
   成本  ：taker 双边 fee-rate × 2（开、平各计一次）
   反转  ：可选 --close-on-reversal，持仓期间趋势反向则平仓
   执行  ：信号在已收盘 K 线后产生 → 下一根开盘价入场（无未来函数）
+
+支持自定义策略：
+  --strategy DIR  加载 agent/strategies/<id>/strategy.py 的 signal(ctx) 逐根判向，
+                  支持 flat（观望不开仓）、可选覆盖 atr_mult / rr；
+                  close-on-reversal 时策略反向（非 flat）才触发反转平仓。
+
+进度（回测 job）：
+  --job-id ID    每根 K 线都向 stderr 周期打印 {"p":..,"stage":".."} 进度 JSON 行，
+                  供主进程转发到 UI 实时进度条。
 
 用法：
   python scripts/scalper_backtest.py --inst BTC-USDT-SWAP --start 2026-09-01 [--end 2026-09-03]
@@ -25,9 +34,18 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from market_scan import _http_get
+from strategy_loader import load_strategy, call_signal, make_ctx
 
 CST = timezone(timedelta(hours=8))
 BAR_MS = 60_000  # 1m
+
+
+def report_progress(job_id: str, pct: int, stage: str, msg: str = "") -> None:
+    """回测进度上报：独立 JSON 行写 stderr（不影响 stdout 最终结果）。"""
+    if not job_id:
+        return
+    sys.stderr.write(json.dumps({"p": pct, "stage": stage, "msg": msg}, ensure_ascii=False) + "\n")
+    sys.stderr.flush()
 
 # K 线缓存库：先查库，缺的区间才从 OKX 拉，拉到即入库（下次秒开）
 DB_PATH = os.path.join(
@@ -177,7 +195,19 @@ def kelly_rr(win_rate: float) -> float:
     return max(1.5, min(rr0 * 2.0, 4.0))
 
 
-def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal):
+def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
+        strategy_dir=None, job_id=""):
+    """回测主循环。
+
+    strategy_dir 为空 → 内置规则（最近 5 根 1m 斜率判向，与 scalper.py 严格一致）；
+    strategy_dir 指定 → 逐根调用 strategy.py 的 signal(ctx)，支持 flat / 覆盖 atr_mult / rr。
+    job_id 非空 → 向 stderr 上报进度 JSON 行。
+    """
+    report_progress(job_id, 1, "data", "正在拉取 1m K 线（含 SQLite 缓存）…")
+    strat_mod = None
+    if strategy_dir:
+        strat_mod = load_strategy(strategy_dir)  # 失败会抛 RuntimeError，由 main 统一报错
+
     warmup = 60  # 预热 K 线（ATR 14 + 斜率 5，留足余量）
     candles, cache_info = fetch_history(inst, start_ms - warmup * BAR_MS, end_ms)
     if len(candles) < warmup + 5:
@@ -188,6 +218,7 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
     h = [c[2] for c in candles]
     l = [c[3] for c in candles]
     c = [c[4] for c in candles]
+    vols = [candles[k][5] for k in range(len(candles))]
 
     fee_amt = notional * fee_rate * 2  # 双边手续费（固定名义金额）
     fee_pct = fee_rate * 2 * 100
@@ -236,14 +267,24 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
         })
         pos = None
 
-    i = warmup
+    loop_start = warmup
+    loop_total = max(1, len(candles) - 1 - warmup)
+    report_progress(job_id, 5, "backtest", "开始逐根回放…")
+
+    i = loop_start
     while i < len(candles) - 1:
         # 用根 i 的 TR 更新 Wilder ATR（得到截至根 i 的 ATR）
         tr = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
         atr_val = (atr_val * 13 + tr) / 14
 
-        # 当前趋势（截至根 i 的收盘价，最近 5 根斜率）
+        # 当前内置方向（默认规则 / 兜底 strength）；自定义策略时 direction 由 signal 决定
         direction, strength = detect_trend(c[i - 4:i + 1])
+        if strat_mod is not None:
+            sig = call_signal(strat_mod, make_ctx(ts, c, h, l, vols, i + 1, atr_val))
+            direction = sig["direction"] if sig["direction"] != "flat" else None
+        strat_reason = ""
+        if strat_mod is not None:
+            strat_reason = sig["reason"]
 
         if pos is not None:
             # 持仓：先查止损止盈（同根同时触及保守按止损），再查趋势反转
@@ -259,7 +300,8 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
                     exit_px, reason = pos["sl"], "止损"
                 elif l[i] <= pos["tp"]:
                     exit_px, reason = pos["tp"], "止盈"
-            if exit_px is None and close_on_reversal and direction != pos["side"]:
+            # 反转平仓：自定义策略 flat=观望不平；内置规则只要反向就平
+            if exit_px is None and close_on_reversal and direction is not None and direction != pos["side"]:
                 exit_px, reason = c[i], "趋势反转"
             if exit_px is not None:
                 close_trade(exit_px, i, reason)
@@ -267,11 +309,18 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
                 continue
         else:
             # 空仓：信号入场（下一根开盘价，避免未来函数）
-            if atr_val > 0:
-                win_rate = 0.60 if strength == "strong" else 0.52
-                rr = kelly_rr(win_rate)
-                sl_dist = atr_val * atr_mult
-                tp_dist = sl_dist * rr
+            if atr_val > 0 and direction is not None:
+                if strat_mod is not None:
+                    atr_mult_i = sig["atr_mult"] if sig["atr_mult"] is not None else atr_mult
+                    rr_i = sig["rr"] if sig["rr"] is not None else None
+                else:
+                    atr_mult_i = atr_mult
+                    rr_i = None
+                if rr_i is None:
+                    win_rate = 0.60 if strength == "strong" else 0.52
+                    rr_i = kelly_rr(win_rate)
+                sl_dist = atr_val * atr_mult_i
+                tp_dist = sl_dist * rr_i
                 entry = o[i + 1]
                 if direction == "long":
                     sl = entry - sl_dist
@@ -286,14 +335,19 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
                     "tp": tp,
                     "open_i": i + 1,
                     "open_ts": ts[i + 1],
-                    "rr": rr,
+                    "rr": rr_i,
+                    "reason": strat_reason,
                 }
         i += 1
+        if job_id and (i - loop_start) % 150 == 0:
+            pct = 5 + round((i - loop_start) / loop_total * 94)
+            report_progress(job_id, min(99, pct), "backtest", f"已回放 {i - loop_start} 根，成交 {len(trades)} 笔")
 
     # 结束仍持仓 → 最后一根收盘价平
     if pos is not None:
         close_trade(c[-1], len(candles) - 1, "回测结束")
 
+    report_progress(job_id, 100, "backtest", f"完成，共 {len(trades)} 笔交易")
     return {**summarize(trades, len(candles)), "cache": cache_info}
 
 
@@ -374,6 +428,8 @@ def main() -> int:
     ap.add_argument("--fee-rate", type=float, default=0.0005, help="单边 taker 费率")
     ap.add_argument("--notional", type=float, default=10000.0, help="每笔名义金额（USDT，算盈亏金额）")
     ap.add_argument("--close-on-reversal", action="store_true", help="趋势反转平仓")
+    ap.add_argument("--strategy", default="", help="自定义策略目录 agent/strategies/<id>（空=内置规则）")
+    ap.add_argument("--job-id", default="", help="回测任务 ID（非空时向 stderr 上报进度 JSON）")
     args = ap.parse_args()
 
     try:
@@ -384,6 +440,8 @@ def main() -> int:
         result = run(
             args.inst, start_ms, end_ms, args.atr_mult, args.fee_rate,
             args.notional, args.close_on_reversal,
+            strategy_dir=args.strategy or None,
+            job_id=args.job_id,
         )
         out = {
             "inst": args.inst,
@@ -396,6 +454,7 @@ def main() -> int:
                 "feePct": round(args.fee_rate * 2 * 100, 3),
                 "notional": args.notional,
                 "closeOnReversal": args.close_on_reversal,
+                "strategy": args.strategy or "",
             },
             **result,
         }

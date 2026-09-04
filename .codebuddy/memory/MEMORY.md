@@ -20,7 +20,14 @@
 - `obfuscate.ts`：LLM 调用前混淆敏感标识（§SYM1§ 等），只在 decide 路径，不混 MCP 工具名与风控阈值。
 - `report.ts`：轮次 HTML 报告（见下）。
 
-## 报告系统（2026-09-03 定）
+## 超短线策略系统（2026-09-04 定）
+- 产品形态（用户原话）：超短线回测支持进度显示 / LLM 分析改进 / 多策略——自己写策略脚本（用 LLM 写，内置规则约束），写完可回测或应用到超短线量化循环。
+- 存储 `agent/strategies/<id>/{strategy.py,meta.json}`（含内置示例 sample-trend）；TS 管理 src/strategies.ts（CRUD/apply/validate/generateStrategy），LLM 生成/改写走 `llm.complete()`（decide 的 extractJson 会截断代码），system 注入接口规范+安全红线+参考模板，取 ```python 代码块。
+- 策略=仅一个 `signal(ctx)->{direction:long|short|flat,reason,atr_mult?,rr?}`；ctx 传全量序列引用+n(当前根)+atr+price，无未来数据；脚本策略接口经 scripts/strategy_loader.py（call_signal 兜底 flat）；scripts/strategy_check.py 做语法/红线 import/冒烟 gate。
+- scalper.py（实盘信号）与 scalper_backtest.py（回测）同加 `--strategy <dir>`：同一定义源既回测也实盘；store.scalper.strategyId 空=内置趋势（行为不变）。
+- 回测 job+进度：scalper_backtest.py `--job-id` 向 stderr 周期写 {"p","stage","msg"}；main.ts scalper:btStart spawn（PYTHONIOENCODING=utf-8、240s 看门狗、btJobs Map），`scalper:btEvent` 广播全窗口，UI 进度条+轮询兜底 scalper:btGet。回测缓存库 data/scalper_candles.db（已 gitignore）。
+- UI 在 ScalperView.vue：「策略库」面板（内置默认+自定义：回测/应用到循环/编辑/删除）+ 新建/编辑 modal（思路→LLM 生成→手改→保存并校验）；弹窗复用全局 `.modal/.box/.body/.foot`。
+
 - **报告是 HTML**：每轮归档后由 LLM 生成（职责边界：语义/排版/解读交给模型，落盘与聚合留在 TS），输出 `reports/<round_id>/summary.html` + `<expert>.html`；`reports/index.html` 记录表由 TS 确定性生成。LLM 失败/mock → 纯数据兜底页，保证每轮都有详情。
 - HTML 必须走 `llm.complete()`（不能用 `decide()`：其 `extractJson()` 会被 `<style>{...}` 花括号破坏）。
 - `main.ts` 归档后调 `generateRoundReport(payload)`；启动时 `generateAllReports(false)` 补历史（不耗 token）。

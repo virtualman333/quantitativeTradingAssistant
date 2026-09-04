@@ -16,11 +16,14 @@ import path from "node:path";
 import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
+import { strategyDir } from "./strategies.js";
 
 export interface ScalperSignal {
   inst: string;
-  direction: "long" | "short";
+  direction: "long" | "short" | "flat";
   strength: string;
+  reason?: string;
+  strategy?: string;
   entry_ref: number;
   sl: number;
   tp: number;
@@ -79,6 +82,7 @@ export interface ScalperTick {
   strength?: string;
   entry_ref?: number;
   judge?: "rule" | "llm";
+  strategy?: string;
   result: "opened" | "skipped" | "error";
   reason: string;
 }
@@ -96,13 +100,11 @@ export interface ScalperOverview {
 const SCALPER_LOG = path.join(AGENT_ROOT, "data", "scalper_trades.jsonl");
 const SCALPER_TICK_LOG = path.join(AGENT_ROOT, "data", "scalper_ticks.jsonl");
 
-/** 调 scalper.py 拿 1m 线信号（不开单；趋势用最近 5 根 1m 收盘价斜率判向） */
+/** 调 scalper.py 拿 1m 线信号（不开单）。cfg.strategyId 非空时走自定义策略判向。 */
 export async function fetchSignal(cfg: ScalperConfig): Promise<ScalperSignal> {
-  const out = await runPy(
-    "scalper.py",
-    ["--inst", cfg.inst, "--atr-mult", String(cfg.atrMult), "--fee-rate", String(cfg.feeRate)],
-    60_000
-  );
+  const argv = ["--inst", cfg.inst, "--atr-mult", String(cfg.atrMult), "--fee-rate", String(cfg.feeRate)];
+  if (cfg.strategyId) argv.push("--strategy", strategyDir(cfg.strategyId));
+  const out = await runPy("scalper.py", argv, 60_000);
   try {
     return JSON.parse(out) as ScalperSignal;
   } catch {
@@ -326,6 +328,7 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
       strength: signal?.strength,
       entry_ref: signal?.entry_ref,
       judge,
+      strategy: signal?.strategy,
       result,
       reason,
     });
@@ -338,6 +341,11 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   }
   const sig = await fetchSignal(cfg);
   if (sig.error) return finish("error", sig.error);
+
+  // 自定义策略观望（flat）：不开仓；已有持仓也保持，由 OCO 止盈止损管理
+  if (sig.direction === "flat") {
+    return finish("skipped", `策略观望（flat）：${sig.reason || "不满足开仓条件"}`.trim(), sig, "rule");
+  }
 
   const acct = await fetchAccount();
   const equity = acct.equityUsdt ?? 0;
@@ -477,7 +485,7 @@ export async function getScalperOverview(): Promise<ScalperOverview> {
   return { trades, ticks, positions, realizedPnl, realizedNetPnl, totalFee, unrealizedPnl };
 }
 
-/** 超短线历史回测：拉 1m 数据回放策略（与 scalper.py 同逻辑），返回汇总 + 每笔记录 */
+/** 超短线历史回测（同步版，供兼容）：拉 1m 数据回放策略，返回汇总 + 每笔记录 */
 export async function runScalperBacktest(args: {
   inst: string;
   start: string;
@@ -486,6 +494,7 @@ export async function runScalperBacktest(args: {
   feeRate?: number;
   notional?: number;
   closeOnReversal?: boolean;
+  strategyId?: string;
 }): Promise<Record<string, unknown>> {
   const argv = ["--inst", args.inst, "--start", args.start];
   if (args.end) argv.push("--end", args.end);
@@ -493,12 +502,36 @@ export async function runScalperBacktest(args: {
   if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
   if (args.notional != null) argv.push("--notional", String(args.notional));
   if (args.closeOnReversal) argv.push("--close-on-reversal");
+  if (args.strategyId) argv.push("--strategy", strategyDir(args.strategyId));
   const out = await runPy("scalper_backtest.py", argv, 180_000);
   try {
     return JSON.parse(out) as Record<string, unknown>;
   } catch {
     return { error: `回测脚本输出非 JSON: ${out.slice(0, 300)}` };
   }
+}
+
+/** 同步版回测的 CLI 参数组装（供 main.ts 的 job 版 spawn 复用） */
+export function backtestArgv(args: {
+  inst: string;
+  start: string;
+  end?: string;
+  atrMult?: number;
+  feeRate?: number;
+  notional?: number;
+  closeOnReversal?: boolean;
+  strategyId?: string;
+  jobId?: string;
+}): string[] {
+  const argv = ["--inst", args.inst, "--start", args.start];
+  if (args.end) argv.push("--end", args.end);
+  if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
+  if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
+  if (args.notional != null) argv.push("--notional", String(args.notional));
+  if (args.closeOnReversal) argv.push("--close-on-reversal");
+  if (args.strategyId) argv.push("--strategy", strategyDir(args.strategyId));
+  if (args.jobId) argv.push("--job-id", args.jobId);
+  return argv;
 }
 
 /**

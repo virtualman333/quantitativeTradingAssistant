@@ -3,10 +3,13 @@
 """
 scalper.py — 超短线（超高频）信号引擎（独立于主轮次）
 
-用途：拉 1 分钟 K 线，用最近 5 根收盘价的斜率判断趋势方向（趋势一定有，
-      必出 long/short），用凯利公式推导盈亏比（RR），再结合 ATR 与手续费
-      计算出含手续费的止盈 / 止损价。只输出信号 JSON，不下单（下单在 TS 侧，
+用途：拉 1 分钟 K 线判方向（默认用最近 5 根 1m 收盘价斜率 + 凯利公式推导盈亏比 RR），
+      结合 ATR 与手续费计算含手续费的止盈 / 止损价。只输出信号 JSON，不下单（下单在 TS 侧，
       开单与止损止盈 OCO 同挂）。
+
+支持 --strategy DIR：加载用户自定义策略 agent/strategies/<id>/strategy.py，
+      由 strategy.py 的 signal(ctx) 判向（可返回 long/short/flat），
+      并可覆盖 atr_mult / rr。判向为 flat（观望）时不开仓，SL/TP 置 0。
 
 数据源：OKX 公开 REST（无需认证），复用 market_scan 的 _http_get / atr。
 """
@@ -14,10 +17,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
 from market_scan import _http_get, atr, fetch_specs
+from strategy_loader import load_strategy, call_signal, make_ctx
 
 CST = timezone(timedelta(hours=8))
 
@@ -86,6 +91,7 @@ def main() -> int:
     ap.add_argument("--bars", type=int, default=120)
     ap.add_argument("--atr-mult", type=float, default=2.5, help="止损距离 = ATR × 该系数")
     ap.add_argument("--fee-rate", type=float, default=0.0005, help="单边 taker 手续费率（默认 0.0005）")
+    ap.add_argument("--strategy", default="", help="自定义策略目录 agent/strategies/<id>（空=内置规则）")
     args = ap.parse_args()
 
     try:
@@ -98,12 +104,11 @@ def main() -> int:
         print(json.dumps({"error": f"1m 已收盘 K 线不足: {len(rows)}"}, ensure_ascii=False))
         return 1
 
+    ts = [int(r[0]) for r in rows]
     closes = [r[4] for r in rows]
     highs = [r[2] for r in rows]
     lows = [r[3] for r in rows]
-
-    # 趋势判断：最近 5 根 1m 收盘价的斜率
-    direction, strength = detect_trend(closes)
+    vols = [r[5] for r in rows]
 
     a = atr(highs, lows, closes, 14) or 0.0
     last = closes[-1]
@@ -111,14 +116,78 @@ def main() -> int:
         print(json.dumps({"error": "ATR 或现价无效"}, ensure_ascii=False))
         return 1
 
+    # ── 自定义策略（--strategy）→ signal(ctx) 判向；否则内置规则 ──
+    strat_mod = None
+    strat_err = ""
+    if args.strategy:
+        try:
+            strat_mod = load_strategy(args.strategy)
+        except Exception as exc:  # noqa: BLE001
+            strat_err = str(exc)
+            print(json.dumps({"error": f"策略加载失败: {exc}"}, ensure_ascii=False))
+            return 1
+
+    use_atr_mult = args.atr_mult
+    use_rr: float | None = None
+    reason = ""
+    direction = "flat"
+    if strat_mod is not None:
+        sig = call_signal(strat_mod, make_ctx(ts, closes, highs, lows, vols, len(closes), a))
+        direction = sig["direction"]
+        if sig["atr_mult"] is not None:
+            use_atr_mult = sig["atr_mult"]
+        use_rr = sig["rr"]
+        reason = sig["reason"]
+        if sig.get("error"):
+            strat_err = sig["error"]
+
+    # 内置趋势兜底计算（提供 strength / 默认凯利 RR；自定义策略只给方向时可沿用）
+    if strat_mod is not None:
+        strength = detect_trend(closes)[1]
+    else:
+        direction, strength = detect_trend(closes)
+
     win_rate = 0.60 if strength == "strong" else 0.52
-    rr = kelly_rr(win_rate)
+    rr = use_rr if use_rr is not None else kelly_rr(win_rate)
     kelly_f = win_rate - (1.0 - win_rate) / rr  # 凯利理论仓位比例（参考值）
 
-    sl_dist = a * args.atr_mult
+    fee = args.fee_rate * 2.0  # 开平双边手续费
+
+    if direction == "flat":
+        out = {
+            "inst": args.inst,
+            "direction": "flat",
+            "strength": strength,
+            "reason": reason or "策略观望（flat），不开仓",
+            "entry_ref": round(last, 8),
+            "sl": 0,
+            "tp": 0,
+            "atr": round(a, 8),
+            "atr_pct": round(a / last * 100, 4),
+            "rr": 0,
+            "win_rate": win_rate,
+            "kelly_f": round(kelly_f, 4),
+            "fee_rate": args.fee_rate,
+            "fee_pct": round(fee * 100, 4),
+            "sl_dist": 0,
+            "tp_dist": 0,
+            "sl_dist_pct": 0,
+            "tp_dist_pct": 0,
+            "net_tp_pct": 0,
+            "net_sl_pct": 0,
+            "strategy": os.path.basename(os.path.dirname(args.strategy)) if args.strategy else "",
+            "spec": {},
+            "closes": [round(c, 2) for c in closes[-60:]],
+            "bars": len(rows),
+            "ts": datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+            "error": strat_err or None,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+
+    sl_dist = a * use_atr_mult
     tp_dist = sl_dist * rr
 
-    fee = args.fee_rate * 2.0  # 开平双边手续费
     # 止盈必须覆盖手续费，否则放大到至少 1.5 倍手续费
     if tp_dist / last < fee:
         tp_dist = last * fee * 1.5
@@ -136,6 +205,7 @@ def main() -> int:
         "inst": args.inst,
         "direction": direction,
         "strength": strength,
+        "reason": reason,
         "entry_ref": round(last, 8),
         "sl": round(sl, 8),
         "tp": round(tp, 8),
@@ -150,6 +220,7 @@ def main() -> int:
         "tp_dist_pct": round(tp_dist / last * 100, 4),
         "net_tp_pct": round(tp_dist / last * 100 - fee * 100, 4),
         "net_sl_pct": round(sl_dist / last * 100 + fee * 100, 4),
+        "strategy": os.path.basename(os.path.dirname(args.strategy)) if args.strategy else "",
         "spec": {
             "ctVal": spec.get("ctVal", 0),
             "lotSz": spec.get("lotSz", 0),
@@ -161,6 +232,7 @@ def main() -> int:
         "tp_dist": round(tp_dist, 8),
         "bars": len(rows),
         "ts": datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+        "error": strat_err or None,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
