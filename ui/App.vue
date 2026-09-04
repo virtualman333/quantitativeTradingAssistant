@@ -94,7 +94,7 @@ function onKey(e) {
 }
 
 onMounted(async () => {
-  // #hash 直达页签（超短线回测独立窗口用 #scalper 打开）
+  // #hash 直达页签（超短线回测独立窗口用 #scalp 打开）
   const h = (location.hash || "").replace(/^#/, "");
   if (h && tabs.some((t) => t.k === h)) tab.value = h;
   // 主题初始化放最前，避免首屏闪色

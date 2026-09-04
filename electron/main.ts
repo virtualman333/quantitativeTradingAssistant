@@ -547,7 +547,7 @@ ipcMain.handle("scalper:backtest", async (_e, args) => {
     return { ok: false, error: String(e).slice(0, 300) };
   }
 });
-/** 超短线回测：独立窗口打开（与主窗口同一份 UI，#scalper hash 直达页签） */
+/** 超短线回测：独立窗口打开（与主窗口同一份 UI，#scalp hash 直达页签；页签 k 是 scalp，不是 scalper） */
 ipcMain.handle("scalper:openWindow", () => {
   const exist = BrowserWindow.getAllWindows().find((w) => w.getTitle().includes("超短线回测"));
   if (exist) {
@@ -563,8 +563,8 @@ ipcMain.handle("scalper:openWindow", () => {
   });
   w.on("page-title-updated", (e) => e.preventDefault()); // 锁标题，供重开时识别
   const devPort = process.env.UI_DEV_PORT || "8088";
-  if (process.env.UI_DEV === "1") w.loadURL(`http://127.0.0.1:${devPort}/#scalper`);
-  else w.loadFile(path.join(AGENT_ROOT, "dist", "ui", "index.html"), { hash: "scalper" });
+  if (process.env.UI_DEV === "1") w.loadURL(`http://127.0.0.1:${devPort}/#scalp`);
+  else w.loadFile(path.join(AGENT_ROOT, "dist", "ui", "index.html"), { hash: "scalp" });
   return { ok: true };
 });
 ipcMain.handle("scalper:closeAll", async () => {
