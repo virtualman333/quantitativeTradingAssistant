@@ -6,7 +6,7 @@
  *   输入 → api.chatSend → 主进程 runChat → 流式 delta / 工具事件回推 → 这里渲染
  *   危险工具（write_file / bash / run_round）会先弹确认，用户点了「允许」才执行。
  */
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, onActivated, nextTick } from "vue";
 import { store } from "../store/index.js";
 import { api, hasBridge } from "../lib/api.js";
 import { toastErr, toastWarn, ask } from "../lib/feedback.js";
@@ -194,6 +194,10 @@ function onKeydown(e) {
 onMounted(async () => {
   if (hasBridge) offEvent = api.onChatEvent(onEvent);
   await loadHistory();
+});
+// KeepAlive 缓存：切回对话页时重新滚到底部（否则停在切走前的位置，看不到最新消息）
+onActivated(() => {
+  scroll();
 });
 onBeforeUnmount(() => {
   try {
