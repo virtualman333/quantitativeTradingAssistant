@@ -19,8 +19,7 @@ import path from "node:path";
 import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, confirmAlgo, setLeverage, closePosition, runPy } from "./okx.js";
 import { AgentState, buildGraphWithMcp, makeStoreLlmProvider } from "./graph.js";
 import { reflectExperts } from "./experts.js";
-import { reloadStore, getSettings, getScalperConfig } from "./store.js";
-import { scalpOnce } from "./scalper.js";
+import { reloadStore, getSettings } from "./store.js";
 import { guardIntent } from "./guard.js";
 import { alert } from "./alert.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
@@ -450,32 +449,6 @@ async function runRound() {
   log(`===== 轮次 ${roundId} 结束 =====`);
 }
 
-// ── 超短线独立循环（与主轮次并行，独立开关与节奏） ─────────────
-let scalperTimer: NodeJS.Timeout | null = null;
-let scalperBusy = false;
-
-async function scalperTick() {
-  if (scalperTimer) clearTimeout(scalperTimer);
-  // 关键：先重读 store 配置。否则 agent 进程读的是启动时的旧缓存，
-  // 界面里把超短线「启用」后这里仍然拿到 enabled=false，循环永远不触发开单。
-  reloadStore();
-  const cfg = getScalperConfig();
-  if (cfg.enabled && !scalperBusy) {
-    scalperBusy = true;
-    try {
-      const r = await scalpOnce(cfg);
-      log(r.msg);
-    } catch (e) {
-      log(`超短线异常: ${String(e).slice(0, 200)}`);
-    } finally {
-      scalperBusy = false;
-    }
-  }
-  // 每轮重读配置，intervalSec 改动即时生效
-  const next = getScalperConfig();
-  scalperTimer = setTimeout(scalperTick, Math.max(5, next.intervalSec) * 1000);
-}
-
 async function main() {
   // 显示实际使用的模型（来自 store，而非环境变量 —— 界面改模型要立刻生效）
   let modelName = "未知";
@@ -499,10 +472,6 @@ async function main() {
     await runRound();
     return;
   }
-  // 超短线独立循环：与主轮次并行，独立开关与节奏
-  const scfg0 = getScalperConfig();
-  log(`超短线循环已启动: enabled=${scfg0.enabled} inst=${scfg0.inst} leverage=${scfg0.leverage}x interval=${scfg0.intervalSec}s useLlm=${scfg0.useLlm}`);
-  scalperTick();
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {

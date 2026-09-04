@@ -538,6 +538,66 @@ ipcMain.handle("scalper:overview", async () => {
     return { ok: false, error: String(e).slice(0, 300) };
   }
 });
+ipcMain.handle("scalper:backtest", async (_e, args) => {
+  try {
+    const mod = await loadDist<any>("scalper.js");
+    const r = await mod.runScalperBacktest(args ?? {});
+    return { ok: !r.error, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+
+// ── 超短线独立循环（「超短线」页签独立启停，与主轮次 agent 解耦） ──
+let scalperLoopTimer: NodeJS.Timeout | null = null;
+let scalperLoopBusy = false;
+
+async function scalperLoopTick() {
+  let cfg: any = null;
+  try {
+    cfg = await withStore((s) => s.getScalperConfig());
+  } catch {
+    cfg = null;
+  }
+  if (cfg && !scalperLoopBusy) {
+    scalperLoopBusy = true;
+    try {
+      const mod = await loadDist<any>("scalper.js");
+      const r = await mod.scalpOnce(cfg);
+      pushLog(`[超短线] ${r.msg}`);
+    } catch (e) {
+      pushLog(`[超短线] 异常: ${String(e).slice(0, 200)}`);
+    } finally {
+      scalperLoopBusy = false;
+    }
+  }
+  // 若未停止，按最新 intervalSec 调度下一次
+  if (scalperLoopTimer !== null) {
+    const sec = Number(cfg?.intervalSec) || 60;
+    scalperLoopTimer = setTimeout(scalperLoopTick, Math.max(5, sec) * 1000);
+  }
+}
+
+function startScalperLoop() {
+  if (scalperLoopTimer) return { ok: false, msg: "超短线循环已在运行" };
+  pushLog("超短线循环启动");
+  scalperLoopTimer = setTimeout(scalperLoopTick, 0);
+  return { ok: true, msg: "超短线循环已启动" };
+}
+
+function stopScalperLoop() {
+  if (scalperLoopTimer) {
+    clearTimeout(scalperLoopTimer);
+    scalperLoopTimer = null;
+  }
+  scalperLoopBusy = false;
+  pushLog("超短线循环已停止");
+  return { ok: true, msg: "超短线循环已停止" };
+}
+
+ipcMain.handle("scalper:start", () => startScalperLoop());
+ipcMain.handle("scalper:stop", () => stopScalperLoop());
+ipcMain.handle("scalper:status", () => ({ running: !!scalperLoopTimer }));
 
 // agent 控制
 ipcMain.handle("agent:start", () => startAgent());

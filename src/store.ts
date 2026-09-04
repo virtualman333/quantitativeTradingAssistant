@@ -140,6 +140,8 @@ export interface ScalperConfig {
   intervalSec: number;
   /** 是否 LLM 介入：true=趋势方向交给 LLM 判断，false=规则（EMA+动量）判断 */
   useLlm: boolean;
+  /** 趋势反转平仓：true=判断到趋势反转且持仓方向相反时，先平掉再开新方向单 */
+  closeOnReversal: boolean;
 }
 
 export const DEFAULT_SCALPER: ScalperConfig = {
@@ -151,6 +153,7 @@ export const DEFAULT_SCALPER: ScalperConfig = {
   enabled: false,
   intervalSec: 60,
   useLlm: false,
+  closeOnReversal: false,
 };
 
 export interface StoreData {

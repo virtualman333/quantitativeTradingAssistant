@@ -269,8 +269,8 @@ export async function confirmAlgo(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const r = await mcpCall("demo", "swap_get_algo_orders", { status: "pending" });
-    const d = r.data as Record<string, unknown> | null;
-    const arr = Array.isArray(d?.data) ? (d!.data as Record<string, unknown>[]) : [];
+    // MCP 返回是三层洋葱 result.data.data，用 unwrap 正确剥到数组（一层剥会永远空）
+    const arr = unwrap(r.data);
     for (const a of arr) {
       if (a.instId === inst) return true;
     }
@@ -299,4 +299,22 @@ export async function closePosition(args: {
     true
   );
   return { ok: r.ok, raw: r.raw };
+}
+
+/**
+ * 撤销某标的的所有 pending algo 单（OCO 止损止盈）。
+ * 趋势反转平仓前必须先撤，否则旧仓的止损止盈残留，平仓后会反向触发。
+ */
+export async function cancelAlgoOrders(
+  inst: string
+): Promise<{ ok: boolean; canceled: number; raw: string }> {
+  const r = await mcpCall("demo", "swap_get_algo_orders", { instId: inst, status: "pending" });
+  const arr = unwrap(r.data).filter((a) => String(a.instId ?? "") === inst);
+  if (!arr.length) return { ok: true, canceled: 0, raw: "" };
+  const orders = arr
+    .map((a) => ({ algoId: String(a.algoId ?? ""), instId: String(a.instId ?? inst) }))
+    .filter((o) => o.algoId);
+  if (!orders.length) return { ok: true, canceled: 0, raw: "" };
+  const c = await mcpCall("demo", "swap_cancel_algo_orders", { orders }, true);
+  return { ok: c.ok, canceled: orders.length, raw: c.raw };
 }

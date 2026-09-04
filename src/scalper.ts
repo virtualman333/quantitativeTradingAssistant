@@ -2,17 +2,18 @@
  * scalper.ts — 超短线（超高频）交易引擎（独立于主轮次）
  *
  * 与主轮次（5 分钟 LangGraph 多专家决策）完全解耦：本模块只负责「开单」——
- * 拉 1m 线信号（scalper.py 做趋势识别 + 凯利公式推止盈止损 + 手续费），
+ * 拉 1m 线信号（scalper.py 用最近 5 根 1m 收盘价斜率判趋势 + 凯利公式推止盈止损 + 手续费），
  * 市价开单后**同轮挂 OCO 止损止盈**（L1-4：每单必挂止损止盈）。
  *
- * 可选 LLM 介入（cfg.useLlm）：趋势方向交给 LLM 判断（喂最近 60 根 1m 收盘价），
- * 止盈止损仍由凯利公式 + ATR 计算。false 时用规则（EMA9/21 + 动量）判向。
+ * 可选 LLM 介入（cfg.useLlm）：趋势方向交给 LLM 判断（喂最近 60 根 1m 收盘价，
+ * 提示词明确要求用最近 5 根 1m 收盘价的斜率判趋势），
+ * 止盈止损仍由凯利公式 + ATR 计算。false 时用规则（5 根 1m 斜率）判向。
  *
  * 独立循环由 main.ts 里单独的定时器驱动；开单记录追加到 data/scalper_trades.jsonl。
  */
 import fs from "node:fs";
 import path from "node:path";
-import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall } from "./okx.js";
+import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
 
@@ -64,18 +65,38 @@ export interface ScalperTrade {
   status: "open" | "closed";
   closePrice?: number;
   pnl?: number;
+  feeRate: number;   // 单边 taker 费率
+  notional: number;  // 名义金额（USDT）
+  margin: number;    // 保证金（USDT）
+  fee: number;       // 预估双边手续费（USDT）
+  netPnl?: number;   // 净盈亏（已扣手续费）
+}
+
+export interface ScalperTick {
+  ts: string;
+  inst: string;
+  direction?: string;
+  strength?: string;
+  entry_ref?: number;
+  judge?: "rule" | "llm";
+  result: "opened" | "skipped" | "error";
+  reason: string;
 }
 
 export interface ScalperOverview {
   trades: ScalperTrade[];
+  ticks: ScalperTick[];
   positions: Record<string, unknown>[];
   realizedPnl: number;
+  realizedNetPnl: number;
+  totalFee: number;
   unrealizedPnl: number;
 }
 
 const SCALPER_LOG = path.join(AGENT_ROOT, "data", "scalper_trades.jsonl");
+const SCALPER_TICK_LOG = path.join(AGENT_ROOT, "data", "scalper_ticks.jsonl");
 
-/** 调 scalper.py 拿 1m 线信号（不开单） */
+/** 调 scalper.py 拿 1m 线信号（不开单；趋势用最近 5 根 1m 收盘价斜率判向） */
 export async function fetchSignal(cfg: ScalperConfig): Promise<ScalperSignal> {
   const out = await runPy(
     "scalper.py",
@@ -96,6 +117,17 @@ function fmtTick(px: number, tickSz: number): string {
   return snapped.toFixed(decimals);
 }
 
+/** 持仓方向：兼容 posSide=long/short 与 net 模式（pos 正负） */
+function positionSide(p: Record<string, unknown>): "long" | "short" | null {
+  const ps = String(p.posSide ?? "");
+  if (ps === "long") return "long";
+  if (ps === "short") return "short";
+  const pos = Number(p.pos ?? 0);
+  if (pos > 0) return "long";
+  if (pos < 0) return "short";
+  return null;
+}
+
 /** LLM 判向：喂最近 60 根 1m 收盘价，返回 long/short，失败返回 null（回退规则方向） */
 async function llmDirection(closes: number[]): Promise<"long" | "short" | null> {
   try {
@@ -103,9 +135,9 @@ async function llmDirection(closes: number[]): Promise<"long" | "short" | null> 
     if (!cfg || cfg.provider === "mock") return null;
     const llm = createProvider(cfg);
     const sys =
-      `You are a short-term trend judge for crypto perpetual scalping. Given recent 1-minute closing prices, ` +
-      `judge the immediate trend direction by considering momentum, the sequence of higher/lower closes and recent acceleration. ` +
-      `Output JSON only: {"direction":"long"|"short","reason":"one short sentence"}`;
+      `You are a short-term trend judge for crypto perpetual scalping. You are given recent 1-minute (1m) closing prices. ` +
+      `Judge the trend direction by the SLOPE of the last 5 one-minute closes (rising line → long, falling line → short). ` +
+      `Do not use fewer than 5 candles. Output JSON only: {"direction":"long"|"short","reason":"one short sentence"}`;
     const user = `Recent 1m closes (oldest → newest): [${closes.join(", ")}]`;
     const raw = await llm.decide(sys, user);
     const m = raw.match(/\{[\s\S]*\}/);
@@ -123,6 +155,37 @@ function appendTrade(t: ScalperTrade): void {
     fs.appendFileSync(SCALPER_LOG, JSON.stringify(t) + "\n", "utf8");
   } catch {
     /* 记录失败不影响开单 */
+  }
+}
+
+/** 循环监测记录（每次 tick 一条，含跳过/失败原因） */
+function appendTick(t: ScalperTick): void {
+  try {
+    fs.mkdirSync(path.dirname(SCALPER_TICK_LOG), { recursive: true });
+    fs.appendFileSync(SCALPER_TICK_LOG, JSON.stringify(t) + "\n", "utf8");
+  } catch {
+    /* ignore */
+  }
+}
+
+function readTicks(limit = 200): ScalperTick[] {
+  try {
+    if (!fs.existsSync(SCALPER_TICK_LOG)) return [];
+    const all = fs
+      .readFileSync(SCALPER_TICK_LOG, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as ScalperTick;
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is ScalperTick => !!x);
+    return all.slice(-limit);
+  } catch {
+    return [];
   }
 }
 
@@ -159,9 +222,9 @@ function writeTrades(trades: ScalperTrade[]): void {
 async function fetchLastPrice(inst: string): Promise<number | null> {
   try {
     const r = await mcpCall("demo", "market_get_ticker", { instId: inst });
-    const d = r.data as Record<string, unknown> | null;
-    const arr = Array.isArray(d?.data) ? (d!.data as Record<string, unknown>[]) : [];
-    const n = Number(arr[0]?.last ?? d?.last ?? d?.data);
+    // MCP 返回是三层洋葱 result.data.data，用 unwrap 正确剥到数组（一层剥会永远空）
+    const arr = unwrap(r.data);
+    const n = Number(arr[0]?.last);
     return Number.isFinite(n) && n > 0 ? n : null;
   } catch {
     return null;
@@ -189,6 +252,7 @@ async function syncTrades(): Promise<ScalperTrade[]> {
     if (close != null) {
       const dir = t.direction === "long" ? 1 : -1;
       t.pnl = Number(((close - t.entry) * t.size * t.ctVal * dir).toFixed(4));
+      t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
     }
     changed = true;
   }
@@ -201,22 +265,38 @@ async function syncTrades(): Promise<ScalperTrade[]> {
  * 已有该标的持仓时不重复开单（等止盈/止损触发后再开）。
  */
 export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
+  // 统一收口：每次循环监测都落一条 tick 记录（含跳过/失败原因）
+  const finish = (
+    result: "opened" | "skipped" | "error",
+    reason: string,
+    signal?: ScalperSignal,
+    judge?: "rule" | "llm"
+  ): ScalpResult => {
+    appendTick({
+      ts: new Date().toISOString(),
+      inst: cfg.inst,
+      direction: signal?.direction,
+      strength: signal?.strength,
+      entry_ref: signal?.entry_ref,
+      judge,
+      result,
+      reason,
+    });
+    return { ok: result === "opened", msg: reason, signal };
+  };
+
   // 演练模式（--dry-run）与主轮次一致：不下单
   if (process.argv.includes("--dry-run")) {
-    return { ok: false, msg: "[演练模式] 超短线不下单（--dry-run）" };
+    return finish("skipped", "[演练模式] 超短线不下单（--dry-run）");
   }
   const sig = await fetchSignal(cfg);
-  if (sig.error) return { ok: false, msg: sig.error };
+  if (sig.error) return finish("error", sig.error);
 
   const acct = await fetchAccount();
   const equity = acct.equityUsdt ?? 0;
-  if (equity <= 0) return { ok: false, msg: "无法获取账户权益" };
+  if (equity <= 0) return finish("error", "无法获取账户权益", sig);
 
-  // 已有该标的持仓则跳过，避免高频重复开单堆积仓位
-  const hasPos = acct.positions.some((p) => String(p.instId ?? "") === cfg.inst);
-  if (hasPos) return { ok: false, msg: `已有 ${cfg.inst} 持仓，等止盈/止损触发后再开新单`, signal: sig };
-
-  // 方向：LLM 介入则交给 LLM，否则用规则方向
+  // 方向：LLM 介入则交给 LLM，否则用规则方向（先判方向，才能判断是否反转）
   let direction = sig.direction;
   let judge: "rule" | "llm" = "rule";
   if (cfg.useLlm && Array.isArray(sig.closes) && sig.closes.length >= 30) {
@@ -227,9 +307,33 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
     }
   }
 
+  // 持仓处理：趋势反转 + 勾选「趋势反转平仓」→ 先平掉再开新方向单
+  const pos = acct.positions.find((p) => String(p.instId ?? "") === cfg.inst);
+  if (pos) {
+    const ps = positionSide(pos);
+    const sizeContracts = Math.abs(Number(pos.pos ?? 0));
+    if (ps && ps !== direction) {
+      // 现有持仓方向与当前趋势相反
+      if (cfg.closeOnReversal) {
+        // 先撤掉旧仓配套的 OCO 止损止盈，再平仓（否则残留止损单会反向触发）
+        const cancel = await cancelAlgoOrders(cfg.inst);
+        if (!cancel.ok) return finish("error", `趋势反转平仓前撤止损止盈失败 ${cancel.raw.slice(0, 180)}`, sig, judge);
+        const closeSide = ps === "long" ? "sell" : "buy";
+        const r = await closePosition({ inst: cfg.inst, side: closeSide, size: sizeContracts });
+        if (!r.ok) return finish("error", `趋势反转平仓失败 ${r.raw.slice(0, 180)}`, sig, judge);
+        // 平仓成功，继续开新方向单
+      } else {
+        return finish("skipped", `已有 ${cfg.inst} ${ps} 持仓，与趋势 ${direction} 相反（未勾选趋势反转平仓），跳过`, sig, judge);
+      }
+    } else {
+      // 方向一致，不重复开单
+      return finish("skipped", `已有 ${cfg.inst} ${ps ?? "?"} 持仓，方向与趋势一致，等止盈/止损触发`, sig, judge);
+    }
+  }
+
   const spec = sig.spec ?? { ctVal: 0, lotSz: 0, minSz: 0, tickSz: 0 };
   if (!(spec.ctVal > 0) || !(spec.tickSz > 0)) {
-    return { ok: false, msg: "缺合约规格（ctVal/tickSz），无法下单", signal: sig };
+    return finish("error", "缺合约规格（ctVal/tickSz），无法下单", sig, judge);
   }
 
   const price = sig.entry_ref;
@@ -243,7 +347,7 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const notional = equity * cfg.riskPct;
   const rawSize = notional / (price * spec.ctVal);
   const size = Number((Math.max(spec.minSz, Math.floor(rawSize / spec.lotSz) * spec.lotSz)).toFixed(10));
-  if (!(size > 0)) return { ok: false, msg: `张数为 0（raw=${rawSize.toFixed(6)}）`, signal: sig };
+  if (!(size > 0)) return finish("error", `张数为 0（raw=${rawSize.toFixed(6)}）`, sig, judge);
 
   const lever = Math.min(Math.max(1, cfg.leverage), 20);
   const side = direction === "long" ? "buy" : "sell";
@@ -252,12 +356,12 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
 
   const roundId = `S${Date.now()}`;
   const g = await genClOrdId(roundId, 1, { instId: cfg.inst, sz: size });
-  if (!g.clOrdId) return { ok: false, msg: `clOrdId 生成失败（${g.error ?? "未知"}）`, signal: sig };
+  if (!g.clOrdId) return finish("error", `clOrdId 生成失败（${g.error ?? "未知"}）`, sig, judge);
   const cl = g.clOrdId;
 
   await setLeverage(cfg.inst, lever);
   const placed = await placeOrder({ inst: cfg.inst, side, size, clOrdId: cl });
-  if (!placed.ok) return { ok: false, msg: `开单失败 ${placed.raw.slice(0, 180)}`, signal: sig };
+  if (!placed.ok) return finish("error", `开单失败 ${placed.raw.slice(0, 180)}`, sig, judge);
 
   // 止损止盈同挂（OCO，L1-4：每单必挂）
   const oco = await placeOco({
@@ -271,7 +375,10 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const confirmed = await confirmAlgo(cfg.inst);
 
   const ok = oco.ok && confirmed;
-  // 记录开单
+  // 记录开单（补齐名义金额/保证金/手续费字段）
+  const notionalUsdt = size * spec.ctVal * price;
+  const marginUsdt = notionalUsdt / lever;
+  const feeUsdt = notionalUsdt * (sig.fee_rate ?? cfg.feeRate) * 2;
   appendTrade({
     ts: new Date().toISOString(),
     inst: cfg.inst,
@@ -285,20 +392,24 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
     ctVal: spec.ctVal,
     judge,
     status: "open",
+    feeRate: sig.fee_rate ?? cfg.feeRate,
+    notional: notionalUsdt,
+    margin: marginUsdt,
+    fee: feeUsdt,
   });
 
   const msg =
     `[超短线] ${cfg.inst} ${direction}(${judge}) ${side} ${size}张 @${price} ` +
     `杠杆${lever}x SL=${slPx} TP=${tpPx} RR=${sig.rr} 费${sig.fee_pct}% ` +
     `OCO=${oco.ok} 回查=${confirmed}`;
-  return { ok, msg, signal: sig };
+  return finish(ok ? "opened" : "error", msg, sig, judge);
 }
 
 /** 汇总：开单记录 + 当前持仓 + 已实现/未实现收益（供界面展示） */
 export async function getScalperOverview(): Promise<ScalperOverview> {
   const trades = await syncTrades();
+  const ticks = readTicks(200);
   let positions: Record<string, unknown>[] = [];
-  let realizedPnl = 0;
   let unrealizedPnl = 0;
   try {
     const acct = await fetchAccount();
@@ -307,8 +418,38 @@ export async function getScalperOverview(): Promise<ScalperOverview> {
   } catch {
     /* ignore */
   }
-  realizedPnl = trades.filter((t) => t.status === "closed").reduce((s, t) => s + Number(t.pnl ?? 0), 0);
-  return { trades, positions, realizedPnl, unrealizedPnl };
+  const closed = trades.filter((t) => t.status === "closed");
+  const realizedPnl = closed.reduce((s, t) => s + Number(t.pnl ?? 0), 0);
+  const totalFee = closed.reduce((s, t) => s + Number(t.fee ?? 0), 0);
+  const realizedNetPnl = closed.reduce(
+    (s, t) => s + Number(t.netPnl ?? (Number(t.pnl ?? 0) - Number(t.fee ?? 0))),
+    0
+  );
+  return { trades, ticks, positions, realizedPnl, realizedNetPnl, totalFee, unrealizedPnl };
+}
+
+/** 超短线历史回测：拉 1m 数据回放策略（与 scalper.py 同逻辑），返回汇总 + 每笔记录 */
+export async function runScalperBacktest(args: {
+  inst: string;
+  start: string;
+  end?: string;
+  atrMult?: number;
+  feeRate?: number;
+  notional?: number;
+  closeOnReversal?: boolean;
+}): Promise<Record<string, unknown>> {
+  const argv = ["--inst", args.inst, "--start", args.start];
+  if (args.end) argv.push("--end", args.end);
+  if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
+  if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
+  if (args.notional != null) argv.push("--notional", String(args.notional));
+  if (args.closeOnReversal) argv.push("--close-on-reversal");
+  const out = await runPy("scalper_backtest.py", argv, 180_000);
+  try {
+    return JSON.parse(out) as Record<string, unknown>;
+  } catch {
+    return { error: `回测脚本输出非 JSON: ${out.slice(0, 300)}` };
+  }
 }
 
 export { DEFAULT_SCALPER };
