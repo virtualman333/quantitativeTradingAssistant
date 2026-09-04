@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +28,23 @@ from market_scan import _http_get
 
 CST = timezone(timedelta(hours=8))
 BAR_MS = 60_000  # 1m
+
+# K 线缓存库：先查库，缺的区间才从 OKX 拉，拉到即入库（下次秒开）
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "scalper_candles.db"
+)
+
+
+def _db() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS candles ("
+        "inst TEXT NOT NULL, bar TEXT NOT NULL, ts INTEGER NOT NULL,"
+        "o REAL, h REAL, l REAL, c REAL, vol REAL,"
+        "PRIMARY KEY (inst, bar, ts))"
+    )
+    return conn
 
 
 def parse_time(s: str) -> int:
@@ -42,8 +61,8 @@ def fmt_ts(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, CST).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def fetch_history(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
-    """拉 [start_ms, end_ms] 区间的 1m 已收盘 K 线，升序返回 [ts,o,h,l,c,vol]。
+def fetch_okx(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
+    """从 OKX 拉 [start_ms, end_ms] 区间的 1m 已收盘 K 线，升序返回 [ts,o,h,l,c,vol]。
 
     注意：history-candles 用 `after` 游标向前翻页（返回该时间戳「之前」更旧的数据），
     与 /market/candles 的 before 语义相反，踩过坑。
@@ -73,6 +92,59 @@ def fetch_history(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
         after = oldest
     rows.sort(key=lambda x: x[0])
     return rows
+
+
+def fetch_history(inst: str, start_ms: int, end_ms: int) -> tuple[list[list[float]], dict]:
+    """带 SQLite 缓存的取数：先查库，缺口区间才拉 OKX，拉到即入库。
+
+    返回 ([ts,o,h,l,c,vol] 升序, 缓存信息 {fromDb, fetched})。
+    判定命中：库内覆盖 [start, end]（末端容差 1 根，因最后一根可能刚收盘）且无内部空洞。
+    """
+    conn = _db()
+    try:
+        lo, hi, cnt = conn.execute(
+            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM candles "
+            "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ?",
+            (inst, "1m", start_ms, end_ms),
+        ).fetchone()
+
+        def _covered() -> bool:
+            if lo is None or hi is None:
+                return False
+            if lo > start_ms or hi < end_ms - BAR_MS:
+                return False
+            # 库内根数应接近满配（允许 2 根容差，防交易所个别缺根导致永远不命中）
+            return cnt >= (hi - lo) // BAR_MS + 1 - 2
+
+        fetched = 0
+        if not _covered():
+            segs: list[tuple[int, int]] = []
+            if lo is None:
+                segs.append((start_ms, end_ms))
+            else:
+                if lo > start_ms:
+                    segs.append((start_ms, min(lo - BAR_MS, end_ms)))
+                if hi < end_ms - BAR_MS:
+                    segs.append((max(hi + BAR_MS, start_ms), end_ms))
+            for s, e in segs:
+                if e < s:
+                    continue
+                rows = fetch_okx(inst, s, e)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)",
+                    [(inst, "1m", r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
+                )
+                conn.commit()
+                fetched += len(rows)
+
+        out = conn.execute(
+            "SELECT ts, o, h, l, c, vol FROM candles "
+            "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ? ORDER BY ts",
+            (inst, "1m", start_ms, end_ms),
+        ).fetchall()
+        return [list(r) for r in out], {"fromDb": cnt or 0, "fetched": fetched}
+    finally:
+        conn.close()
 
 
 def linear_slope(closes: list[float], n: int = 5) -> float:
@@ -107,7 +179,7 @@ def kelly_rr(win_rate: float) -> float:
 
 def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal):
     warmup = 60  # 预热 K 线（ATR 14 + 斜率 5，留足余量）
-    candles = fetch_history(inst, start_ms - warmup * BAR_MS, end_ms)
+    candles, cache_info = fetch_history(inst, start_ms - warmup * BAR_MS, end_ms)
     if len(candles) < warmup + 5:
         raise RuntimeError(f"1m 已收盘 K 线不足（仅 {len(candles)} 根）")
 
@@ -222,7 +294,7 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal)
     if pos is not None:
         close_trade(c[-1], len(candles) - 1, "回测结束")
 
-    return summarize(trades, len(candles))
+    return {**summarize(trades, len(candles)), "cache": cache_info}
 
 
 def summarize(trades: list[dict], bars: int) -> dict:
@@ -317,6 +389,7 @@ def main() -> int:
             "inst": args.inst,
             "start": fmt_ts(start_ms),
             "end": fmt_ts(end_ms),
+            "cache": result.get("cache", {}),
             "params": {
                 "atrMult": args.atr_mult,
                 "feeRate": args.fee_rate,

@@ -57,6 +57,8 @@ contextBridge.exposeInMainWorld("api", {
   // 持仓汇总（LLM 调 MCP 只读工具）
   portfolioSummarize: (p?: { modelId?: string }) => safeInvoke("portfolio:summarize", p),
   portfolioAbort: () => safeInvoke("portfolio:abort"),
+  // 超短线回测独立窗口
+  openScalperWindow: () => safeInvoke("scalper:openWindow"),
   onPortfolioEvent: (cb: (e: unknown) => void) => {
     const h = (_e: unknown, ev: unknown) => cb(ev);
     ipcRenderer.on("portfolio:event", h);

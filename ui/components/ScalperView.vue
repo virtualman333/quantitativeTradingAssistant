@@ -207,6 +207,14 @@ const btRunning = ref(false);
 const btResult = ref(null);
 const btError = ref("");
 
+function openInWindow() {
+  try {
+    api.openScalperWindow();
+  } catch (e) {
+    btError.value = errText(e);
+  }
+}
+
 async function runBacktest() {
   btRunning.value = true;
   btResult.value = null;
@@ -435,7 +443,9 @@ async function runBacktest() {
   </div>
 
   <div class="panel">
-    <h2>超短线回测</h2>
+    <h2>超短线回测<span class="spacer"></span>
+      <button class="sm" @click="openInWindow">新窗口打开</button>
+    </h2>
     <div class="body">
       <div class="row">
         <label>标的</label>
@@ -478,6 +488,9 @@ async function runBacktest() {
       <div class="card"><div class="k">最大回撤</div><div class="v down">{{ fmtNum(btResult.summary.maxDrawdownPct, 2) }}%</div></div>
       <div class="card"><div class="k">总手续费</div><div class="v">{{ fmtNum(btResult.summary.totalFeeUsdt, 2) }}</div></div>
       <div class="card"><div class="k">夏普</div><div class="v">{{ btResult.summary.sharpe == null ? "—" : fmtNum(btResult.summary.sharpe, 2) }}</div></div>
+    </div>
+    <div v-if="btResult.cache" class="hint" style="margin-top:6px">
+      数据缓存：库内命中 {{ btResult.cache.fromDb || 0 }} 根，本次新拉 {{ btResult.cache.fetched || 0 }} 根（SQLite：agent/data/scalper_candles.db）
     </div>
 
     <div class="panel">
