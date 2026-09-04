@@ -7,7 +7,7 @@
  *   - 主界面：header + 页签 + 视图
  *   - 独立窗口（#/win/kline?instId=xxx）：只渲染一个 WinFrame，K 线 / 报告等
  */
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import {
   store, status, globalError, currentModel, isMockModel,
   initApp, dispose, startAgent, stopAgent, runOnce,
@@ -25,6 +25,7 @@ import LogView from "./components/LogView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import PositionsView from "./components/PositionsView.vue";
 import ScalperView from "./components/ScalperView.vue";
+import BacktestView from "./components/BacktestView.vue";
 import TraceView from "./components/TraceView.vue";
 import ReportsView from "./components/ReportsView.vue";
 import MarketView from "./components/MarketView.vue";
@@ -48,30 +49,79 @@ const ICONS = {
   rep: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
   mkt: svg('<line x1="3" y1="3" x2="3" y2="21"/><line x1="3" y1="21" x2="21" y2="21"/><polyline points="6 15 10 10 14 13 20 6"/>'),
   scalp: svg('<circle cx="12" cy="13" r="8"/><polyline points="12 9 12 13 15 15"/><line x1="9" y1="2" x2="15" y2="2"/>'),
+  bt: svg('<path d="M10 2v6L5 17a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3L14 8V2"/><line x1="8.5" y1="2" x2="15.5" y2="2"/>'),
 };
 
-const tabs = [
-  { k: "dash", t: "总览" },
-  { k: "mkt", t: "行情" },
-  { k: "chat", t: "对话" },
-  { k: "obs", t: "观测" },
-  { k: "models", t: "模型" },
-  { k: "roles", t: "角色" },
-  { k: "mcp", t: "MCP" },
-  { k: "skills", t: "Skill" },
-  { k: "log", t: "日志" },
-  { k: "rep", t: "报告" },
-  { k: "cfg", t: "设置" },
-  { k: "pos", t: "持仓" },
-  { k: "scalp", t: "超短线" },
+/** 一级板块图标（大菜单）。单叶板块复用叶子同款，多叶板块用语义更宽的图标 */
+const GROUP_ICON = {
+  overview: ICONS.dash,
+  trade: svg('<polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/>'),
+  run: ICONS.obs,
+  review: ICONS.rep,
+  sys: ICONS.cfg,
+};
+const CHEV = svg('<polyline points="6 9 12 15 18 9"/>');
+
+/**
+ * 两级导航：大菜单（板块）→ 小菜单（该板块的页面）。
+ * 单叶板块（总览 / 复盘）点板块直达；多叶板块展开二级小菜单。
+ * 叶子 key（dash/mkt/...）保持稳定：hash 直达、跨页跳转、KeepAlive 缓存都不受影响。
+ */
+const NAV = [
+  { k: "overview", t: "总览", items: [{ k: "dash", t: "总览" }] },
+  {
+    k: "trade",
+    t: "交易",
+    items: [
+      { k: "mkt", t: "行情" },
+      { k: "pos", t: "持仓" },
+      { k: "scalp", t: "超短线" },
+      { k: "bt", t: "策略回测" },
+    ],
+  },
+  {
+    k: "run",
+    t: "运行",
+    items: [
+      { k: "chat", t: "对话" },
+      { k: "obs", t: "观测" },
+      { k: "log", t: "日志" },
+    ],
+  },
+  { k: "review", t: "复盘", items: [{ k: "rep", t: "报告" }] },
+  {
+    k: "sys",
+    t: "系统",
+    items: [
+      { k: "models", t: "模型" },
+      { k: "roles", t: "角色" },
+      { k: "mcp", t: "MCP" },
+      { k: "skills", t: "Skill" },
+      { k: "cfg", t: "设置" },
+    ],
+  },
 ];
 const views = {
   dash: DashboardView, chat: ChatView, obs: TraceView, models: ModelsView, roles: RolesView,
   mcp: McpView, skills: SkillsView, log: LogView, rep: ReportsView, cfg: SettingsView, pos: PositionsView,
-  mkt: MarketView,
-  scalp: ScalperView,
+  mkt: MarketView, scalp: ScalperView, bt: BacktestView,
 };
 const currentView = computed(() => views[tab.value] || DashboardView);
+
+/** 当前叶子所属板块（决定大菜单高亮 + 二级小菜单内容） */
+const activeGroup = computed(() => NAV.find((g) => g.items.some((i) => i.k === tab.value)) || NAV[0]);
+/** 二级小菜单：多叶板块才展示；单叶板块大菜单即直达，不重复 */
+const subTabs = computed(() => (activeGroup.value.items.length > 1 ? activeGroup.value.items : []));
+/** 记住每个板块最近停留的叶子：来回切换板块不丢位置 */
+const lastLeaf = {};
+function pickGroup(g) {
+  if (g.k === activeGroup.value.k) return; // 已在当前板块，无需打断
+  tab.value = lastLeaf[g.k] || g.items[0].k;
+}
+function clickLeaf(k) {
+  tab.value = k;
+}
+watch(tab, (k) => { lastLeaf[activeGroup.value.k] = k; }, { immediate: true });
 
 // ── 主题：默认浅色，可切深色，localStorage 持久化 ──
 const theme = ref("light");
@@ -94,9 +144,9 @@ function onKey(e) {
 }
 
 onMounted(async () => {
-  // #hash 直达页签（超短线回测独立窗口用 #scalp 打开）
+  // #hash 直达页签（超短线回测独立窗口用 #scalp/#bt 打开）
   const h = (location.hash || "").replace(/^#/, "");
-  if (h && tabs.some((t) => t.k === h)) tab.value = h;
+  if (h && NAV.some((g) => g.items.some((i) => i.k === h))) tab.value = h;
   // 主题初始化放最前，避免首屏闪色
   let saved = "light";
   try { saved = localStorage.getItem("okx-agent-theme") || "light"; } catch { /* ignore */ }
@@ -141,10 +191,19 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <nav class="tabs">
-      <div v-for="t in tabs" :key="t.k"
+    <nav class="menu">
+      <div v-for="g in NAV" :key="g.k"
+           :class="['menu-item', activeGroup.k === g.k && 'active']"
+           @click="pickGroup(g)">
+        <span class="menu-ico" v-html="GROUP_ICON[g.k]"></span>{{ g.t }}
+        <span v-if="g.items.length > 1" class="chev" v-html="CHEV"></span>
+      </div>
+    </nav>
+
+    <nav v-if="subTabs.length" class="tabs">
+      <div v-for="t in subTabs" :key="t.k"
            :class="['tab', tab === t.k && 'active']"
-           @click="tab = t.k">
+           @click="clickLeaf(t.k)">
         <span class="tab-ico" v-html="ICONS[t.k]"></span>{{ t.t }}
       </div>
     </nav>

@@ -169,7 +169,7 @@ main {
 /* ── 页签 ─────────────────────────────────── */
 .tabs {
   display: flex; gap: 4px; flex: none;
-  height: 42px; padding: 0 14px;
+  height: 38px; padding: 0 14px;
   background: var(--surface); border-bottom: 1px solid var(--border);
   overflow-x: auto; scrollbar-width: none;
 }
@@ -186,6 +186,30 @@ main {
 .tab-ico { display: inline-flex; opacity: .8 }
 .tab.active .tab-ico { opacity: 1; color: var(--blue) }
 .tab-ico svg { width: 15px; height: 15px; display: block }
+
+/* ── 一级菜单（大菜单 = 板块）────────────────────────────── */
+.menu {
+  display: flex; gap: 2px; align-items: stretch; flex: none;
+  height: 40px; padding: 0 12px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  overflow-x: auto; scrollbar-width: none;
+}
+.menu::-webkit-scrollbar { display: none }
+.menu-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 15px; cursor: pointer; user-select: none;
+  color: var(--dim); font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color var(--ease), background var(--ease);
+}
+.menu-item:hover { color: var(--text); background: var(--hover) }
+.menu-item.active { color: var(--text); border-bottom-color: var(--blue); background: rgba(76, 141, 255, .08) }
+.menu-ico { display: inline-flex; opacity: .75 }
+.menu-item.active .menu-ico { opacity: 1; color: var(--blue) }
+.menu-ico svg { width: 15px; height: 15px; display: block }
+.chev { display: inline-flex; opacity: .45; margin-left: 1px }
+.menu-item.active .chev { opacity: .8 }
+.chev svg { width: 12px; height: 12px; display: block }
 .theme-ico { display: inline-flex; color: var(--text-2) }
 .theme-ico svg { width: 15px; height: 15px; display: block }
 
