@@ -720,7 +720,6 @@ onBeforeUnmount(() => {
                   <span v-if="s.engine" class="tag t-hold">引擎内置</span>
                   <span v-else-if="s.builtin" class="tag t-info">内置</span>
                   <span v-else class="tag t-buy">我的</span>
-                  <span v-if="currentStrategyId === s.id" class="tag t-on">实盘中</span>
                 </div>
                 <div class="hint">{{ s.engine ? "engine-default" : s.id }}<template v-if="s.updatedAt"> · {{ fmtTs(s.updatedAt) }} 更新</template></div>
               </td>
@@ -819,11 +818,11 @@ onBeforeUnmount(() => {
         </span>
       </div>
       <div class="row" style="margin-top:6px">
-        <button class="primary" :disabled="btRunning" @click="runBacktest">
-          {{ btRunning ? "回测中 " + (btProgress?.p ?? 0) + "%…" : "开始回测" }}
+        <button class="primary" :disabled="btBusy" @click="runBacktest">
+          {{ batch.running ? "批量回测进行中…" : btRunning ? "回测中 " + (btProgress?.p ?? 0) + "%…" : "开始回测" }}
         </button>
         <span class="hint">
-          {{ btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根 1m 斜率 + ATR 止损 + 凯利 RR 止盈）" }}
+          {{ batch.running ? "单次与批量回测互斥，批量结束后再单跑。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根 1m 斜率 + ATR 止损 + 凯利 RR 止盈）" }}
         </span>
       </div>
       <div v-if="btRunning" class="row" style="margin-top:6px">
@@ -1070,5 +1069,229 @@ tr.cat-row td {
   gap: 3px;
   cursor: pointer;
   color: var(--fg, #e8e8ec);
+}
+
+/* ── 批量回测 + 科技感装饰（仅本板块） ── */
+.bt-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 13px 16px;
+  border: 1px solid rgba(76, 141, 255, 0.28);
+  border-radius: var(--r);
+  background:
+    radial-gradient(560px 130px at 6% -40%, rgba(76, 141, 255, 0.2), transparent 60%),
+    radial-gradient(460px 130px at 97% -30%, rgba(163, 113, 247, 0.16), transparent 60%),
+    linear-gradient(120deg, rgba(76, 141, 255, 0.1), rgba(163, 113, 247, 0.06) 55%, transparent);
+  box-shadow: var(--sh-1);
+}
+.bt-hero-ic {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(76, 141, 255, 0.35);
+}
+.bt-hero-ic svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+.bt-hero-m {
+  flex: 1;
+  min-width: 0;
+}
+.bt-hero-t {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+}
+.bt-hero-d {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 2px;
+  max-width: 760px;
+}
+.bt-hero-stats {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.bt-hero-stats .st {
+  min-width: 60px;
+  text-align: center;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.bt-hero-stats b {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text);
+}
+.bt-hero-stats b.hl {
+  color: var(--blue);
+}
+.bt-hero-stats .st span {
+  color: var(--dim);
+  font-size: 10.5px;
+}
+
+.bt-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--hover-2);
+}
+.bt-sel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+  user-select: none;
+}
+.bt-sel input {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+}
+.bt-bar .sel-tip {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bt-strip {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(76, 141, 255, 0.3);
+  border-radius: var(--r-sm);
+  background: linear-gradient(90deg, rgba(76, 141, 255, 0.1), transparent);
+}
+.bt-strip-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.bt-strip-h b {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.bt-track {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.bt-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--blue), var(--purple), var(--blue));
+  background-size: 200% 100%;
+  animation: btFlow 1.6s linear infinite;
+  transition: width 0.5s ease;
+}
+@keyframes btFlow {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+tbody tr.sel td {
+  background: rgba(76, 141, 255, 0.07);
+}
+tbody tr.sel td:first-child {
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+th.ck {
+  width: 32px;
+  text-align: center;
+}
+td.ck {
+  text-align: center;
+  width: 32px;
+  padding: 0 2px !important;
+}
+td.ck input {
+  vertical-align: middle;
+}
+td.bt-cell {
+  max-width: 260px;
+}
+.bt-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.bt-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+.bt-live.on .bt-dot {
+  background: var(--blue);
+  box-shadow: 0 0 0 3px rgba(76, 141, 255, 0.18);
+  animation: btPulse 1.2s infinite;
+}
+.bt-live.wait .bt-dot {
+  background: var(--yellow);
+}
+.bt-live .pmin {
+  min-width: 44px;
+  color: var(--text);
+}
+.bt-metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bt-metrics .m-net {
+  font-weight: 700;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.bt-at {
+  font-size: 10.5px;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 250px;
+}
+@keyframes btPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 </style>
