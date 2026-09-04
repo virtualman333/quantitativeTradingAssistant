@@ -137,13 +137,27 @@ def main() -> int:
                         d = str(out.get("direction", "")).lower()
                         if d not in ("long", "short", "flat"):
                             errors.append(f"direction 必须是 long/short/flat，实际 {out.get('direction')!r}")
+                        for k in ("sl", "tp"):
+                            v = out.get(k)
+                            if v is not None:
+                                try:
+                                    float(v)
+                                except (TypeError, ValueError):
+                                    errors.append(f"{k} 必须是数值价格（可选，自定义止盈止损点位），实际 {v!r}")
+                        if d == "flat" and (out.get("sl") is not None or out.get("tp") is not None):
+                            warnings.append("flat 观望时引擎会忽略 sl/tp 点位；点位只在开仓方向生效")
                         fn_names = [x for x in dir(mod) if not x.startswith("_")]
                         print(json.dumps({
                             "ok": len(errors) == 0,
                             "errors": errors,
                             "warnings": warnings,
                             "functions": fn_names,
-                            "sample": {"direction": out.get("direction"), "reason": str(out.get("reason", ""))[:120]},
+                            "sample": {
+                                "direction": out.get("direction"),
+                                "reason": str(out.get("reason", ""))[:120],
+                                "sl": out.get("sl"),
+                                "tp": out.get("tp"),
+                            },
                         }, ensure_ascii=False, indent=2))
                         return 0 if len(errors) == 0 else 1
                 except Exception as exc:  # noqa: BLE001

@@ -9,7 +9,8 @@ scalper.py — 超短线（超高频）信号引擎（独立于主轮次）
 
 支持 --strategy DIR：加载用户自定义策略 agent/strategies/<id>/strategy.py，
       由 strategy.py 的 signal(ctx) 判向（可返回 long/short/flat），
-      并可覆盖 atr_mult / rr。判向为 flat（观望）时不开仓，SL/TP 置 0。
+      并可覆盖 atr_mult / rr，或直接返回 sl/tp 止盈止损点位（与 signal 方向一致时引擎直接采用）。
+      判向为 flat（观望）时不开仓，SL/TP 置 0。
 
 数据源：OKX 公开 REST（无需认证），复用 market_scan 的 _http_get / atr。
 """
@@ -22,7 +23,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from market_scan import _http_get, atr, fetch_specs
-from strategy_loader import load_strategy, call_signal, make_ctx
+from strategy_loader import load_strategy, call_signal, make_ctx, resolve_stops
 
 CST = timezone(timedelta(hours=8))
 
@@ -185,8 +186,14 @@ def main() -> int:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
 
-    sl_dist = a * use_atr_mult
-    tp_dist = sl_dist * rr
+    # 策略可选直接给 sl/tp 点位 → 优先采用（按参考价换算成距离）；否则回退 ATR×mult / RR
+    stop_note = ""
+    if strat_mod is not None:
+        sl_dist, tp_dist, rr, _direct, stop_note = resolve_stops(
+            direction, last, sig, a * use_atr_mult, rr
+        )
+    else:
+        sl_dist, tp_dist, rr, _direct, _n = resolve_stops(direction, last, None, a * use_atr_mult, rr)
 
     # 止盈必须覆盖手续费，否则放大到至少 1.5 倍手续费
     if tp_dist / last < fee:
@@ -220,6 +227,7 @@ def main() -> int:
         "tp_dist_pct": round(tp_dist / last * 100, 4),
         "net_tp_pct": round(tp_dist / last * 100 - fee * 100, 4),
         "net_sl_pct": round(sl_dist / last * 100 + fee * 100, 4),
+        "stop_note": stop_note or None,
         "strategy": os.path.basename(os.path.dirname(args.strategy)) if args.strategy else "",
         "spec": {
             "ctVal": spec.get("ctVal", 0),

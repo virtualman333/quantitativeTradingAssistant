@@ -212,14 +212,20 @@ function generateSystemPrompt(needImprove: boolean): string {
    只看最近 k 根就取 closes[n-k:n]，不要把整个数组都用上。
 3. 返回值必须是 dict：
    {"direction": "long"|"short"|"flat", "reason": "≤40字中文依据",
-    "atr_mult": 可选 覆盖默认止损系数 2.5, "rr": 可选 覆盖默认止盈/止损盈亏比(1.2~5.0)}
+    "atr_mult": 可选 覆盖默认止损系数 2.5, "rr": 可选 覆盖默认止盈/止损盈亏比(1.2~5.0),
+    "sl": 可选 自定义止损价, "tp": 可选 自定义止盈价}
    flat = 观望不开仓；direction 只允许这三个值。
+   想完全自控进出点位：同时返回 "sl" 与 "tp"（以 ctx.price 为参照的绝对价格），引擎直接采用。
 4. 禁止：import os/sys/json/subprocess/socket/requests/urllib/pathlib/open()/eval/exec；
    只能 import math/statistics/collections/itertools/functools/operator/random/bisect 等纯计算库。
 5. 策略必须对 n 很小的早期数据安全（例如 n<5 返回 flat），并处理除零。
 
-## 止损止盈由引擎统一算（方向之外的仓位管理不要写）
-引擎会用 ATR×atr_mult 定止损、止损距离×rr 定止盈。策略核心任务：判方向 + 可选的系数微调。
+## 止盈止损（默认引擎统一算，也可由策略直接给点位）
+引擎默认用 ATR×atr_mult 定止损、止损距离×rr 定止盈，策略核心任务是判方向。
+需要精确控制点位时：在返回里同时给 "sl"/"tp"（以 ctx.price 为参照的绝对价，例如
+{"direction": "long", "sl": price*0.99, "tp": price*1.03, "reason": "..."}），
+引擎会直接采用并在回测/实盘一致生效。注意方向约束：多单须 sl < price < tp，空单反之；
+若不满足会被回退成默认 ATR 距离，所以给点位时务必同时考虑 price 当前值。
 
 ## 设计建议
 - 组合 2~3 个互不冗余的条件（趋势 + 波动率滤网 + 动量确认），宁可 flat 也不硬开；

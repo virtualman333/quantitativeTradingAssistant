@@ -13,7 +13,9 @@ scalper_backtest.py — 超短线策略历史回测引擎
 
 支持自定义策略：
   --strategy DIR  加载 agent/strategies/<id>/strategy.py 的 signal(ctx) 逐根判向，
-                  支持 flat（观望不开仓）、可选覆盖 atr_mult / rr；
+                  支持 flat（观望不开仓）、可选覆盖 atr_mult / rr，
+                  或直接返回 sl/tp 止盈止损点位（按信号根收盘价换算成距离，
+                  在下一根开盘价入场时重建，与实盘 scalper.py 口径一致）；
                   close-on-reversal 时策略反向（非 flat）才触发反转平仓。
 
 进度（回测 job）：
@@ -34,7 +36,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from market_scan import _http_get
-from strategy_loader import load_strategy, call_signal, make_ctx
+from strategy_loader import load_strategy, call_signal, make_ctx, resolve_stops
 
 CST = timezone(timedelta(hours=8))
 BAR_MS = 60_000  # 1m
@@ -311,17 +313,25 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
             # 空仓：信号入场（下一根开盘价，避免未来函数）
             if atr_val > 0 and direction is not None:
                 if strat_mod is not None:
-                    atr_mult_i = sig["atr_mult"] if sig["atr_mult"] is not None else atr_mult
-                    rr_i = sig["rr"] if sig["rr"] is not None else None
+                    use_atr_mult_i = sig["atr_mult"] if sig["atr_mult"] is not None else atr_mult
+                    use_rr_i = sig["rr"]
                 else:
-                    atr_mult_i = atr_mult
-                    rr_i = None
-                if rr_i is None:
+                    use_atr_mult_i = atr_mult
+                    use_rr_i = None
+                if use_rr_i is None:
                     win_rate = 0.60 if strength == "strong" else 0.52
-                    rr_i = kelly_rr(win_rate)
-                sl_dist = atr_val * atr_mult_i
-                tp_dist = sl_dist * rr_i
+                    use_rr_i = kelly_rr(win_rate)
+                fallback_sl_dist = atr_val * use_atr_mult_i
                 entry = o[i + 1]
+                # 策略给 sl/tp 点位 → 以信号根收盘 c[i] 为参照换算距离，再按实际入场价重建
+                if strat_mod is not None:
+                    sl_dist, tp_dist, rr_i, _direct, _note = resolve_stops(
+                        direction, c[i], sig, fallback_sl_dist, use_rr_i
+                    )
+                else:
+                    sl_dist, tp_dist, rr_i, _direct, _note = resolve_stops(
+                        direction, c[i], None, fallback_sl_dist, use_rr_i
+                    )
                 if direction == "long":
                     sl = entry - sl_dist
                     tp = entry + tp_dist

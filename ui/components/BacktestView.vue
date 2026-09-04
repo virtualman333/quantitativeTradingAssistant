@@ -344,6 +344,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="hint" style="margin-top:8px">
         内置规则：策略只实现 <code>signal(ctx)</code> 判向（long/short/flat + 一句理由），可覆盖 ATR 止损系数 / 盈亏比；
+        也可返回 <code>sl</code>/<code>tp</code> 止盈止损点位（与方向一致、分列现价两侧）让引擎直接采用；
         禁止危险 import、禁止未来数据。策略在引擎内逐根执行——同一份代码既回测也实盘。
       </div>
     </div>
@@ -485,7 +486,7 @@ onBeforeUnmount(() => {
           <button class="primary" :disabled="genLoading || saveLoading" @click="llmGen">
             {{ genLoading ? "模型生成中…（约 1~3 分钟）" : editModal.code?.trim() ? "用 LLM 改写优化（带上次回测摘要）" : "用 LLM 生成代码" }}
           </button>
-          <span class="hint">内置规则已注入：只写 signal(ctx)、禁危险 import、止损止盈由引擎统一算</span>
+          <span class="hint">内置规则已注入：只写 signal(ctx)、禁危险 import、止损止盈默认由引擎统一算（也可返回 sl/tp 点位）</span>
         </div>
         <div v-if="modalNote" class="alert info" style="margin-top:6px">{{ modalNote }}</div>
         <div style="margin-top:8px"><b>strategy.py 代码</b> <span class="hint">（生成后仍可直接修改）</span></div>

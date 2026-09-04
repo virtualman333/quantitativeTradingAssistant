@@ -23,11 +23,15 @@ strategy_loader.py — 超短线自定义策略加载器（回测引擎 / 实盘
         #   {"direction": "long"|"short"|"flat",
         #    "reason": "一句话中文依据",
         #    "atr_mult": 2.5,   # 可选：覆盖默认止损距离 = ATR × 该系数
-        #    "rr": 2.0}          # 可选：覆盖默认止盈/止损盈亏比（夹 [1.2, 5.0]）
+        #    "rr": 2.0,         # 可选：覆盖默认止盈/止损盈亏比（夹 [1.2, 5.0]）
+        #    "sl": 59800.0,     # 可选：自定义止损价（绝对点位，以 ctx.price 为参照计算）
+        #    "tp": 60400.0}     # 可选：自定义止盈价；与 sl 同时给出时引擎直接采用
+        #                       #（回测/实盘一致生效），未给则回退 atr_mult / rr 推导。
 
-引擎安全兜底：signal 抛任何异常都按 flat 处理（只记录错误，绝不破坏引擎/下单）；
-direction 不在合法集合内一律 flat；atr_mult / rr 由引擎夹到安全区间。
-"""
+        引擎安全兜底：signal 抛任何异常都按 flat 处理（只记录错误，绝不破坏引擎/下单）；
+        direction 不在合法集合内一律 flat；atr_mult / rr 由引擎夹到安全区间；
+        sl/tp 点位须与 direction 一致（多单 sl < price < tp，空单反之），否则回退默认距离。
+        """
 from __future__ import annotations
 
 import importlib.util
@@ -101,12 +105,66 @@ def call_signal(mod: types.ModuleType | None, ctx: dict) -> dict:
             rr = max(DEFAULT_RR_RANGE[0], min(rr, DEFAULT_RR_RANGE[1]))
         except (TypeError, ValueError):
             rr = None
+    # 自定义止盈止损点位（绝对价）。flat 时点位无意义 → 置 None
+    sl = tp = None
+    if direction != "flat":
+        sl = raw.get("sl")
+        tp = raw.get("tp")
+        sl = _to_num(sl)
+        tp = _to_num(tp)
     return {
         "direction": direction,
         "reason": reason,
         "atr_mult": atr_mult,
         "rr": rr,
+        "sl": sl,
+        "tp": tp,
     }
+
+
+def _to_num(v) -> float | None:
+    """把策略返回的数值字段转 float；缺失 / 非数值 / NaN → None。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # 过滤 NaN
+
+
+def resolve_stops(direction: str, ref: float, sig: dict | None,
+                  fallback_sl_dist: float, fallback_rr: float):
+    """按 direction 定下止损/止盈距离——回测与实盘引擎共用，保证两端口径一致。
+
+    策略在 signal 里给了 sl/tp（绝对点位）且方向摆放合法 → 直接采用并换算成距离；
+    否则回退默认：sl_dist = fallback_sl_dist，tp_dist = sl_dist × fallback_rr。
+
+    direction: "long" / "short"（flat 不应传入，由调用方提前跳过）
+    ref      : signal 的参考价（点位以该价为参照给出；实盘=最新收盘，回测=当前根收盘）
+    sig      : call_signal() 的输出（含 sl/tp）；无自定义策略时传 None
+
+    返回 (sl_dist, tp_dist, rr, used_direct, note)
+      used_direct: 本次是否直接采用了策略给的 sl/tp 点位
+      note: 点位被回退时的中文原因（正常为空串）
+    """
+    note = ""
+    if sig is not None:
+        sl = sig.get("sl")
+        tp = sig.get("tp")
+        if sl is not None and tp is not None and ref and ref > 0:
+            if direction == "long" and sl < ref < tp:
+                sl_dist = ref - sl
+                tp_dist = tp - ref
+            elif direction == "short" and sl > ref > tp:
+                sl_dist = sl - ref
+                tp_dist = ref - tp
+            else:
+                sl = tp = None
+            if sl is not None and tp is not None and sl_dist > 0 and tp_dist > sl_dist:
+                return sl_dist, tp_dist, tp_dist / sl_dist, True, ""
+            note = "策略 sl/tp 点位与方向不符或间距不合法，已回退默认止盈止损"
+    return fallback_sl_dist, fallback_sl_dist * fallback_rr, fallback_rr, False, note
 
 
 def make_ctx(ts, closes, highs, lows, vols, n, atr_val, error_hint: str = "") -> dict:

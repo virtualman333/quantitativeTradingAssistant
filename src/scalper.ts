@@ -44,6 +44,8 @@ export interface ScalperSignal {
   tp_dist?: number;
   bars: number;
   ts: string;
+  /** 策略直接给 sl/tp 点位但被回退时（方向/间距不合法）的中文说明 */
+  stop_note?: string;
   error?: string;
 }
 
