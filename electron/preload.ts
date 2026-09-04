@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("api", {
   scalperStop: () => safeInvoke("scalper:stop"),
   scalperStatus: () => safeInvoke("scalper:status"),
   scalperBacktest: (p: unknown) => safeInvoke("scalper:backtest", p),
+  scalperCloseAll: () => safeInvoke("scalper:closeAll"),
   // 实时账户/持仓查看
   accountGet: (profile?: string) => safeInvoke("account:get", profile),
   storeReset: () => safeInvoke("store:reset"),

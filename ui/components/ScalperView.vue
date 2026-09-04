@@ -13,6 +13,7 @@ const loopRunning = ref(false);
 const lastResult = ref(null);
 const overview = ref(null);
 const fieldErr = ref("");
+const closing = ref(false);
 
 watch(
   () => store.scalper,
@@ -141,6 +142,28 @@ async function stopLoop() {
     toastErr(e, "停止失败");
   }
   await refreshLoopStatus();
+}
+
+async function closeAll() {
+  if (
+    !(await ask("将一键平掉超短线当前全部持仓（先撤止损止盈再市价平仓）。确认？", {
+      title: "一键平仓",
+      confirmText: "平仓",
+      danger: true,
+    }))
+  )
+    return;
+  closing.value = true;
+  try {
+    const r = await api.scalperCloseAll();
+    if (r?.ok) toastOk(r?.msg || "已平仓");
+    else toastErr(new Error(r?.msg || "平仓失败"), "平仓失败");
+    await loadOverview();
+  } catch (e) {
+    toastErr(e, "平仓失败");
+  } finally {
+    closing.value = false;
+  }
 }
 
 let timer = null;
@@ -306,7 +329,11 @@ async function runBacktest() {
   </div>
 
   <div class="panel">
-    <h2>当前持仓</h2>
+    <h2>当前持仓<span class="spacer"></span>
+      <button class="danger" :disabled="closing || !overview?.positions?.length" @click="closeAll">
+        {{ closing ? "平仓中…" : "一键平仓" }}
+      </button>
+    </h2>
     <div class="body">
       <table v-if="overview?.positions?.length">
         <thead>

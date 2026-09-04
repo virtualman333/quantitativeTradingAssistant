@@ -231,7 +231,7 @@ async function fetchLastPrice(inst: string): Promise<number | null> {
   }
 }
 
-/** 平仓检测：open 记录对应标的已无持仓 → 用当前价近似平仓价，算 pnl */
+/** 平仓检测：同一标的只保留「最新且方向匹配当前持仓」的 open 记录，其余用当前价近似平仓 */
 async function syncTrades(): Promise<ScalperTrade[]> {
   const trades = readTrades();
   const open = trades.filter((t) => t.status === "open");
@@ -242,10 +242,26 @@ async function syncTrades(): Promise<ScalperTrade[]> {
   } catch {
     return trades;
   }
-  const posInst = new Set(acct.positions.map((p) => String(p.instId ?? "")));
-  let changed = false;
+
+  // 当前各标的持仓方向（net 模式由 pos 正负判断，long/short 由 posSide）
+  const posSideByInst = new Map<string, "long" | "short">();
+  for (const p of acct.positions) {
+    const inst = String(p.instId ?? "");
+    const ps = positionSide(p);
+    if (inst && ps) posSideByInst.set(inst, ps);
+  }
+
+  // 按标的分组 open 记录，ts 升序；只有「最新一条 + 方向匹配当前持仓」保持 open
+  const openByInst = new Map<string, ScalperTrade[]>();
   for (const t of trades) {
-    if (t.status !== "open" || posInst.has(t.inst)) continue;
+    if (t.status !== "open") continue;
+    const arr = openByInst.get(t.inst) ?? [];
+    arr.push(t);
+    openByInst.set(t.inst, arr);
+  }
+
+  let changed = false;
+  const closeRecord = async (t: ScalperTrade): Promise<void> => {
     t.status = "closed";
     const close = await fetchLastPrice(t.inst);
     t.closePrice = close ?? undefined;
@@ -255,9 +271,40 @@ async function syncTrades(): Promise<ScalperTrade[]> {
       t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
     }
     changed = true;
+  };
+
+  for (const [inst, list] of openByInst) {
+    const curSide = posSideByInst.get(inst);
+    list.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+    for (let k = 0; k < list.length; k++) {
+      const t = list[k];
+      const isLatest = k === list.length - 1;
+      const matchCur = curSide != null && t.direction === curSide;
+      if (isLatest && matchCur) continue; // 保持 open
+      await closeRecord(t);
+    }
   }
+
   if (changed) writeTrades(trades);
   return trades;
+}
+
+/** 关闭某标的全部 open 记录（开新单前调用，用当前价近似旧仓平仓价） */
+async function closeOpenRecords(inst: string): Promise<void> {
+  const trades = readTrades();
+  const open = trades.filter((t) => t.status === "open" && t.inst === inst);
+  if (!open.length) return;
+  const close = await fetchLastPrice(inst);
+  for (const t of open) {
+    t.status = "closed";
+    t.closePrice = close ?? undefined;
+    if (close != null) {
+      const dir = t.direction === "long" ? 1 : -1;
+      t.pnl = Number(((close - t.entry) * t.size * t.ctVal * dir).toFixed(4));
+      t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
+    }
+  }
+  writeTrades(trades);
 }
 
 /**
@@ -375,6 +422,8 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const confirmed = await confirmAlgo(cfg.inst);
 
   const ok = oco.ok && confirmed;
+  // 开新单前：关闭该标的此前的 open 记录（旧仓已平，避免堆积一直显示「持仓中」）
+  await closeOpenRecords(cfg.inst);
   // 记录开单（补齐名义金额/保证金/手续费字段）
   const notionalUsdt = size * spec.ctVal * price;
   const marginUsdt = notionalUsdt / lever;
@@ -450,6 +499,69 @@ export async function runScalperBacktest(args: {
   } catch {
     return { error: `回测脚本输出非 JSON: ${out.slice(0, 300)}` };
   }
+}
+
+/**
+ * 一键平仓：平掉超短线所有在持标的的持仓。
+ *
+ * 范围 = 开仓记录里 status=open 的标的 ∪ 当前配置标的（兜底），
+ * 避免误平主轮次开的、与超短线无关的仓位。
+ * 顺序沿用趋势反转平仓的既有套路：先撤 OCO 止损止盈 → 再市价平仓，
+ * 否则残留止损单会在平仓后反向触发。
+ */
+export async function closeScalperPositions(
+  inst?: string
+): Promise<{ ok: boolean; msg: string; closed: number }> {
+  const openInsts = new Set(readTrades().filter((t) => t.status === "open").map((t) => t.inst));
+  if (inst) openInsts.add(inst);
+
+  let acct: Awaited<ReturnType<typeof fetchAccount>>;
+  try {
+    acct = await fetchAccount();
+  } catch (e) {
+    return { ok: false, msg: `获取账户失败：${String(e).slice(0, 120)}`, closed: 0 };
+  }
+
+  const targets = acct.positions.filter((p) => {
+    const ps = positionSide(p);
+    return openInsts.has(String(p.instId ?? "")) && ps && Math.abs(Number(p.pos ?? 0)) > 0;
+  });
+  if (!targets.length) return { ok: false, msg: "超短线当前无持仓可平", closed: 0 };
+
+  let closed = 0;
+  const errs: string[] = [];
+  const closedInsts: string[] = [];
+  for (const p of targets) {
+    const instId = String(p.instId ?? "");
+    const ps = positionSide(p)!;
+    const size = Math.abs(Number(p.pos ?? 0));
+    const side = ps === "long" ? "sell" : "buy";
+
+    const cancel = await cancelAlgoOrders(instId);
+    if (!cancel.ok) {
+      errs.push(`${instId}: 撤止损止盈失败 ${cancel.raw.slice(0, 80)}`);
+      continue;
+    }
+    const r = await closePosition({ inst: instId, side, size });
+    if (r.ok) {
+      closed++;
+      closedInsts.push(instId);
+    } else {
+      errs.push(`${instId}: ${r.raw.slice(0, 120)}`);
+    }
+  }
+
+  // 同步交易记录：open → closed，并用最新价近似平仓价算盈亏
+  await syncTrades();
+
+  if (errs.length) {
+    return {
+      ok: closed > 0,
+      msg: `平仓 ${closed}/${targets.length} 笔成功，失败：${errs.join("；")}`,
+      closed,
+    };
+  }
+  return { ok: true, msg: `已平仓 ${closed} 笔（${[...new Set(closedInsts)].join(", ")}）`, closed };
 }
 
 export { DEFAULT_SCALPER };

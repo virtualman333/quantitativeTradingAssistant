@@ -547,6 +547,16 @@ ipcMain.handle("scalper:backtest", async (_e, args) => {
     return { ok: false, error: String(e).slice(0, 300) };
   }
 });
+ipcMain.handle("scalper:closeAll", async () => {
+  try {
+    const cfg = await withStore((s) => s.getScalperConfig());
+    const mod = await loadDist<any>("scalper.js");
+    const r = await mod.closeScalperPositions(cfg?.inst);
+    return r;
+  } catch (e) {
+    return { ok: false, msg: String(e).slice(0, 300), closed: 0 };
+  }
+});
 
 // ── 超短线独立循环（「超短线」页签独立启停，与主轮次 agent 解耦） ──
 let scalperLoopTimer: NodeJS.Timeout | null = null;
