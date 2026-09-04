@@ -4,7 +4,7 @@
  * 策略库（内置 + 自定义 / LLM 生成 / 校验 / 应用到实盘循环）+ 逐根回放回测（后台 job + 实时进度）
  * 原为 ScalperView 内嵌面板，因页面过载独立成 tab。策略仍作用于超短线实盘循环。
  */
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { store, reload } from "../store/index.js";
 import { api, errText } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
@@ -147,8 +147,11 @@ async function loadStrategies() {
   } catch {
     /* ignore */
   }
-  // 回测默认跟随当前实盘使用的策略
-  if (btForm.value && !btForm.value.strategyId) {
+  // 回测默认跟随当前实盘使用的策略；自动保存的旧策略已不存在时也回退跟随
+  if (btForm.value && btForm.value.strategyId) {
+    const known = (strategies.value || []).some((s) => s.id === btForm.value.strategyId);
+    if (!known) btForm.value.strategyId = currentStrategyId.value || "";
+  } else if (btForm.value) {
     btForm.value.strategyId = currentStrategyId.value || "";
   }
 }
@@ -387,7 +390,13 @@ async function btForStrategy(id) {
 function buildBtSummary(r) {
   if (!r?.summary) return "";
   const s = r.summary;
-  return `区间 ${r.start || ""} ~ ${r.end || ""}｜笔数 ${s.trades}，胜率 ${s.winRate ?? "-"}%，总净盈亏 $${fmtNum(s.totalNetPnlUsdt ?? 0, 2)}（${s.totalNetPnlPct ?? 0}%），盈亏比 ${fmtNum(s.profitFactor ?? 0, 2)}，最大回撤 ${s.maxDrawdownPct ?? 0}%，手续费 $${fmtNum(s.totalFeeUsdt ?? 0, 2)}，夏普 ${s.sharpe ?? "-"}`;
+  const pa = r.params || {};
+  let extra = "";
+  if (pa.atrMult != null) extra += `｜ATR×${pa.atrMult}`;
+  if (pa.rr != null) extra += ` RR ${(pa.rr ?? 0) > 0 ? `${pa.rr}×` : "自动"}`;
+  if (pa.slippageBps) extra += ` 滑点${pa.slippageBps}bps`;
+  if (pa.maxHold) extra += ` 超时${pa.maxHold}分`;
+  return `区间 ${r.start || ""} ~ ${r.end || ""}${extra}｜笔数 ${s.trades}，胜率 ${s.winRate ?? "-"}%，总净盈亏 $${fmtNum(s.totalNetPnlUsdt ?? 0, 2)}（${s.totalNetPnlPct ?? 0}%），盈亏比 ${fmtNum(s.profitFactor ?? 0, 2)}，最大回撤 ${s.maxDrawdownPct ?? 0}%，手续费 $${fmtNum(s.totalFeeUsdt ?? 0, 2)}，夏普 ${s.sharpe ?? "-"}`;
 }
 
 // ── 超短线回测（后台 job + 实时进度） ──
@@ -395,17 +404,77 @@ function toLocalInput(d) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-const _now = new Date();
-const btForm = ref({
-  inst: "BTC-USDT-SWAP",
-  start: toLocalInput(new Date(_now.getTime() - 7 * 24 * 3600 * 1000)),
-  end: toLocalInput(_now),
-  atrMult: 2.5,
-  feeRate: 0.0005,
-  notional: 10000,
-  closeOnReversal: false,
-  strategyId: "",
-});
+const INST_SUGGEST = [
+  "BTC-USDT-SWAP",
+  "ETH-USDT-SWAP",
+  "SOL-USDT-SWAP",
+  "DOGE-USDT-SWAP",
+  "XRP-USDT-SWAP",
+  "BNB-USDT-SWAP",
+];
+const QUICK_RANGES = [
+  { d: 1, t: "近 1 天" },
+  { d: 3, t: "近 3 天" },
+  { d: 7, t: "近 7 天" },
+  { d: 14, t: "近 14 天" },
+  { d: 30, t: "近 1 月" },
+];
+function btFormDefaults() {
+  const now = new Date();
+  return {
+    inst: "BTC-USDT-SWAP",
+    start: toLocalInput(new Date(now.getTime() - 7 * 24 * 3600 * 1000)),
+    end: toLocalInput(now),
+    atrMult: 2.5,
+    feeRate: 0.0005,
+    notional: 10000,
+    closeOnReversal: false,
+    rrOverride: 0, // 固定止盈 RR：0=自动（内置凯利 / 策略显式返回优先）
+    slippageBps: 0, // 单边滑点 bps（1 bps = 0.01%）
+    maxHoldBars: 0, // 持仓最长分钟数：0 = 不限
+    strategyId: "",
+  };
+}
+const BT_PARAM_KEY = "btParamsV1";
+/** 读取上次填写的回测参数（localStorage，跨重启保留；字段缺失时用默认值兜底） */
+function loadBtParams() {
+  try {
+    const s = JSON.parse(localStorage.getItem(BT_PARAM_KEY) || "null");
+    if (s && s.v === 1 && s.f && typeof s.f === "object") return { ...btFormDefaults(), ...s.f };
+  } catch {
+    /* ignore */
+  }
+  return btFormDefaults();
+}
+const btForm = ref(loadBtParams());
+let saveBtTimer = null;
+function saveBtParams(immediate = false) {
+  if (saveBtTimer) {
+    clearTimeout(saveBtTimer);
+    saveBtTimer = null;
+  }
+  const doIt = () => {
+    try {
+      localStorage.setItem(BT_PARAM_KEY, JSON.stringify({ v: 1, f: btForm.value, savedAt: Date.now() }));
+    } catch {
+      /* ignore */
+    }
+  };
+  if (immediate) doIt();
+  else saveBtTimer = setTimeout(doIt, 350);
+}
+watch(btForm, () => saveBtParams(), { deep: true });
+function resetBtParams() {
+  Object.assign(btForm.value, btFormDefaults());
+  saveBtParams(true);
+  toastOk("已恢复默认回测参数（后续改动仍会自动保存）");
+}
+/** 快捷时间区间：结束设为当前，起始 = 当前往前 days 天 */
+function quickRange(days) {
+  const now = new Date();
+  btForm.value.end = toLocalInput(now);
+  btForm.value.start = toLocalInput(new Date(now.getTime() - days * 24 * 3600 * 1000));
+}
 const btRunning = ref(false);
 const btResult = ref(null);
 const btError = ref("");
@@ -447,6 +516,9 @@ function btParams() {
     atrMult: Number(btForm.value.atrMult) || 2.5,
     feeRate: Number(btForm.value.feeRate) || 0.0005,
     notional: Number(btForm.value.notional) || 10000,
+    rr: Math.max(0, Number(btForm.value.rrOverride) || 0),
+    slippageBps: Math.max(0, Number(btForm.value.slippageBps) || 0),
+    maxHold: Math.max(0, Math.round(Number(btForm.value.maxHoldBars) || 0)),
     closeOnReversal: !!btForm.value.closeOnReversal,
   };
 }
@@ -624,6 +696,7 @@ onMounted(() => {
   loadStrategies();
 });
 onBeforeUnmount(() => {
+  if (saveBtTimer) clearTimeout(saveBtTimer);
   if (btWatchdog) clearInterval(btWatchdog);
   if (offBt) offBt();
 });
@@ -784,45 +857,88 @@ onBeforeUnmount(() => {
 
   <!-- ── 回测控制台 ── -->
   <div class="panel">
-    <h2 id="scalper_bt">超短线回测</h2>
+    <h2 id="scalper_bt">超短线回测<span class="spacer"></span><span class="hint">参数改动自动保存 —— 下次打开默认沿用上次填写</span></h2>
     <div class="body">
+      <div class="cfg-head">
+        <span class="cfg-ic"></span><b>标的与策略</b>
+        <span class="spacer"></span>
+        <button class="sm" @click="resetBtParams">恢复默认参数</button>
+      </div>
       <div class="row">
         <label>标的</label>
-        <input v-model="btForm.inst" placeholder="BTC-USDT-SWAP" style="max-width:200px" />
+        <input v-model="btForm.inst" list="bt_insts" placeholder="BTC-USDT-SWAP" style="max-width:200px" />
+        <datalist id="bt_insts">
+          <option v-for="i in INST_SUGGEST" :key="i" :value="i" />
+        </datalist>
+        <span class="hint">USDT 永续。建议优先 BTC/ETH/SOL 等深度好的标的，滑点假设才贴近现实</span>
       </div>
       <div class="row">
         <label>回测策略</label>
-        <select v-model="btForm.strategyId" style="max-width:260px">
+        <select v-model="btForm.strategyId" style="max-width:280px">
           <option value="">内置趋势策略（默认）</option>
           <option v-for="s in strategies" :key="s.id" :value="s.id">{{ s.name }}（{{ s.id }}）</option>
         </select>
-        <span class="hint">下拉即回测该策略；内置为原超短线规则</span>
+        <span class="hint">下拉即回测该策略；也用于「批量回测」的横向对比</span>
+      </div>
+
+      <div class="cfg-head">
+        <span class="cfg-ic"></span><b>时间区间</b>
+        <span class="spacer"></span>
+        <span class="bt-quick">
+          <span v-for="q in QUICK_RANGES" :key="q.d" class="chip" @click="quickRange(q.d)">{{ q.t }}</span>
+        </span>
       </div>
       <div class="row">
-        <label>时间区间</label>
-        <input v-model="btForm.start" type="datetime-local" style="max-width:210px" />
+        <label>起止时间</label>
+        <input v-model="btForm.start" type="datetime-local" style="max-width:200px" />
         <span class="hint">至</span>
-        <input v-model="btForm.end" type="datetime-local" style="max-width:210px" />
+        <input v-model="btForm.end" type="datetime-local" style="max-width:200px" />
+        <span class="hint">本地时间。区间越大首次拉取越久（超过 4 分钟会被看门狗终止），跑过的区间自动命中 SQLite 缓存秒开</span>
+      </div>
+
+      <div class="cfg-head">
+        <span class="cfg-ic"></span><b>进出场与成本</b>
+        <span class="spacer"></span>
+        <span class="hint">策略直接返回 sl/tp 点位时，以点位为准</span>
       </div>
       <div class="row">
-        <label>参数</label>
-        <input v-model.number="btForm.atrMult" type="number" step="0.1" style="max-width:96px" title="ATR 系数" />
-        <span class="hint">ATR×</span>
-        <input v-model.number="btForm.feeRate" type="number" step="0.0001" style="max-width:104px" title="单边费率" />
-        <span class="hint">费率</span>
-        <input v-model.number="btForm.notional" type="number" step="100" style="max-width:110px" title="每笔名义金额" />
-        <span class="hint">名义USDT</span>
+        <label>止损</label>
+        <input v-model.number="btForm.atrMult" type="number" min="0.5" max="10" step="0.1" style="max-width:88px" title="止损 = ATR × 系数" />
+        <span class="hint">止损距离 = ATR(1m,14) × <b>{{ btForm.atrMult }}</b></span>
+        <span style="flex:1"></span>
+        <label>止盈</label>
+        <input v-model.number="btForm.rrOverride" type="number" min="0" max="10" step="0.5" style="max-width:88px" title="固定盈亏比 RR（0=自动）" />
+        <span class="hint">RR：0 = 自动（强趋势凯利 / 弱趋势 0.6 胜率）；&gt;0 如 2，则止盈 = 止损 × 2</span>
+      </div>
+      <div class="row">
+        <label>持仓超时</label>
+        <input v-model.number="btForm.maxHoldBars" type="number" min="0" max="300" step="5" style="max-width:88px" title="最长持仓分钟数" />
+        <span class="hint">超过该分钟数以当前价强制平仓（0 = 不限），避免小波动长套</span>
+        <span style="flex:1"></span>
+        <label>名义金额</label>
+        <input v-model.number="btForm.notional" type="number" min="100" step="100" style="max-width:100px" title="每笔名义 USDT" />
+        <span class="hint">仅用于折算盈亏金额，不影响开平仓方向与时机</span>
+      </div>
+      <div class="row">
+        <label>成本</label>
+        <input v-model.number="btForm.feeRate" type="number" min="0" max="0.005" step="0.0001" style="max-width:92px" title="单边 taker 费率" />
+        <span class="hint">单边 taker 费率（开、平各收一次）</span>
+        <span class="hint" style="opacity:.45">｜</span>
+        <input v-model.number="btForm.slippageBps" type="number" min="0" max="50" step="0.5" style="max-width:80px" title="单边滑点 bps" />
+        <span class="hint">滑点 bps（0.01%），开平均按不利方向计入成交价</span>
+        <span style="flex:1"></span>
         <span class="chk" style="display:inline-flex;gap:6px;align-items:center">
           <input id="bt_rev" v-model="btForm.closeOnReversal" type="checkbox" />
           <label for="bt_rev">趋势反转平仓</label>
         </span>
       </div>
       <div class="row" style="margin-top:6px">
+        <label></label>
         <button class="primary" :disabled="btBusy" @click="runBacktest">
           {{ batch.running ? "批量回测进行中…" : btRunning ? "回测中 " + (btProgress?.p ?? 0) + "%…" : "开始回测" }}
         </button>
         <span class="hint">
-          {{ batch.running ? "单次与批量回测互斥，批量结束后再单跑。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根 1m 斜率 + ATR 止损 + 凯利 RR 止盈）" }}
+          {{ batch.running ? "单次与批量回测互斥，批量结束后再单跑。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根 1m 斜率 + ATR 止损 + RR 止盈）" }}
         </span>
       </div>
       <div v-if="btRunning" class="row" style="margin-top:6px">
@@ -1293,5 +1409,44 @@ td.bt-cell {
   50% {
     opacity: 0.35;
   }
+}
+
+/* ── 回测控制台：分区标题 + 快捷时间区间 ── */
+.cfg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--dim);
+}
+.cfg-head:first-child {
+  margin-top: 0;
+}
+.cfg-head b {
+  font-weight: 600;
+  color: var(--text);
+}
+.cfg-ic {
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--blue), var(--purple));
+  box-shadow: 0 0 6px rgba(76, 141, 255, 0.55);
+}
+.bt-quick {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.bt-quick .chip {
+  cursor: pointer;
+}
+.bt-quick .chip:hover {
+  border-color: var(--blue);
+  color: var(--blue);
 }
 </style>

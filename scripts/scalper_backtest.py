@@ -7,8 +7,9 @@ scalper_backtest.py — 超短线策略历史回测引擎
   趋势  ：最近 5 根 1m 收盘价的最小二乘斜率（>0 做多，<0 做空，必出方向）
   止损  ：ATR(1m, 14) × atr-mult
   止盈  ：止损距离 × 凯利盈亏比 RR（强趋势胜率 0.60 / 弱 0.52，RR 夹 [1.5, 4.0]）
-  成本  ：taker 双边 fee-rate × 2（开、平各计一次）
+  成本  ：taker 双边 fee-rate × 2（开、平各计一次）+ 可选 --slippage-bps 单边滑点
   反转  ：可选 --close-on-reversal，持仓期间趋势反向则平仓
+  出场  ：可选 --rr 固定止盈倍率（0=自动凯利/策略优先）、--max-hold 持仓超时（分钟）平仓
   执行  ：信号在已收盘 K 线后产生 → 下一根开盘价入场（无未来函数）
 
 支持自定义策略：
@@ -198,12 +199,15 @@ def kelly_rr(win_rate: float) -> float:
 
 
 def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
-        strategy_dir=None, job_id=""):
+        strategy_dir=None, job_id="", rr=0.0, slippage_bps=0.0, max_hold=0):
     """回测主循环。
 
     strategy_dir 为空 → 内置规则（最近 5 根 1m 斜率判向，与 scalper.py 严格一致）；
     strategy_dir 指定 → 逐根调用 strategy.py 的 signal(ctx)，支持 flat / 覆盖 atr_mult / rr。
     job_id 非空 → 向 stderr 上报进度 JSON 行。
+    rr: >0 强制固定止盈倍率（策略显式返回 rr 时优先；0=自动：内置凯利 / 策略默认）
+    slippage_bps: 单边滑点（1 bps=0.01%），开平仓均按不利方向计入成交价
+    max_hold: 持仓最长分钟数，0=不限；到点以当前收盘价超时平仓
     """
     report_progress(job_id, 1, "data", "正在拉取 1m K 线（含 SQLite 缓存）…")
     strat_mod = None
@@ -224,6 +228,8 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
 
     fee_amt = notional * fee_rate * 2  # 双边手续费（固定名义金额）
     fee_pct = fee_rate * 2 * 100
+    slip = slippage_bps / 10000.0  # 单边滑点比例：开、平仓均按不利方向计入成交价
+    force_rr = rr if rr and rr > 0 else None  # 固定止盈倍率（0=自动凯利 / 策略默认）
 
     # 预热 Wilder ATR 到根 warmup-1
     atr_val = 0.0
@@ -244,7 +250,9 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
         nonlocal pos
         side = pos["side"]
         entry = pos["entry"]
-        raw_pct = (exit_px / entry - 1) * (1 if side == "long" else -1) * 100
+        # 平仓同样按不利方向吃滑点：多单卖出成交价更低、空单买回成交价更高
+        fill = exit_px * (1 - slip) if side == "long" else exit_px * (1 + slip)
+        raw_pct = (fill / entry - 1) * (1 if side == "long" else -1) * 100
         net_pct = raw_pct - fee_pct
         raw_usdt = notional * raw_pct / 100
         net_usdt = raw_usdt - fee_amt
@@ -254,7 +262,7 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
             "entryTs": fmt_ts(pos["open_ts"]),
             "exitTs": fmt_ts(ts[exit_i]),
             "entry": round(entry, 2),
-            "exit": round(exit_px, 2),
+            "exit": round(fill, 2),
             "sl": round(pos["sl"], 2),
             "tp": round(pos["tp"], 2),
             "bars": exit_i - pos["open_i"],
@@ -305,6 +313,8 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
             # 反转平仓：自定义策略 flat=观望不平；内置规则只要反向就平
             if exit_px is None and close_on_reversal and direction is not None and direction != pos["side"]:
                 exit_px, reason = c[i], "趋势反转"
+            if exit_px is None and max_hold and (i - pos["open_i"]) >= max_hold:
+                exit_px, reason = c[i], "持仓超时"
             if exit_px is not None:
                 close_trade(exit_px, i, reason)
                 i += 1
@@ -319,10 +329,15 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
                     use_atr_mult_i = atr_mult
                     use_rr_i = None
                 if use_rr_i is None:
-                    win_rate = 0.60 if strength == "strong" else 0.52
-                    use_rr_i = kelly_rr(win_rate)
+                    if force_rr is not None:
+                        use_rr_i = force_rr
+                    else:
+                        win_rate = 0.60 if strength == "strong" else 0.52
+                        use_rr_i = kelly_rr(win_rate)
                 fallback_sl_dist = atr_val * use_atr_mult_i
-                entry = o[i + 1]
+                # 入场开仓按不利方向吃滑点：多单买价更高、空单卖价更低（仍无未来函数）
+                raw_entry = o[i + 1]
+                entry = raw_entry * (1 + slip) if direction == "long" else raw_entry * (1 - slip)
                 # 策略给 sl/tp 点位 → 以信号根收盘 c[i] 为参照换算距离，再按实际入场价重建
                 if strat_mod is not None:
                     sl_dist, tp_dist, rr_i, _direct, _note = resolve_stops(
@@ -437,6 +452,9 @@ def main() -> int:
     ap.add_argument("--atr-mult", type=float, default=2.5, help="止损 = ATR × 该系数")
     ap.add_argument("--fee-rate", type=float, default=0.0005, help="单边 taker 费率")
     ap.add_argument("--notional", type=float, default=10000.0, help="每笔名义金额（USDT，算盈亏金额）")
+    ap.add_argument("--rr", type=float, default=0.0, help="固定止盈 RR（0=自动：内置凯利 / 策略显式返回 rr 优先）")
+    ap.add_argument("--slippage-bps", type=float, default=0.0, help="单边滑点（bps=1/10000，开平均按不利方向计入成交价）")
+    ap.add_argument("--max-hold", type=int, default=0, help="持仓最长分钟数，0=不限（超时以当前收盘价平仓）")
     ap.add_argument("--close-on-reversal", action="store_true", help="趋势反转平仓")
     ap.add_argument("--strategy", default="", help="自定义策略目录 agent/strategies/<id>（空=内置规则）")
     ap.add_argument("--job-id", default="", help="回测任务 ID（非空时向 stderr 上报进度 JSON）")
@@ -452,6 +470,9 @@ def main() -> int:
             args.notional, args.close_on_reversal,
             strategy_dir=args.strategy or None,
             job_id=args.job_id,
+            rr=args.rr,
+            slippage_bps=args.slippage_bps,
+            max_hold=args.max_hold,
         )
         out = {
             "inst": args.inst,
@@ -463,6 +484,9 @@ def main() -> int:
                 "feeRate": args.fee_rate,
                 "feePct": round(args.fee_rate * 2 * 100, 3),
                 "notional": args.notional,
+                "rr": args.rr,
+                "slippageBps": args.slippage_bps,
+                "maxHold": args.max_hold,
                 "closeOnReversal": args.close_on_reversal,
                 "strategy": args.strategy or "",
             },

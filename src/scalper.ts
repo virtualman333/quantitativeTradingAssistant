@@ -524,12 +524,18 @@ export function backtestArgv(args: {
   closeOnReversal?: boolean;
   strategyId?: string;
   jobId?: string;
+  rr?: number;
+  slippageBps?: number;
+  maxHold?: number;
 }): string[] {
   const argv = ["--inst", args.inst, "--start", args.start];
   if (args.end) argv.push("--end", args.end);
   if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
   if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
   if (args.notional != null) argv.push("--notional", String(args.notional));
+  if ((args.rr ?? 0) > 0) argv.push("--rr", String(args.rr));
+  if ((args.slippageBps ?? 0) > 0) argv.push("--slippage-bps", String(args.slippageBps));
+  if ((args.maxHold ?? 0) > 0) argv.push("--max-hold", String(args.maxHold));
   if (args.closeOnReversal) argv.push("--close-on-reversal");
   if (args.strategyId) argv.push("--strategy", strategyDir(args.strategyId));
   if (args.jobId) argv.push("--job-id", args.jobId);
