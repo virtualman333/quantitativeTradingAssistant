@@ -280,12 +280,16 @@ function loadUi(w: BrowserWindow, hash = ""): boolean {
   const devPort = process.env.UI_DEV_PORT || "8088";
   const devUrl = process.env.UI_DEV === "1" ? `http://127.0.0.1:${devPort}` : "";
   const distUi = path.join(AGENT_ROOT, "dist", "ui", "index.html");
+  // hash 传进来可能带 #（如 "#/win/kline?instId=xxx"），统一先去 #，各加载方式再自行加 #
+  // （实测踩过：dev 分支原来 `"#" + hash` 会在 hash 已带 # 时拼成 "##/win/..."，
+  //  导致 location.hash 解析失败 → winRoute=null → 独立窗口退化成渲染首页）
+  const h = hash.replace(/^#/, "");
   if (devUrl) {
-    w.loadURL(devUrl + (hash ? "#" + hash : ""));
+    w.loadURL(devUrl + (h ? "#" + h : ""));
     return true;
   }
   if (fs.existsSync(distUi)) {
-    w.loadFile(distUi, hash ? { hash: hash.replace(/^#/, "") } : {});
+    w.loadFile(distUi, h ? { hash: h } : {});
     return true;
   }
   return false;
