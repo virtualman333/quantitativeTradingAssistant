@@ -2,8 +2,11 @@
  * strategies.ts — 超短线自定义策略管理（多策略 + LLM 生成 + 校验）
  *
  * 策略存储：agent/strategies/<id>/
- *   meta.json    {id,name,desc,idea?,createdAt,updatedAt,model?}
+ *   meta.json    {id,name,desc,category,idea?,builtin?,createdAt,updatedAt,model?}
  *   strategy.py  策略代码（实现 signal(ctx)，接口见 scripts/strategy_loader.py）
+ *
+ * 内置策略：BUILTIN_STRATEGIES 为唯一事实源，ensureBuiltins() 启动时核对磁盘镜像，
+ * 内置目录不可删除、不可被覆盖保存（只能「复制为自定义」另存），保证策略库兜底可用。
  *
  * 引擎接入（同一定义源，可回测也可实盘应用）：
  *   回测  scalper_backtest.py --strategy <id 目录>
@@ -24,8 +27,12 @@ export interface StrategyMeta {
   id: string;
   name: string;
   desc: string;
+  /** 策略分类：趋势跟踪 / 均值回归 / 突破通道 / 自定义 */
+  category: string;
   /** 策略思路 / 最近改进方向（用于「改进模式」上下文，可在代码回填后自动写入） */
   idea?: string;
+  /** 内置策略（平台模板）标记：不可删除、不可覆盖，只能复制为自定义 */
+  builtin?: boolean;
   createdAt: string;
   updatedAt: string;
   /** 最近一次生效的回测/实盘信号来源标记，仅展示用 */
@@ -35,6 +42,215 @@ export interface StrategyMeta {
 export interface StrategyWithCode extends StrategyMeta {
   code: string;
 }
+
+/** 平台分类（顺序即 UI 展示顺序） */
+export const STRATEGY_CATEGORIES = ["趋势跟踪", "均值回归", "突破通道", "自定义"] as const;
+
+function isCategory(v: unknown): v is string {
+  return typeof v === "string" && (STRATEGY_CATEGORIES as readonly string[]).includes(v);
+}
+
+/** 内置策略模板（唯一事实源，ensureBuiltins 会按此还原磁盘镜像） */
+interface BuiltinDef {
+  id: string;
+  name: string;
+  category: string;
+  desc: string;
+  idea: string;
+  code: string;
+}
+
+export const BUILTIN_STRATEGIES: BuiltinDef[] = [
+  {
+    id: "sample-trend",
+    name: "斜率顺势",
+    category: "趋势跟踪",
+    desc: "平台内置趋势策略的等价实现（最近 5 根 1m 收盘斜率判向），官方示例",
+    idea: "看最近 5 根 1 分钟收盘价相对斜率：斜率为正且足够强就顺势做多，反之做空；斜率很弱时也顺着微弱方向持仓，止损止盈由引擎统一按 ATR 计算。",
+    code: `# 平台内置趋势策略的等价实现（最近 5 根 1m 收盘斜率判向）
+def signal(ctx):
+    closes = ctx["closes"]
+    n = ctx["n"]
+    if n < 6:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    wins = closes[n - 5:n]                       # 最近 5 根 1m 收盘价
+    price = closes[n - 1] or 1e-9
+    slope = (wins[-1] - wins[0]) / 4 / price     # 每根平均相对斜率
+    if slope >= 0.0002:
+        return {"direction": "long", "reason": "5 根斜率上行，强势做多"}
+    if slope <= -0.0002:
+        return {"direction": "short", "reason": "5 根斜率下行，强势做空"}
+    return {"direction": "long" if slope >= 0 else "short", "reason": "弱趋势，顺势方向"}
+`,
+  },
+  {
+    id: "builtin-ma-cross",
+    name: "双均线趋势跟随",
+    category: "趋势跟踪",
+    desc: "MA8 上穿 MA21 金叉做多、下穿死叉做空，未交叉观望——经典双均线趋势跟踪",
+    idea: "快线 MA8 与慢线 MA21 刻画短期/中期趋势：金叉说明短趋势转强做多，死叉转弱做空；两根均线纠缠（未交叉）时不开仓，减少来回被打。参数可按行情手感调整。",
+    code: `# 双均线趋势跟随：MA8 上穿 MA21 金叉做多、下穿死叉做空；未交叉观望
+def signal(ctx):
+    closes = ctx["closes"]
+    n = ctx["n"]
+    if n < 22:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    fast = sum(closes[n - 8:n]) / 8              # 当前 MA8
+    slow = sum(closes[n - 21:n]) / 21            # 当前 MA21
+    prev_fast = sum(closes[n - 9:n - 1]) / 8     # 上一根 MA8
+    prev_slow = sum(closes[n - 22:n - 1]) / 21   # 上一根 MA21
+    if prev_fast <= prev_slow and fast > slow:
+        return {"direction": "long", "reason": "MA8 金叉上穿 MA21，趋势转多"}
+    if prev_fast >= prev_slow and fast < slow:
+        return {"direction": "short", "reason": "MA8 死叉下穿 MA21，趋势转空"}
+    return {"direction": "flat", "reason": "双均线未交叉，观望"}
+`,
+  },
+  {
+    id: "builtin-macd-trend",
+    name: "MACD 趋势跟随",
+    category: "趋势跟踪",
+    desc: "DIF 上穿 DEA 且站上零轴做多、下穿且跌破零轴做空，其余观望",
+    idea: "用 EMA12/EMA26 差离 DIF 与其均线 DEA 判断动能：只在其方向一致且位于零轴同侧时顺势持仓（多头动能区只做多、空头动能区只做空），动能不足/穿越零轴前后一律观望，过滤震荡。",
+    code: `# MACD 趋势跟随：只做动能同侧——DIF>DEA 且 DIF>0 做多，DIF<DEA 且 DIF<0 做空
+def signal(ctx):
+    closes = ctx["closes"]
+    n = ctx["n"]
+    if n < 35:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    base = closes[-60:] if n >= 60 else closes   # 只算最近 60 根，避免长历史逐根重复 EMA
+    def ema(span):
+        k = 2.0 / (span + 1)
+        e = base[0]
+        out = [e]
+        for c in base[1:]:
+            e = e + (c - e) * k
+            out.append(e)
+        return out
+    e12 = ema(12)
+    e26 = ema(26)
+    dif = [a - b for a, b in zip(e12, e26)]
+    dea = [dif[0]]
+    for i in range(1, len(dif)):
+        dea.append(dea[-1] + (dif[i] - dea[-1]) * 0.2)
+    d, s = dif[-1], dea[-1]
+    if d > s and d > 0:
+        return {"direction": "long", "reason": "DIF 在零轴上方金叉，动能向上"}
+    if d < s and d < 0:
+        return {"direction": "short", "reason": "DIF 在零轴下方死叉，动能向下"}
+    return {"direction": "flat", "reason": "DIF/DEA 动能不足或过零轴，观望"}
+`,
+  },
+  {
+    id: "builtin-boll-revert",
+    name: "布林带均值回归",
+    category: "均值回归",
+    desc: "收盘突破布林上轨做空、跌破下轨做多，回到带内观望（博回归）",
+    idea: "价格短期易向 20 周期均值回归：突破 ±2σ 轨道属于短期超买/超卖，反向开仓赌回归；价格回到带内说明回归已完成，转为观望避免死扛趋势行情。",
+    code: `# 布林带均值回归：MA20 ± 2σ 上下轨外反向开仓，回到带内观望
+def signal(ctx):
+    closes = ctx["closes"]
+    n = ctx["n"]
+    if n < 21:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    win = closes[n - 20:n]
+    price = closes[n - 1]
+    m = sum(win) / 20.0
+    v = sum((x - m) ** 2 for x in win) / 20.0
+    sd = v ** 0.5
+    up = m + 2 * sd
+    lo = m - 2 * sd
+    if price >= up:
+        return {"direction": "short", "reason": "突破布林上轨，博弈回归"}
+    if price <= lo:
+        return {"direction": "long", "reason": "跌破布林下轨，博弈回归"}
+    return {"direction": "flat", "reason": "价格在布林带内，观望"}
+`,
+  },
+  {
+    id: "builtin-rsi-revert",
+    name: "RSI 超买超卖反转",
+    category: "均值回归",
+    desc: "RSI(14)≤25 超卖做多、≥75 超买做空；中间区一律观望",
+    idea: "RSI14 度量最近 14 根的涨跌动量：跌过头（≤25）时博反弹做多，涨过头（≥75）时博回落做空；指标落在 25~75 的正常区说明多空均衡，不开仓。",
+    code: `# RSI 超买超卖反转：极端区反向开仓，中间区观望
+def signal(ctx):
+    closes = ctx["closes"]
+    n = ctx["n"]
+    if n < 16:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    win = closes[n - 15:n]
+    g = 0.0
+    l = 0.0
+    for i in range(1, len(win)):
+        d = win[i] - win[i - 1]
+        if d >= 0:
+            g += d
+        else:
+            l -= d
+    if g + l <= 1e-12:
+        return {"direction": "flat", "reason": "近 14 根近乎无波动，观望"}
+    rs = g / l if l > 1e-12 else 99.0
+    rsi = 100.0 - 100.0 / (1.0 + rs)
+    if rsi <= 25:
+        return {"direction": "long", "reason": f"RSI={rsi:.0f} 超卖，博反弹"}
+    if rsi >= 75:
+        return {"direction": "short", "reason": f"RSI={rsi:.0f} 超买，博回落"}
+    return {"direction": "flat", "reason": "RSI 处于中间区，观望"}
+`,
+  },
+  {
+    id: "builtin-donchian-break",
+    name: "唐奇安通道突破",
+    category: "突破通道",
+    desc: "收盘突破近 20 根最高价做多、跌破最低价做空，通道内观望",
+    idea: "唐奇安通道把「创 N 周期新高/新低」当成趋势启动信号：价格真实突破前 20 根高点跟进做多，跌破低点跟进做空；仍在通道内说明没有方向，观望等待。",
+    code: `# 唐奇安通道突破：突破近 20 根高低点跟进，通道内观望
+def signal(ctx):
+    closes = ctx["closes"]
+    highs = ctx["highs"]
+    lows = ctx["lows"]
+    n = ctx["n"]
+    if n < 21:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    price = closes[n - 1]
+    hi = max(highs[n - 21:n - 1])   # 近 20 根最高（不含当前根）
+    lo = min(lows[n - 21:n - 1])    # 近 20 根最低
+    if price > hi:
+        return {"direction": "long", "reason": "收盘突破 20 根高点，跟进做多"}
+    if price < lo:
+        return {"direction": "short", "reason": "收盘跌破 20 根低点，跟进做空"}
+    return {"direction": "flat", "reason": "仍在通道内，等待突破"}
+`,
+  },
+  {
+    id: "builtin-vol-break",
+    name: "放量突破",
+    category: "突破通道",
+    desc: "放量 1.5 倍以上突破近 20 根高低点才跟进，避免无量假突破",
+    idea: "在唐奇安突破基础上加量能确认：价格突破的同时当前量能要≥近 20 根均量的 1.5 倍，代表是真突破而非无量诱多/诱空；量能不足一律观望，过滤假突破。",
+    code: `# 放量突破：突破近 20 根高低点 + 量能 1.5 倍确认，否则观望
+def signal(ctx):
+    closes = ctx["closes"]
+    highs = ctx["highs"]
+    lows = ctx["lows"]
+    vols = ctx["vols"]
+    n = ctx["n"]
+    if n < 21:
+        return {"direction": "flat", "reason": "样本不足，观望"}
+    price = closes[n - 1]
+    prev_vols = vols[n - 21:n - 1]
+    avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 1e-12
+    vol = vols[n - 1]
+    ratio = vol / avg_vol
+    if price > max(highs[n - 21:n - 1]) and ratio >= 1.5:
+        return {"direction": "long", "reason": f"放量{ratio:.1f}倍突破 20 根高点，做多"}
+    if price < min(lows[n - 21:n - 1]) and ratio >= 1.5:
+        return {"direction": "short", "reason": f"放量{ratio:.1f}倍跌破 20 根低点，做空"}
+    return {"direction": "flat", "reason": "未现放量突破，观望"}
+`,
+  },
+];
 
 function safeId(name: string): string {
   const n = (name || "")
@@ -63,15 +279,60 @@ function ensureIdExists(id: string): string {
 
 function readMeta(dir: string): StrategyMeta | null {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")) as StrategyMeta;
-    return { ...m, id: path.basename(dir) };
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")) as StrategyMeta;
+    return {
+      ...raw,
+      id: path.basename(dir),
+      // 旧数据无分类：内置归趋势跟踪，其余一律自定义（读侧兜底，不改文件）
+      category: raw.category || (raw.builtin ? "趋势跟踪" : "自定义"),
+    };
   } catch {
     return null;
   }
 }
 
-/** 列出全部自定义策略（不含内置），按更新时间倒序 */
+/** 内置模板 meta（与磁盘内置文件保持一致，供 ensureBuiltins 镜像用） */
+function builtinMeta(def: BuiltinDef): StrategyMeta {
+  return {
+    id: def.id,
+    name: def.name,
+    desc: def.desc,
+    category: def.category,
+    idea: def.idea,
+    builtin: true,
+    createdAt: def.id === "sample-trend" ? "2026-09-04T00:00:00.000Z" : "2026-09-05T00:00:00.000Z",
+    updatedAt: def.id === "sample-trend" ? "2026-09-04T00:00:00.000Z" : "2026-09-05T00:00:00.000Z",
+  };
+}
+
+/**
+ * 内置策略磁盘镜像：以 BUILTIN_STRATEGIES 为事实源，缺文件/被改动时还原。
+ * 启动/每次加载时调用（幂等），保证内置策略库始终兜底可用。
+ */
+export function ensureBuiltins(): void {
+  fs.mkdirSync(STRATEGIES_DIR, { recursive: true });
+  for (const def of BUILTIN_STRATEGIES) {
+    try {
+      const dir = strategyDir(def.id);
+      fs.mkdirSync(dir, { recursive: true });
+      const py = path.join(dir, "strategy.py");
+      if (fs.readFileSync(py, "utf8").trimEnd() !== def.code.trimEnd()) {
+        fs.writeFileSync(py, def.code, "utf8");
+      }
+      const cur = readMeta(dir);
+      const want = builtinMeta(def);
+      if (!cur || cur.name !== want.name || cur.desc !== want.desc || cur.idea !== want.idea || cur.category !== want.category || !cur.builtin) {
+        fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(want, null, 2), "utf8");
+      }
+    } catch {
+      /* 内置策略不应让进程因磁盘异常而崩，失败则跳过 */
+    }
+  }
+}
+
+/** 列出全部策略（内置优先、其余按更新时间倒序），列表带分类 */
 export function listStrategies(): { strategies: StrategyMeta[] } {
+  ensureBuiltins();
   const out: StrategyMeta[] = [];
   if (!fs.existsSync(STRATEGIES_DIR)) return { strategies: [] };
   for (const name of fs.readdirSync(STRATEGIES_DIR)) {
@@ -81,7 +342,13 @@ export function listStrategies(): { strategies: StrategyMeta[] } {
     const meta = readMeta(full);
     if (meta) out.push(meta);
   }
-  out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  const builtinIdx = new Map(BUILTIN_STRATEGIES.map((b, i) => [b.id, i]));
+  out.sort((a, b) => {
+    const ai = a.builtin ? builtinIdx.get(a.id) ?? 99 : 999;
+    const bi = b.builtin ? builtinIdx.get(b.id) ?? 99 : 999;
+    if (ai !== bi) return ai - bi;
+    return a.updatedAt < b.updatedAt ? 1 : -1;
+  });
   return { strategies: out };
 }
 
@@ -98,30 +365,36 @@ export function readStrategy(id: string): StrategyWithCode {
   return { ...meta, code };
 }
 
-/** 保存/新增策略（策略 id 由前端传或按名称生成）。返回 {ok, meta} */
+/** 保存/新增策略（策略 id 由前端传或按名称生成）。返回 {ok, meta}。
+ *  内置策略（meta.builtin）不可覆盖：传内置 id 时强制按名称另存为自定义新策略。 */
 export function saveStrategy(p: {
   id?: string;
   name: string;
   desc?: string;
   idea?: string;
+  category?: string;
   code: string;
 }): { ok: boolean; meta: StrategyMeta } {
   const name = String(p?.name ?? "").trim();
   const code = String(p?.code ?? "");
   if (!name) throw new Error("策略名不能为空");
   if (!code.trim()) throw new Error("策略代码不能为空");
-  const base = p?.id && /^[a-zA-Z0-9\u4e00-\u9fa5-]+$/.test(p.id) ? p.id : safeId(name);
   fs.mkdirSync(STRATEGIES_DIR, { recursive: true });
-  const id = fs.existsSync(path.join(STRATEGIES_DIR, base)) ? base : ensureIdExists(base);
+  const base = p?.id && /^[a-zA-Z0-9\u4e00-\u9fa5-]+$/.test(p.id) ? p.id : safeId(name);
+  const baseMeta = fs.existsSync(strategyDir(base)) ? readMeta(strategyDir(base)) : null;
+  // 内置不可覆盖：另存为自定义（新 id 保证不与内置冲突）
+  const isBuiltin = !!baseMeta?.builtin;
+  const id = baseMeta && !isBuiltin ? base : ensureIdExists(base);
   const dir = strategyDir(id);
   fs.mkdirSync(dir, { recursive: true });
   const now = new Date().toISOString();
-  const prev = readMeta(dir);
+  const prev = baseMeta && !isBuiltin ? baseMeta : readMeta(dir);
   const meta: StrategyMeta = {
     id,
     name,
     desc: String(p?.desc ?? "").trim(),
     idea: String(p?.idea ?? "").trim(),
+    category: isCategory(p?.category) ? p.category : prev?.category || "自定义",
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
     model: prev?.model,
@@ -135,6 +408,8 @@ export function deleteStrategy(id: string): { ok: boolean; msg: string } {
   if (!/^[a-zA-Z0-9\u4e00-\u9fa5-]+$/.test(id)) throw new Error("非法策略 id");
   const dir = strategyDir(id);
   if (!fs.existsSync(dir)) throw new Error(`策略不存在: ${id}`);
+  const meta = readMeta(dir);
+  if (meta?.builtin) throw new Error("内置策略不可删除：可「复制为自定义」后修改");
   fs.rmSync(dir, { recursive: true, force: true });
   // 若被删除的是当前应用策略 → 重置回内置
   try {

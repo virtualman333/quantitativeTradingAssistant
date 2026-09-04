@@ -13,6 +13,49 @@ import { fmtNum } from "../lib/format.js";
 // ── 自定义策略库（多策略 / LLM 生成 / 校验 / 应用实盘） ──
 const strategies = ref([]); // StrategyMeta[]
 const currentStrategyId = computed(() => store.scalper?.strategyId || "");
+const filterCat = ref(""); // 分类筛选：''=全部
+const CATEGORY_ORDER = ["趋势跟踪", "均值回归", "突破通道", "自定义"];
+/** 引擎内置默认（无文件的引擎规则）：并入「趋势跟踪」分组 */
+const ENGINE_ENTRY = {
+  id: "",
+  name: "内置趋势策略",
+  desc: "最近 5 根 1m 收盘斜率判向 + ATR 止损 + 凯利 RR 止盈（引擎内置规则）",
+  builtin: true,
+  engine: true,
+  category: "趋势跟踪",
+  updatedAt: "",
+};
+const catOptions = computed(() => {
+  const set = new Set((strategies.value || []).map((s) => s.category || "自定义"));
+  return ["", ...CATEGORY_ORDER.filter((c) => set.has(c))];
+});
+const catCounts = computed(() => {
+  const m = {};
+  (strategies.value || []).forEach((s) => {
+    const c = s.category || "自定义";
+    m[c] = (m[c] || 0) + 1;
+  });
+  return m;
+});
+const builtinCount = computed(() => (strategies.value || []).filter((s) => s.builtin).length);
+const customCount = computed(() => (strategies.value || []).filter((s) => !s.builtin).length);
+/** 分组展示：按分类分组；引擎内置默认在趋势跟踪组顶部，各分类组可独立回测/应用 */
+const groups = computed(() => {
+  const src = filterCat.value
+    ? (strategies.value || []).filter((s) => (s.category || "自定义") === filterCat.value)
+    : strategies.value || [];
+  const gs = CATEGORY_ORDER.map((cat) => ({
+    cat,
+    items: src.filter((s) => (s.category || "自定义") === cat),
+  })).filter((g) => g.items.length);
+  if (!filterCat.value || filterCat.value === "趋势跟踪") {
+    const tg = gs.find((g) => g.cat === "趋势跟踪");
+    const en = { ...ENGINE_ENTRY };
+    if (tg) tg.items.unshift(en);
+    else gs.unshift({ cat: "趋势跟踪", items: [en] });
+  }
+  return gs;
+});
 
 const editModal = ref(null); // {mode:'new'|'edit', id, name, desc, idea, code}
 const genLoading = ref(false);
@@ -42,7 +85,7 @@ function openNewStrategy() {
   modalNote.value = "";
   modalErr.value = "";
   validateNote.value = null;
-  editModal.value = { mode: "new", id: "", name: "", desc: "", idea: "", code: "" };
+  editModal.value = { mode: "new", id: "", name: "", desc: "", idea: "", category: "自定义", code: "" };
 }
 async function openEditStrategy(id) {
   try {
@@ -57,6 +100,30 @@ async function openEditStrategy(id) {
       name: r.strategy.name,
       desc: r.strategy.desc || "",
       idea: r.strategy.idea || "",
+      category: r.strategy.category || "自定义",
+      code: r.strategy.code || "",
+    };
+  } catch (e) {
+    toastErr(e, "读取策略失败");
+  }
+}
+/** 复制内置（或已有）策略为自定义：载入代码进入「新建」态，保存即另存，原策略不变 */
+async function openCopyStrategy(s) {
+  try {
+    const r = await api.strategyRead(s.id);
+    if (!r?.ok || !r.strategy) throw new Error(r?.error || "读取失败");
+    modalNote.value = `已载入「${r.strategy.name}」的代码作为起点：改好后点「保存并校验」会另存为新策略（原${
+      s.builtin ? "内置" : "策略"
+    }保持不变）。`;
+    modalErr.value = "";
+    validateNote.value = null;
+    editModal.value = {
+      mode: "copy",
+      id: "",
+      name: `${r.strategy.name}（副本）`,
+      desc: r.strategy.desc || "",
+      idea: r.strategy.idea || "",
+      category: r.strategy.category || "自定义",
       code: r.strategy.code || "",
     };
   } catch (e) {
@@ -171,6 +238,7 @@ async function doSaveStrategy() {
       name: m.name.trim(),
       desc: m.desc?.trim() || "",
       idea: m.idea?.trim() || "",
+      category: m.category || "自定义",
       code: m.code,
     });
     if (!r?.ok) throw new Error(r?.error || "保存失败");
@@ -203,6 +271,10 @@ async function doSaveStrategy() {
 }
 
 async function deleteStrategyRow(s) {
+  if (s.builtin) {
+    toastErr(new Error("内置策略不可删除：可「复制为自定义」后修改"), "操作受限");
+    return;
+  }
   if (
     !(await ask(`删除策略「${s.name}」（${s.id}）？策略文件将一并删除。`, {
       title: "删除策略",
@@ -363,44 +435,70 @@ onBeforeUnmount(() => {
       <button class="primary" @click="openNewStrategy">＋ 新建策略（LLM 生成）</button>
     </h2>
     <div class="body">
-      <table v-if="strategies.length">
+      <div class="cat-bar">
+        <button
+          v-for="c in catOptions"
+          :key="c || '__all'"
+          :class="['chip', filterCat === c && 'on']"
+          @click="filterCat = c"
+        >
+          {{ c || "全部" }}<span v-if="c" class="cnt">{{ catCounts[c] || 0 }}</span>
+        </button>
+        <span class="hint" style="margin-left:auto">
+          {{ strategies.length }} 个 · 内置 {{ builtinCount }} / 自定义 {{ customCount }}
+        </span>
+      </div>
+
+      <table v-if="groups.length">
         <thead>
           <tr><th>策略</th><th>说明</th><th>更新时间</th><th>实盘循环</th><th>操作</th></tr>
         </thead>
-        <tbody>
-          <tr>
-            <td><b>内置趋势策略</b><span class="hint">（默认）</span></td>
-            <td>最近 5 根 1m 斜率判向 + ATR 止损 + 凯利 RR 止盈</td>
-            <td class="nowrap">—</td>
-            <td><span v-if="!currentStrategyId" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
-            <td class="nowrap">
-              <button class="sm" @click="btForStrategy('')">回测</button>
-              <button v-if="currentStrategyId" class="sm" @click="applyStrat('')">恢复应用</button>
-            </td>
-          </tr>
-          <tr v-for="s in strategies" :key="s.id">
-            <td><b>{{ s.name }}</b><span class="hint">{{ s.id }}</span></td>
-            <td class="wrap">{{ s.desc || "—" }}</td>
-            <td class="nowrap">{{ fmtTs(s.updatedAt) }}</td>
-            <td><span v-if="currentStrategyId === s.id" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
-            <td class="nowrap">
-              <button class="sm" @click="btForStrategy(s.id)">回测</button>
-              <button class="sm" :disabled="currentStrategyId === s.id" @click="applyStrat(s.id)">应用到循环</button>
-              <button class="sm" @click="openEditStrategy(s.id)">编辑</button>
-              <button class="sm danger" @click="deleteStrategyRow(s)">删除</button>
-            </td>
-          </tr>
-        </tbody>
+        <tbody v-for="g in groups" :key="g.cat">
+            <tr class="cat-row">
+              <td colspan="5">
+                <span class="tag t-hold">{{ g.cat }}</span>
+                <span class="hint">{{ g.items.length }} 个策略</span>
+                <span v-if="g.items.some((s) => s.engine)" class="hint" style="margin-left:6px">含引擎默认趋势规则</span>
+              </td>
+            </tr>
+            <tr v-for="s in g.items" :key="s.id || 'engine'">
+              <td>
+                <div class="s-name">
+                  <b>{{ s.name }}</b>
+                  <span v-if="s.engine" class="tag t-hold">引擎内置</span>
+                  <span v-else-if="s.builtin" class="tag t-info">内置</span>
+                  <span v-else class="tag t-buy">我的</span>
+                </div>
+                <div class="hint">{{ s.engine ? "engine-default" : s.id }}</div>
+              </td>
+              <td class="wrap">{{ s.desc || "—" }}</td>
+              <td class="nowrap">{{ s.updatedAt ? fmtTs(s.updatedAt) : "—" }}</td>
+              <td><span v-if="currentStrategyId === s.id" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
+              <td class="nowrap">
+                <button class="sm" @click="btForStrategy(s.id)">回测</button>
+                <button v-if="s.engine" class="sm" :disabled="!currentStrategyId" @click="applyStrat('')">
+                  恢复引擎默认
+                </button>
+                <button v-else class="sm" :disabled="currentStrategyId === s.id" @click="applyStrat(s.id)">
+                  应用到循环
+                </button>
+                <button v-if="s.builtin && !s.engine" class="sm" @click="openCopyStrategy(s)">复制为自定义</button>
+                <template v-if="!s.builtin && !s.engine">
+                  <button class="sm" @click="openEditStrategy(s.id)">编辑</button>
+                  <button class="sm danger" @click="deleteStrategyRow(s)">删除</button>
+                </template>
+              </td>
+            </tr>
+          </tbody>
       </table>
       <div v-else class="empty">
-        还没有自定义策略。
-        <a href="javascript:void(0)" @click="openNewStrategy">点此新建</a>：描述策略思路，让 LLM 按内置规则帮你写好 signal()，
-        然后就能一键回测 / 应用到超短线循环。
+        当前分类下没有策略。
+        <a href="javascript:void(0)" @click="openNewStrategy">点此新建</a>，或切换上方分类。
       </div>
       <div class="hint" style="margin-top:8px">
-        内置规则：策略只实现 <code>signal(ctx)</code> 判向（long/short/flat + 一句理由），可覆盖 ATR 止损系数 / 盈亏比；
-        也可返回 <code>sl</code>/<code>tp</code> 止盈止损点位（与方向一致、分列现价两侧）让引擎直接采用；
-        禁止危险 import、禁止未来数据。策略在引擎内逐根执行——同一份代码既回测也实盘。
+        内置策略为平台模板：不可删除、不可覆盖保存（可一键「复制为自定义」再自由修改）。策略只实现
+        <code>signal(ctx)</code> 判向（long/short/flat + 一句理由），可覆盖 ATR 止损系数 / 盈亏比；也可返回
+        <code>sl</code>/<code>tp</code> 止盈止损点位；禁止危险 import、禁止未来数据——同一份代码既回测也实盘。
       </div>
     </div>
   </div>
@@ -515,12 +613,27 @@ onBeforeUnmount(() => {
   <!-- 新建 / 编辑策略弹窗（LLM 生成 + 手改 + 保存校验） -->
   <div v-if="editModal" class="modal" @click.self="editModal = null">
     <div class="box" style="width:820px;max-width:94vw">
-      <h3>{{ editModal.id ? "编辑策略 " + editModal.id : "新建策略（用 LLM 生成）" }}</h3>
+      <h3>
+        {{
+          editModal.mode === "copy"
+            ? "复制为自定义（保存后另存为新策略）"
+            : editModal.id
+              ? "编辑策略 " + editModal.id
+              : "新建策略（用 LLM 生成）"
+        }}
+      </h3>
       <div class="body">
         <div class="row">
           <label>名称</label>
           <input v-model="editModal.name" placeholder="如：波动突破三滤网" style="max-width:280px" />
           <span class="hint">策略列表与回测下拉里显示</span>
+        </div>
+        <div class="row">
+          <label>分类</label>
+          <select v-model="editModal.category" style="max-width:200px">
+            <option v-for="c in CATEGORY_ORDER" :key="c" :value="c">{{ c }}</option>
+          </select>
+          <span class="hint">策略库按分类分组展示，随时可改</span>
         </div>
         <div class="row">
           <label>描述</label>
@@ -623,6 +736,46 @@ onBeforeUnmount(() => {
   line-height: 1.5;
   margin-top: 4px;
   tab-size: 4;
+}
+.cat-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.chip {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg-dim, rgba(232, 232, 236, 0.75));
+  line-height: 1.6;
+}
+.chip:hover {
+  border-color: var(--accent, #7a5cff);
+  color: var(--fg, #e8e8ec);
+}
+.chip.on {
+  background: var(--accent, #7a5cff);
+  border-color: var(--accent, #7a5cff);
+  color: #fff;
+}
+.chip .cnt {
+  margin-left: 3px;
+  opacity: 0.65;
+  font-size: 11px;
+}
+tr.cat-row td {
+  background: var(--bg2, rgba(255, 255, 255, 0.05));
+  padding: 4px 10px !important;
+}
+.s-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .bf-chks {
   display: flex;

@@ -550,7 +550,13 @@ ipcMain.handle("scalper:backtest", async (_e, args) => {
 
 // ── 自定义策略管理（多策略 + LLM 生成） ─────────────────────
 async function loadStrategies(): Promise<any> {
-  return loadDist<any>("strategies.js");
+  const mod = await loadDist<any>("strategies.js");
+  try {
+    mod.ensureBuiltins(); // 内置策略库：以模板为事实源，还原缺失/被破坏的内置目录
+  } catch {
+    /* ignore */
+  }
+  return mod;
 }
 ipcMain.handle("strategy:list", async () => {
   try {
