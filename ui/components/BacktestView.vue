@@ -17,6 +17,9 @@ const currentStrategyId = computed(() => store.scalper?.strategyId || "");
 const editModal = ref(null); // {mode:'new'|'edit', id, name, desc, idea, code}
 const genLoading = ref(false);
 const saveLoading = ref(false);
+const backfillLoading = ref(false);
+/** 代码回填勾选：分别控制是否由 LLM 反推出 名称/描述/思路 覆盖到对应输入框 */
+const bfWant = ref(["name", "desc", "idea"]);
 const modalNote = ref("");
 const modalErr = ref("");
 const validateNote = ref(null);
@@ -53,7 +56,7 @@ async function openEditStrategy(id) {
       id: r.strategy.id,
       name: r.strategy.name,
       desc: r.strategy.desc || "",
-      idea: "",
+      idea: r.strategy.idea || "",
       code: r.strategy.code || "",
     };
   } catch (e) {
@@ -97,6 +100,57 @@ async function llmGen() {
   }
 }
 
+/** 按代码回填元信息：LLM 读懂 signal() 后反推 名称/描述/思路（各自可勾选，勾中的才覆盖） */
+async function doBackfill() {
+  const m = editModal.value;
+  if (!m) return;
+  if (!m.code?.trim()) {
+    modalErr.value = "请先贴入或生成 strategy.py 代码";
+    return;
+  }
+  const want = bfWant.value;
+  if (!want.length) {
+    modalErr.value = "请至少勾选一个要回填的字段（名称 / 描述 / 思路）";
+    return;
+  }
+  backfillLoading.value = true;
+  modalErr.value = "";
+  modalNote.value = "";
+  try {
+    const r = await api.strategyBackfill({
+      code: m.code,
+      wantName: want.includes("name"),
+      wantDesc: want.includes("desc"),
+      wantIdea: want.includes("idea"),
+      nameHint: m.name?.trim() || "",
+    });
+    if (!r?.ok) {
+      modalErr.value = r?.error || "分析失败，请重试";
+      return;
+    }
+    const filled = [];
+    if (want.includes("name") && r.name) {
+      m.name = r.name;
+      filled.push("名称");
+    }
+    if (want.includes("desc") && r.desc) {
+      m.desc = r.desc;
+      filled.push("描述");
+    }
+    if (want.includes("idea") && r.idea) {
+      m.idea = r.idea;
+      filled.push("思路");
+    }
+    modalNote.value = filled.length
+      ? `已由模型${r.modelId ? `（${r.modelId}）` : ""}按代码回填：${filled.join("、")}。可在上方修改后点「保存并校验」。`
+      : "模型未返回有效内容，请重试";
+  } catch (e) {
+    modalErr.value = errText(e);
+  } finally {
+    backfillLoading.value = false;
+  }
+}
+
 /** 保存策略 → 自动跑内置规则校验 */
 async function doSaveStrategy() {
   const m = editModal.value;
@@ -116,6 +170,7 @@ async function doSaveStrategy() {
       id: m.id || undefined,
       name: m.name.trim(),
       desc: m.desc?.trim() || "",
+      idea: m.idea?.trim() || "",
       code: m.code,
     });
     if (!r?.ok) throw new Error(r?.error || "保存失败");
@@ -496,6 +551,24 @@ onBeforeUnmount(() => {
           spellcheck="false"
           placeholder="# 点上方按钮让 LLM 生成，或直接手写：&#10;def signal(ctx):&#10;    # ctx: closes/highs/lows/vols/ts(1m,升序)/n/atr/price&#10;    # 返回 {&quot;direction&quot;: &quot;long&quot;|&quot;short&quot;|&quot;flat&quot;, &quot;reason&quot;: &quot;中文依据&quot;}&#10;    return {&quot;direction&quot;: &quot;flat&quot;, &quot;reason&quot;: &quot;观望&quot;}"
         ></textarea>
+        <div class="row" style="margin-top:2px">
+          <label></label>
+          <div style="flex:1">
+            <div class="bf-chks">
+              <span class="hint">把这段代码交给 LLM 反推元信息——勾选哪项就覆盖哪项，未勾选保持原样：</span>
+              <label class="bf-chk"><input type="checkbox" v-model="bfWant" value="name" /> 名称</label>
+              <label class="bf-chk"><input type="checkbox" v-model="bfWant" value="desc" /> 描述</label>
+              <label class="bf-chk"><input type="checkbox" v-model="bfWant" value="idea" /> 思路</label>
+              <button
+                class="primary sm"
+                :disabled="backfillLoading || genLoading || saveLoading || !editModal.code?.trim()"
+                @click="doBackfill"
+              >
+                {{ backfillLoading ? "分析回填中…（约 1 分钟）" : "LLM 按代码回填选中字段" }}
+              </button>
+            </div>
+          </div>
+        </div>
         <div v-if="modalErr" class="alert err" style="margin-top:6px">{{ modalErr }}</div>
         <div v-if="validateNote && !validateNote.ok" class="alert err" style="margin-top:6px">
           内置规则校验未通过：<span v-for="(er, i) in validateNote.errors || []" :key="i"><br />· {{ er }}</span>
@@ -550,5 +623,19 @@ onBeforeUnmount(() => {
   line-height: 1.5;
   margin-top: 4px;
   tab-size: 4;
+}
+.bf-chks {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+}
+.bf-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: var(--fg, #e8e8ec);
 }
 </style>

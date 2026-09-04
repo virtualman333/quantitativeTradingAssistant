@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld("api", {
   strategyDelete: (id: string) => safeInvoke("strategy:delete", id),
   strategyValidate: (id: string) => safeInvoke("strategy:validate", id),
   strategyGen: (p: unknown) => safeInvoke("strategy:gen", p),
+  strategyBackfill: (p: unknown) => safeInvoke("strategy:backfill", p),
   strategyApply: (id: string) => safeInvoke("strategy:apply", id),
   scalperBtStart: (p: unknown) => safeInvoke("scalper:btStart", p),
   scalperBtGet: (jobId: string) => safeInvoke("scalper:btGet", jobId),

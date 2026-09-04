@@ -606,6 +606,16 @@ ipcMain.handle("strategy:gen", async (_e, p) => {
     return { ok: false, error: String(e).slice(0, 400) };
   }
 });
+/** LLM 按已有代码回填元信息：名称/描述/思路可分别勾选 */
+ipcMain.handle("strategy:backfill", async (_e, p) => {
+  try {
+    const mod = await loadStrategies();
+    const r = await mod.backfillMetaFromCode(p ?? {});
+    return { ok: r.ok, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 400) };
+  }
+});
 ipcMain.handle("strategy:apply", async (_e, id: string) => {
   try {
     const mod = await loadStrategies();

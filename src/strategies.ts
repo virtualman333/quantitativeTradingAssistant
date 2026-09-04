@@ -2,7 +2,7 @@
  * strategies.ts — 超短线自定义策略管理（多策略 + LLM 生成 + 校验）
  *
  * 策略存储：agent/strategies/<id>/
- *   meta.json    {id,name,desc,createdAt,updatedAt,model?}
+ *   meta.json    {id,name,desc,idea?,createdAt,updatedAt,model?}
  *   strategy.py  策略代码（实现 signal(ctx)，接口见 scripts/strategy_loader.py）
  *
  * 引擎接入（同一定义源，可回测也可实盘应用）：
@@ -24,6 +24,8 @@ export interface StrategyMeta {
   id: string;
   name: string;
   desc: string;
+  /** 策略思路 / 最近改进方向（用于「改进模式」上下文，可在代码回填后自动写入） */
+  idea?: string;
   createdAt: string;
   updatedAt: string;
   /** 最近一次生效的回测/实盘信号来源标记，仅展示用 */
@@ -101,6 +103,7 @@ export function saveStrategy(p: {
   id?: string;
   name: string;
   desc?: string;
+  idea?: string;
   code: string;
 }): { ok: boolean; meta: StrategyMeta } {
   const name = String(p?.name ?? "").trim();
@@ -118,6 +121,7 @@ export function saveStrategy(p: {
     id,
     name,
     desc: String(p?.desc ?? "").trim(),
+    idea: String(p?.idea ?? "").trim(),
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
     model: prev?.model,
@@ -286,4 +290,92 @@ ${p.existingCode}
   const code = extractPyCode(raw);
   if (!code) return { ok: false, code: "", raw, error: "模型未返回代码，请重试" };
   return { ok: true, code, raw, modelId: cfg.id };
+}
+
+// ── LLM 按代码回填元信息（名称 / 描述 / 思路，可分别选择） ──────
+
+/** 从 LLM 原始输出里提取 JSON 对象体（优先 ```json 围栏，其次首尾花括号） */
+function extractJsonish(raw: string): string {
+  const fence = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (fence && fence[1]?.trim()) return fence[1].trim();
+  const s = raw.indexOf("{");
+  const e = raw.lastIndexOf("}");
+  if (s >= 0 && e > s) return raw.slice(s, e + 1);
+  return raw.trim();
+}
+
+function backfillSystemPrompt(want: { name: boolean; desc: boolean; idea: boolean }): string {
+  const rules = [
+    want.name ? `"name": 不超过 14 字的简洁中文策略名，点出核心逻辑（不要用「策略/系统」这类泛词结尾）` : null,
+    want.desc ? `"desc": ≤40 字的一句话说明（策略风格 / 适用行情 / 主要滤网）` : null,
+    want.idea
+      ? `"idea": 2~4 句白话策略思路：拆解代码里开多/开空/flat 的判定条件与滤网，解释关键参数含义及它想捕捉的行情特征（禁止贴代码片段）`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `你是加密货币超短线（1 分钟 K 线，USDT 永续）策略分析师。用户会发来一段完整的策略代码（signal(ctx) 实现）。
+你的任务：只凭代码逻辑反推它的元信息，供用户人工复核。只输出一个 JSON 对象，不要 Markdown、不要解释。
+
+JSON 字段要求：
+${rules}
+
+严格依据代码推断；代码里没有实现的逻辑不要脑补。`;
+}
+
+/**
+ * LLM 根据已有策略代码回填元信息。wantName / wantDesc / wantIdea 分别控制是否生成，
+ * 前端「可分别勾选」。返回 {ok, name?, desc?, idea?, modelId?, error?}
+ */
+export async function backfillMetaFromCode(p: {
+  code: string;
+  wantName?: boolean;
+  wantDesc?: boolean;
+  wantIdea?: boolean;
+  nameHint?: string;
+}): Promise<{ ok: boolean; name?: string; desc?: string; idea?: string; modelId?: string; error?: string }> {
+  const cfg = resolveModel();
+  if (!cfg || cfg.provider === "mock") {
+    return { ok: false, error: "未配置真实 LLM 模型。请先到「设置-模型」添加并设为默认模型。" };
+  }
+  const code = String(p?.code ?? "").trim();
+  if (!code) return { ok: false, error: "没有可分析的代码：请先贴入或生成 strategy.py" };
+  const want = {
+    name: !!p?.wantName,
+    desc: !!p?.wantDesc,
+    idea: !!p?.wantIdea,
+  };
+  if (!want.name && !want.desc && !want.idea) {
+    return { ok: false, error: "请至少勾选一个要回填的字段（名称 / 描述 / 思路）" };
+  }
+  const nameHint = String(p?.nameHint ?? "").trim();
+
+  const sys = backfillSystemPrompt(want);
+  const wantKeys = [want.name && "name", want.desc && "desc", want.idea && "idea"].filter(Boolean).join("、");
+  const user = `${nameHint ? `【现有名称（可参考但不必沿用，应更贴近代码）】${nameHint}\n\n` : ""}【策略代码】
+\`\`\`python
+${code}
+\`\`\`
+请只输出 JSON，包含这些字段：${wantKeys}。`;
+  const llm = createProvider(cfg);
+  const raw = await llm.complete(sys, user);
+  let data: any = null;
+  try {
+    data = JSON.parse(extractJsonish(raw));
+  } catch {
+    try {
+      data = JSON.parse(extractJsonish(raw).replace(/```/g, "").trim());
+    } catch {
+      return { ok: false, error: `模型返回无法解析，请重试。原文：${raw.slice(0, 140)}…` };
+    }
+  }
+  const clean = (s: unknown) => (typeof s === "string" ? s.trim() : "");
+  const out: { ok: boolean; modelId?: string; name?: string; desc?: string; idea?: string } = { ok: true, modelId: cfg.id };
+  if (want.name && clean(data.name)) out.name = clean(data.name).slice(0, 30);
+  if (want.desc && clean(data.desc)) out.desc = clean(data.desc).slice(0, 80);
+  if (want.idea && clean(data.idea)) out.idea = clean(data.idea);
+  if (out.name === undefined && out.desc === undefined && out.idea === undefined) {
+    return { ok: false, error: `模型没有返回有效字段，请重试。原文：${raw.slice(0, 140)}…` };
+  }
+  return out;
 }
