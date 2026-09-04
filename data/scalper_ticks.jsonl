@@ -62,3 +62,6 @@
 {"ts":"2026-09-04T11:20:52.817Z","inst":"ETH-USDT-SWAP","direction":"short","strength":"strong","entry_ref":2521.64,"judge":"rule","result":"skipped","reason":"已有 ETH-USDT-SWAP short 持仓，方向与趋势一致，等止盈/止损触发"}
 {"ts":"2026-09-04T11:21:10.996Z","inst":"ETH-USDT-SWAP","direction":"short","strength":"weak","entry_ref":2521.65,"judge":"rule","result":"skipped","reason":"已有 ETH-USDT-SWAP short 持仓，方向与趋势一致，等止盈/止损触发"}
 {"ts":"2026-09-04T11:21:29.232Z","inst":"ETH-USDT-SWAP","direction":"short","strength":"weak","entry_ref":2521.65,"judge":"rule","result":"skipped","reason":"已有 ETH-USDT-SWAP short 持仓，方向与趋势一致，等止盈/止损触发"}
+{"ts":"2026-09-04T16:56:31.275Z","inst":"ETH-USDT-SWAP","direction":"flat","strength":"weak","entry_ref":2460.5,"judge":"rule","strategy":"strategies","result":"skipped","reason":"策略观望（flat）：趋势动量不匹配观望"}
+{"ts":"2026-09-04T16:57:07.518Z","inst":"ETH-USDT-SWAP","direction":"flat","strength":"weak","entry_ref":2459.34,"judge":"rule","strategy":"strategies","result":"skipped","reason":"策略观望（flat）：趋势动量不匹配观望"}
+{"ts":"2026-09-04T16:57:23.595Z","inst":"ETH-USDT-SWAP","direction":"flat","strength":"weak","entry_ref":2459.34,"judge":"rule","strategy":"strategies","result":"skipped","reason":"策略观望（flat）：趋势动量不匹配观望"}
