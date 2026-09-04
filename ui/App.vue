@@ -24,6 +24,7 @@ import SkillsView from "./components/SkillsView.vue";
 import LogView from "./components/LogView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import PositionsView from "./components/PositionsView.vue";
+import ScalperView from "./components/ScalperView.vue";
 import TraceView from "./components/TraceView.vue";
 import ReportsView from "./components/ReportsView.vue";
 import MarketView from "./components/MarketView.vue";
@@ -46,6 +47,7 @@ const ICONS = {
   pos: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1.3"/><circle cx="3.5" cy="12" r="1.3"/><circle cx="3.5" cy="18" r="1.3"/>'),
   rep: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
   mkt: svg('<line x1="3" y1="3" x2="3" y2="21"/><line x1="3" y1="21" x2="21" y2="21"/><polyline points="6 15 10 10 14 13 20 6"/>'),
+  scalp: svg('<circle cx="12" cy="13" r="8"/><polyline points="12 9 12 13 15 15"/><line x1="9" y1="2" x2="15" y2="2"/>'),
 };
 
 const tabs = [
@@ -61,11 +63,13 @@ const tabs = [
   { k: "rep", t: "报告" },
   { k: "cfg", t: "设置" },
   { k: "pos", t: "持仓" },
+  { k: "scalp", t: "超短线" },
 ];
 const views = {
   dash: DashboardView, chat: ChatView, obs: TraceView, models: ModelsView, roles: RolesView,
   mcp: McpView, skills: SkillsView, log: LogView, rep: ReportsView, cfg: SettingsView, pos: PositionsView,
   mkt: MarketView,
+  scalp: ScalperView,
 };
 const currentView = computed(() => views[tab.value] || DashboardView);
 

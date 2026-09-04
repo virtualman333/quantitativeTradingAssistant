@@ -130,10 +130,11 @@ export async function genClOrdId(
 }
 
 /** 运行 market_scan.py，返回解析后的行情 JSON */
-export async function fetchMarket(): Promise<{ ok: boolean; data: unknown }> {
+export async function fetchMarket(focusInsts: string[] = []): Promise<{ ok: boolean; data: unknown }> {
   try {
     // market_scan.py 默认直接把 JSON 打到 stdout（实测 --save 参数不符，会失败）
-    const out = await runPy("market_scan.py", [], 180_000);
+    const args = focusInsts.length ? ["--focus", focusInsts.join(",")] : [];
+    const out = await runPy("market_scan.py", args, 180_000);
     try {
       return { ok: true, data: JSON.parse(out) };
     } catch {

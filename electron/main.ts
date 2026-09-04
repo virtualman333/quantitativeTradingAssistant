@@ -516,6 +516,29 @@ ipcMain.handle("settings:update", (_e, patch) => withStore((s) => s.updateSettin
 ipcMain.handle("store:reset", () => withStore((s) => s.resetStore()));
 ipcMain.handle("store:path", () => path.join(AGENT_ROOT, "data", "store.json"));
 
+// 超短线（独立板块）
+ipcMain.handle("scalper:get", () => withStore((s) => s.getScalperConfig()));
+ipcMain.handle("scalper:update", (_e, patch) => withStore((s) => s.updateScalperConfig(patch)));
+ipcMain.handle("scalper:once", async () => {
+  try {
+    const cfg = await withStore((s) => s.getScalperConfig());
+    const mod = await loadDist<any>("scalper.js");
+    const r = await mod.scalpOnce(cfg);
+    return { ok: r.ok, msg: r.msg, signal: r.signal };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+ipcMain.handle("scalper:overview", async () => {
+  try {
+    const mod = await loadDist<any>("scalper.js");
+    const r = await mod.getScalperOverview();
+    return { ok: true, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+
 // agent 控制
 ipcMain.handle("agent:start", () => startAgent());
 ipcMain.handle("agent:stop", () => stopAgent());

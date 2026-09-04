@@ -20,6 +20,14 @@ watch(
 
 const isFixed = computed(() => form.value.roleStrategy === "fixed");
 
+// 重点关注标的：数组 ⇄ 逗号分隔字符串（支持中英文逗号/空格分隔）
+const focusStr = computed({
+  get: () => (form.value.focusInsts || []).join(", "),
+  set: (v) => {
+    form.value.focusInsts = String(v || "").split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+  },
+});
+
 async function save() {
   fieldErr.value = "";
   const interval = Number(form.value.intervalMin);
@@ -41,6 +49,7 @@ async function save() {
       intervalMin: Math.round(interval),
       roleStrategy: form.value.roleStrategy,
       fixedRoles: form.value.fixedRoles || [],
+      focusInsts: form.value.focusInsts || [],
       autoStart: !!form.value.autoStart,
       dryRun: !!form.value.dryRun,
     });
@@ -105,6 +114,11 @@ function toggleRole(id) {
         <label>轮次间隔</label>
         <input v-model.number="form.intervalMin" type="number" min="1" max="120" style="max-width:120px" />
         <span class="hint">分钟</span>
+      </div>
+      <div class="row">
+        <label>重点关注标的</label>
+        <input v-model="focusStr" placeholder="BTC-USDT-SWAP, ETH-USDT-SWAP" style="max-width:380px" />
+        <span class="hint">逗号分隔，每轮优先关注这些标的</span>
       </div>
       <div class="row">
         <label>角色策略</label>

@@ -15,6 +15,7 @@ export const store = reactive({
   mcps: [],
   skills: [],
   settings: null,
+  scalper: null,
   tools: [],
 });
 
@@ -40,18 +41,20 @@ export const isMockModel = computed(() => currentModel.value?.provider === "mock
 // ── 取数 ────────────────────────────────────────────────────
 export async function loadAll() {
   try {
-    const [models, roles, mcps, skills, settings] = await Promise.all([
+    const [models, roles, mcps, skills, settings, scalper] = await Promise.all([
       api.modelsList().catch(() => []),
       api.rolesList().catch(() => []),
       api.mcpList().catch(() => []),
       api.skillsList().catch(() => []),
       api.settingsGet(),
+      api.scalperGet().catch(() => null),
     ]);
     store.models = models || [];
     store.roles = roles || [];
     store.mcps = mcps || [];
     store.skills = skills || [];
     store.settings = settings || null;
+    store.scalper = scalper || null;
     globalError.value = hasBridge ? "" : globalError.value;
     return true;
   } catch (e) {

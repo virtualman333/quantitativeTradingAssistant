@@ -116,9 +116,42 @@ export interface AppSettings {
   /** 角色选择策略：llm=主Agent自决；fixed=固定用下列角色 */
   roleStrategy: "llm" | "fixed";
   fixedRoles: string[];
+  /** 重点关注标的：每轮优先分析/交易的 USDT 永续代码列表，空=不指定 */
+  focusInsts: string[];
   /** Skill 启用表：skillId -> enabled */
   skillEnabled: Record<string, boolean>;
 }
+
+/** 超短线（超高频）独立板块配置 */
+export interface ScalperConfig {
+  /** 交易标的（USDT 永续） */
+  inst: string;
+  /** 杠杆倍数（用户可选） */
+  leverage: number;
+  /** 单笔名义金额 = 总权益 × riskPct */
+  riskPct: number;
+  /** 止损距离 = ATR × 该系数 */
+  atrMult: number;
+  /** 单边 taker 手续费率 */
+  feeRate: number;
+  /** 是否启用超短线循环 */
+  enabled: boolean;
+  /** 轮询间隔（秒） */
+  intervalSec: number;
+  /** 是否 LLM 介入：true=趋势方向交给 LLM 判断，false=规则（EMA+动量）判断 */
+  useLlm: boolean;
+}
+
+export const DEFAULT_SCALPER: ScalperConfig = {
+  inst: "BTC-USDT-SWAP",
+  leverage: 5,
+  riskPct: 0.01,
+  atrMult: 2.5,
+  feeRate: 0.0005,
+  enabled: false,
+  intervalSec: 60,
+  useLlm: false,
+};
 
 export interface StoreData {
   version: number;
@@ -126,6 +159,8 @@ export interface StoreData {
   roles: RoleConfig[];
   mcpServers: McpServerCfg[];
   settings: AppSettings;
+  /** 超短线独立板块配置 */
+  scalper: ScalperConfig;
   /** 最近轮次索引（详情仍存 logs/rounds.jsonl） */
   recentRounds: { roundId: string; time: string; decision: string; equity?: number }[];
   /** 对话历史（界面「对话」页） */
@@ -174,6 +209,7 @@ function defaults(): StoreData {
       dryRun: false,
       roleStrategy: "llm",
       fixedRoles: ["trading", "news", "factor", "risk", "funding", "onchain", "sentiment", "execution"],
+      focusInsts: [],
       skillEnabled: {
         market_scan: true,
         news_query: true,
@@ -185,6 +221,7 @@ function defaults(): StoreData {
         read_charter: true,
       },
     },
+    scalper: { ...DEFAULT_SCALPER },
     recentRounds: [],
     chat: { history: [] },
   };
@@ -207,6 +244,7 @@ export function loadStore(): StoreData {
         models: raw.models?.length ? raw.models : d.models,
         roles: raw.roles?.length ? raw.roles : d.roles,
         mcpServers: raw.mcpServers?.length ? raw.mcpServers : d.mcpServers,
+        scalper: { ...d.scalper, ...(raw.scalper ?? {}) },
         chat: { history: Array.isArray(raw.chat?.history) ? raw.chat.history.slice(-200) : [] },
       };
       return cache;
@@ -269,6 +307,16 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   s.settings = { ...s.settings, ...patch };
   saveStore(s);
   return s.settings;
+}
+
+export function getScalperConfig(): ScalperConfig {
+  return loadStore().scalper;
+}
+export function updateScalperConfig(patch: Partial<ScalperConfig>): ScalperConfig {
+  const s = loadStore();
+  s.scalper = { ...s.scalper, ...patch };
+  saveStore(s);
+  return s.scalper;
 }
 
 export function listModels(): ModelConfig[] {

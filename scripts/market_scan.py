@@ -477,13 +477,16 @@ def main() -> int:
     ap.add_argument("--inst", action="append", help="指定标的，可重复（优先级最高）")
     ap.add_argument("--insts", help="逗号分隔的标的列表，如 BTC-USDT-SWAP,ETH-USDT-SWAP")
     ap.add_argument("--top", type=int, default=0, help=f"按 24h 成交额取前 N 个 USDT 永续（默认 {DEFAULT_TOP}）")
+    ap.add_argument("--focus", help="重点关注标的，逗号分隔，优先纳入候选池（即使不在 top N）")
     ap.add_argument("--save", help="快照归档目录")
     args = ap.parse_args()
 
-    # 候选池优先级：--inst/--insts 显式指定 > --top N > 默认 top
+    # 候选池优先级：--inst/--insts 显式指定 > --focus 重点优先 > --top N > 默认 top
     explicit = list(args.inst or [])
     if args.insts:
         explicit += [s.strip() for s in args.insts.split(",") if s.strip()]
+
+    focus = [s.strip() for s in args.focus.split(",") if s.strip()] if args.focus else []
 
     if explicit:
         insts = explicit
@@ -491,7 +494,15 @@ def main() -> int:
     else:
         top = args.top if args.top and args.top > 0 else DEFAULT_TOP
         ranked = fetch_top_insts(top)
-        insts = [i for i, _ in ranked]
+        top_insts = [i for i, _ in ranked]
+        if focus:
+            # 重点关注标的优先，再去重补齐 top N（重点标的即使不在 top N 也纳入）
+            insts = []
+            for i in focus + top_insts:
+                if i not in insts:
+                    insts.append(i)
+        else:
+            insts = top_insts
         universe = [
             {"instId": i, "turnoverUsd24h": round(v, 2), "rank": idx + 1}
             for idx, (i, v) in enumerate(ranked)

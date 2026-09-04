@@ -33,6 +33,11 @@ contextBridge.exposeInMainWorld("api", {
   // 设置
   settingsGet: () => safeInvoke("settings:get"),
   settingsUpdate: (p: unknown) => safeInvoke("settings:update", p),
+  // 超短线（独立板块）
+  scalperGet: () => safeInvoke("scalper:get"),
+  scalperUpdate: (p: unknown) => safeInvoke("scalper:update", p),
+  scalperOnce: () => safeInvoke("scalper:once"),
+  scalperOverview: () => safeInvoke("scalper:overview"),
   // 实时账户/持仓查看
   accountGet: (profile?: string) => safeInvoke("account:get", profile),
   storeReset: () => safeInvoke("store:reset"),
