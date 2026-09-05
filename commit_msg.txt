@@ -1,9 +1,1 @@
-feat(backtest): 回测参数丰富化 + 参数自动保存
-
-- 引擎新增三参数（scalper_backtest.py，含 CLI/docstring/params 回显）：
-  - --rr 固定止盈倍率（0=自动凯利/策略显式返回优先）
-  - --slippage-bps 单边滑点（开、平仓成交价均按不利方向计入）
-  - --max-hold 持仓超时分钟（0=不限，超时以当前收盘价平仓）
-- src/scalper.ts backtestArgv 透传三参数（批量/单跑共用同一套）
-- UI（BacktestView.vue）控制台改分区布局：标的与策略 / 时间区间（快捷范围 chips 近1天~近1月、常用标的 datalist）/ 进出场与成本（ATR、RR、持仓超时、费率、滑点、名义、反转平仓），并补充字段提示
-- 参数自动保存：localStorage(btParamsV1) 防抖持久化，下次打开默认沿用上次填写；「恢复默认参数」一键重置；策略被删除时回测选择自动回退跟随实盘；结果摘要文案带出 ATR/RR/滑点/超时快照
+回测支持多K线周期与按时段拆分批量：数据层只拉1m并本地聚合缓存，同区间不重复请求行情

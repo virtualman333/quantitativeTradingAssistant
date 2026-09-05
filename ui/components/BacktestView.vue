@@ -392,6 +392,7 @@ function buildBtSummary(r) {
   const s = r.summary;
   const pa = r.params || {};
   let extra = "";
+  if (pa.bar && pa.bar !== "1m") extra += `｜K线 ${barT(pa.bar)}`;
   if (pa.atrMult != null) extra += `｜ATR×${pa.atrMult}`;
   if (pa.rr != null) extra += ` RR ${(pa.rr ?? 0) > 0 ? `${pa.rr}×` : "自动"}`;
   if (pa.slippageBps) extra += ` 滑点${pa.slippageBps}bps`;
@@ -723,11 +724,29 @@ function waitBtJob(jobId, key) {
         /* 下一轮再试 */
       }
     }, 2200);
-    const timer = setTimeout(() => finish({ ok: false, error: "等待回测结果超时" }), 246_000);
+    const timer = setTimeout(() => finish({ ok: false, error: "等待回测结果超时" }), 616_000);
   });
 }
 
-/** 批量串行回测队列：rows = [{ key, strategyId, name }] */
+/** 策略 × 周期 × 时段的网格结果矩阵（展开批量时展示，滚动不丢，直到下一次批量） */
+const lastGrid = ref(null); // { at, dim, rows: [{key, name, bar, win, status, at, sum, err}] }
+function gridPatch(key, patch) {
+  const g = lastGrid.value;
+  if (!g) return;
+  const it = g.rows.find((r) => r.key === key);
+  if (it) Object.assign(it, patch);
+}
+function gridShort(r) {
+  const s = r?.sum;
+  if (!s) return "";
+  return `${s.trades ?? 0} 笔 · 胜率 ${s.winRate ?? "-"}% · 净 ${fmtNum(s.totalNetPnlUsdt ?? 0, 1)} USDT（${fmtNum(s.totalNetPnlPct ?? 0, 3)}%）· PF ${fmtNum(s.profitFactor ?? 0, 2)} · 回撤 ${fmtNum(s.maxDrawdownPct ?? 0, 2)}%`;
+}
+const gridStateC = computed(() => ({
+  ok: lastGrid.value ? lastGrid.value.rows.filter((r) => r.status === "ok").length : 0,
+  err: lastGrid.value ? lastGrid.value.rows.filter((r) => r.status === "err").length : 0,
+}));
+
+/** 批量串行回测队列：rows 来自 expandRows（策略 key 或 策略×周期×时段 网格 key） */
 async function runBatch(list) {
   if (btRunning.value) {
     toastErr(new Error("当前有单次回测在进行，请等它结束后再启动批量回测"), "无法批量回测");
@@ -738,6 +757,17 @@ async function runBatch(list) {
   if (!rows.length) {
     toastErr(new Error("没有可回测的策略"), "批量回测");
     return;
+  }
+  // 网格批量：重置上次详情展示，准备矩阵面板
+  const isGrid = rows.some((r) => r.grid);
+  if (isGrid) {
+    btResult.value = null;
+    btError.value = "";
+    lastGrid.value = {
+      at: new Date().toISOString(),
+      dim: btDimText(),
+      rows: rows.map((r) => ({ ...r, status: "wait", at: "", sum: null, err: "" })),
+    };
   }
   const t0 = Date.now();
   batch.value = { running: true, list: rows, idx: -1, cancel: false, ok: 0, fail: 0, startedAt: t0, curKey: "", curName: "" };
@@ -750,7 +780,7 @@ async function runBatch(list) {
     const row = rows[i];
     batch.value.idx = i;
     batch.value.curKey = row.key;
-    batch.value.curName = row.name;
+    batch.value.curName = row.grid ? row.full : row.name;
     const cur = live.value[row.key];
     if (cur) {
       cur.st = "run";
@@ -758,19 +788,28 @@ async function runBatch(list) {
       cur.stage = "启动";
       cur.msg = "";
     }
+    if (isGrid) gridPatch(row.key, { status: "run" });
     try {
-      const r = await api.scalperBtStart({ ...btParams(), strategyId: row.strategyId || "" });
+      // 每格覆盖 周期/起止时间，其余共用控制台参数（A/ATR/费率/滑点/止盈…）
+      const params = btParamsFor({ bar: row.bar, start: row.start, end: row.end });
+      const r = await api.scalperBtStart({ ...params, strategyId: row.strategyId || "" });
       if (!r?.ok) throw new Error(r?.error || "启动失败");
       const w = await waitBtJob(r.jobId, row.key);
       if (w.ok) {
-        noteRowRes(row.key, true, w.result);
+        const rs = w.result?.summary;
+        if (row.grid) {
+          if (rs) gridPatch(row.key, { status: "ok", at: new Date().toISOString(), sum: rs });
+          else gridPatch(row.key, { status: "err", err: "结果无摘要", at: new Date().toISOString() });
+        } else noteRowRes(row.key, true, w.result);
         batch.value.ok += 1;
       } else {
-        noteRowRes(row.key, false, w.error);
+        if (row.grid) gridPatch(row.key, { status: "err", err: String(w.error || "回测失败").slice(0, 300), at: new Date().toISOString() });
+        else noteRowRes(row.key, false, w.error);
         batch.value.fail += 1;
       }
     } catch (e) {
-      noteRowRes(row.key, false, errText(e));
+      if (row.grid) gridPatch(row.key, { status: "err", err: errText(e).slice(0, 300), at: new Date().toISOString() });
+      else noteRowRes(row.key, false, errText(e));
       batch.value.fail += 1;
     } finally {
       delete live.value[row.key];
@@ -782,9 +821,13 @@ async function runBatch(list) {
   const dur = Math.round((Date.now() - t0) / 1000);
   batch.value.running = false;
   batchStopped.value = stopped;
-  toastOk(
-    `批量回测${stopped ? "已停止" : "完成"}：成功 ${okN}${failN ? `，失败 ${failN}` : ""}，用时 ${dur}s —— 结果已标记到各策略行`
-  );
+  if (isGrid) {
+    toastOk(`批量网格回测${stopped ? "已停止" : "完成"}：成功 ${okN}${failN ? `，失败 ${failN}` : ""}，用时 ${dur}s —— 每格结果见上方「批量回测矩阵」`);
+  } else {
+    toastOk(
+      `批量回测${stopped ? "已停止" : "完成"}：成功 ${okN}${failN ? `，失败 ${failN}` : ""}，用时 ${dur}s —— 结果已标记到各策略行`
+    );
+  }
 }
 
 function stopBatch() {
@@ -793,22 +836,29 @@ function stopBatch() {
   toastOk("当前策略结束后将停止批量回测（已完成的行内标记会保留）");
 }
 
+/** 把策略条目列表按当前「周期 × 时段拆分」展开成批量队列行 */
+function strategyBatchRows(strs) {
+  return expandRows(strs.map((s) => ({ key: keyOf(s), strategyId: s.id || "", name: s.name })));
+}
+
 async function runSelBatch() {
   if (batch.value.running || btRunning.value) return;
   if (!selKeys.value.length) return;
   const m = new Map(allRows.value.map((s) => [keyOf(s), s]));
-  const list = selKeys.value.map((k) => m.get(k)).filter(Boolean).map((s) => ({ key: keyOf(s), strategyId: s.id || "", name: s.name }));
-  if (!list.length) return;
-  if (list.length > 3 && !(await ask(`将按下方回测参数依次回测选中的 ${list.length} 个策略：${selNames()}。期间可停止后续队列。确认？`, { title: "批量回测", confirmText: "开始批量回测" }))) return;
-  await runBatch(list);
+  const strs = selKeys.value.map((k) => m.get(k)).filter(Boolean);
+  if (!strs.length) return;
+  const rows = strategyBatchRows(strs);
+  if ((rows.length > 3 || rows.some((r) => r.grid)) && !(await ask(batchConfirmMsg(strs.length, rows), { title: "批量回测", confirmText: "开始批量回测" }))) return;
+  await runBatch(rows);
 }
 
 async function runAllBatch() {
   if (batch.value.running || btRunning.value) return;
-  const list = allRows.value.map((s) => ({ key: keyOf(s), strategyId: s.id || "", name: s.name }));
-  if (!list.length) return;
-  if (!(await ask(`一键回测当前分类下全部 ${list.length} 个策略（含引擎内置基准），共用下方同一套标的/区间/参数。确认？`, { title: "全部回测", confirmText: "开始" }))) return;
-  await runBatch(list);
+  const strs = allRows.value;
+  if (!strs.length) return;
+  const rows = strategyBatchRows(strs);
+  if (!(await ask(batchConfirmMsg(strs.length, rows), { title: "全部回测", confirmText: "开始" }))) return;
+  await runBatch(rows);
 }
 
 function batchPct() {
@@ -843,7 +893,7 @@ onBeforeUnmount(() => {
     </div>
     <div class="bt-hero-m">
       <div class="bt-hero-t">策略实验室</div>
-      <div class="bt-hero-d">同一标的与回测参数下横向对比所有策略：勾选若干后「批量回测选中」，或一键「全部回测」。每跑完一个策略结果实时标记到行内，留存到本窗口关闭；把胜出的策略「应用到循环」投入超短线实盘。</div>
+      <div class="bt-hero-d">同一标的与回测参数下横向对比策略：勾选若干后「批量回测选中」或一键「全部回测」；支持一次选多个 K 线周期（1m/5m/15m/…）并「按天/周/月」拆分长区间——例如选近 1 个月按天拆分，每天独立回测一份结果，验证策略是否稳定复现。行情只拉一次落 SQLite，跑过的段秒开。胜出的策略「应用到循环」投入超短线实盘。</div>
     </div>
     <div class="bt-hero-stats">
       <div class="st"><b class="hl">{{ allRows.length }}</b><span>策略</span></div>
@@ -884,7 +934,7 @@ onBeforeUnmount(() => {
         <button v-if="selKeys.length" class="sm" @click="clearSel">清空勾选</button>
         <span v-if="selKeys.length" class="sel-tip hint" :title="selNames()">{{ selNames() }}</span>
         <span class="spacer"></span>
-        <span class="hint">标的/区间/ATR/费率等共用下方「回测控制台」</span>
+        <span class="hint">标的/区间/参数共用下方「回测控制台」；勾选多个周期或按天/周/月拆分会展开为「策略 × 周期 × 时段」网格，每格独立回测</span>
       </div>
 
       <div v-if="batch.running" class="bt-strip">
@@ -989,6 +1039,54 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
+  <!-- ── 批量回测矩阵：策略 × 周期 × 时段 展开批量时的每格结果 ── -->
+  <div v-if="lastGrid && lastGrid.rows.length" class="panel">
+    <h2>
+      批量回测矩阵<span class="spacer"></span>
+      <span class="tag t-info">{{ lastGrid.dim }}</span>
+      <span class="hint">{{ lastGrid.rows.length }} 格 · 完成 {{ gridStateC.ok }} · 失败 {{ gridStateC.err }}</span>
+    </h2>
+    <div class="body">
+      <div class="hint" style="margin-bottom:6px">
+        {{ fmtTs(lastGrid.at) }} 启动。每格独立回测一份结果；行情只向 OKX 拉一次并缓存到 SQLite，跨格/跨次不重复请求。非 1m 周期由本地 1m 聚合生成。
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>状态</th><th>策略</th><th>周期</th><th>时段</th><th>结果</th><th>完成</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, ix) in lastGrid.rows" :key="r.key">
+            <td>{{ ix + 1 }}</td>
+            <td class="nowrap">
+              <template v-if="r.status === 'run'">
+                <span class="tag t-on">运行中 {{ live[r.key]?.p || 1 }}%</span>
+                <span class="hint">{{ live[r.key]?.stage || "" }}</span>
+              </template>
+              <span v-else-if="r.status === 'wait'" class="tag t-hold">排队</span>
+              <span v-else-if="r.status === 'ok'" class="tag t-buy">完成</span>
+              <span v-else class="tag t-sell">失败</span>
+            </td>
+            <td class="nowrap">{{ r.name }}</td>
+            <td class="nowrap">{{ barT(r.bar) }}</td>
+            <td class="nowrap">{{ r.win }}</td>
+            <td class="wrap">
+              <template v-if="r.sum">
+                <span :class="['m-net', (r.sum.totalNetPnlPct ?? 0) >= 0 ? 'up' : 'down']">
+                  {{ fmtNum(r.sum.totalNetPnlPct ?? 0, 3) }}%
+                </span>
+                <span class="hint">{{ gridShort(r) }}</span>
+              </template>
+              <span v-if="r.err" class="hint" style="color:var(--c-danger)">{{ r.err }}</span>
+            </td>
+            <td class="nowrap hint">{{ fmtTs(r.at) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ── 回测控制台 ── -->
   <div class="panel">
     <h2 id="scalper_bt">超短线回测<span class="spacer"></span><span class="hint">参数改动自动保存 —— 下次打开默认沿用上次填写</span></h2>
@@ -1016,6 +1114,19 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="cfg-head">
+        <span class="cfg-ic"></span><b>K 线周期</b>
+        <span class="spacer"></span>
+        <span class="hint">多选 → 批量时每个周期各回测一遍（单跑/策略行「回测」用第一个）；非 1m 由本地 1m 聚合，数据只拉一次</span>
+      </div>
+      <div class="row">
+        <label>周期</label>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button v-for="c in BT_BARS" :key="c.v" :class="['chip', btBarOn(c.v) && 'on']" @click="toggleBtBar(c.v)">{{ c.t }}</button>
+        </span>
+        <span class="hint" v-if="btForm.bars?.length">已选 {{ btForm.bars.length }} 个：{{ btForm.bars.map(barT).join(" / ") }}</span>
+      </div>
+
+      <div class="cfg-head">
         <span class="cfg-ic"></span><b>时间区间</b>
         <span class="spacer"></span>
         <span class="bt-quick">
@@ -1027,7 +1138,17 @@ onBeforeUnmount(() => {
         <input v-model="btForm.start" type="datetime-local" style="max-width:200px" />
         <span class="hint">至</span>
         <input v-model="btForm.end" type="datetime-local" style="max-width:200px" />
-        <span class="hint">本地时间。区间越大首次拉取越久（超过 4 分钟会被看门狗终止），跑过的区间自动命中 SQLite 缓存秒开</span>
+        <span class="hint">本地时间。行情自动缓存落库，同段重复回测秒开；建议大区间配合下方「时段拆分」切段跑</span>
+      </div>
+      <div class="row">
+        <label>时段拆分</label>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button v-for="c in BT_SPLITS" :key="c.v" :class="['chip', (btForm.split || 'whole') === c.v && 'on']" :title="c.h" @click="toggleBtSplit(c.v)">{{ c.t }}</button>
+        </span>
+        <span class="hint">
+          <template v-if="(btForm.split || 'whole') === 'whole'">整个区间一次回测</template>
+          <template v-else>大区间（如近 1 个月）按「{{ (btForm.split === 'day' && '天') || (btForm.split === 'week' && '周') || '月' }}」切成 {{ winSegs().length }} 段，每段独立一份结果；与策略库「批量回测选中/全部」组合 = 策略×周期×时段网格</template>
+        </span>
       </div>
 
       <div class="cfg-head">
@@ -1069,10 +1190,10 @@ onBeforeUnmount(() => {
       <div class="row" style="margin-top:6px">
         <label></label>
         <button class="primary" :disabled="btBusy" @click="runBacktest">
-          {{ batch.running ? "批量回测进行中…" : btRunning ? "回测中 " + (btProgress?.p ?? 0) + "%…" : "开始回测" }}
+          {{ batch.running ? "批量回测进行中…" : btRunning ? "回测中 " + (btProgress?.p ?? 0) + "%…" : expandDim ? "批量回测当前策略（" + (btForm.bars?.length || 1) + "周期 × " + winSegs().length + "段）" : "开始回测" }}
         </button>
         <span class="hint">
-          {{ batch.running ? "单次与批量回测互斥，批量结束后再单跑。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根 1m 斜率 + ATR 止损 + RR 止盈）" }}
+          {{ batch.running ? "批量进行中，结束后再发起新任务。" : expandDim ? "已开启多周期 / 时段拆分：把当前所选策略按上方配置展开成网格逐格回测（要横向对比多个策略，用策略库的「批量回测选中 / 回测全部」）。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根收盘斜率 + ATR 止损 + RR 止盈）" }}
         </span>
       </div>
       <div v-if="btRunning" class="row" style="margin-top:6px">
@@ -1088,6 +1209,7 @@ onBeforeUnmount(() => {
     <div class="hint" style="margin:8px 2px 0">
       <span v-if="btForm.strategyId" :class="['tag','t-info']">策略：{{ strategies.find((s) => s.id === btForm.strategyId)?.name || btForm.strategyId }}</span>
       <span v-else :class="['tag','t-hold']">内置趋势策略</span>
+      <span v-if="btResult.bar && btResult.bar !== '1m'" class="tag t-info">K线 {{ barT(btResult.bar) }}</span>
       结果摘要已记录——在「编辑策略」弹窗里点「LLM 改写优化」会自动带上本次回测做针对性改进。
     </div>
     <div class="cards">
@@ -1112,7 +1234,7 @@ onBeforeUnmount(() => {
             <tr>
               <th>#</th><th>方向</th><th>开仓时间</th><th>平仓时间</th>
               <th>开仓价</th><th>平仓价</th><th>止损</th><th>止盈</th>
-              <th>持仓(分)</th><th>原因</th><th>盈亏(USDT)</th><th>手续费</th><th>净盈亏(USDT)</th><th>净盈亏(%)</th>
+              <th>持仓(根)</th><th>原因</th><th>盈亏(USDT)</th><th>手续费</th><th>净盈亏(USDT)</th><th>净盈亏(%)</th>
             </tr>
           </thead>
           <tbody>

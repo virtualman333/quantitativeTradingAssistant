@@ -744,16 +744,16 @@ ipcMain.handle("scalper:btStart", async (_e, p: any = {}) => {
       rec.msg = rec.error;
       btBroadcast({ type: "error", ...rec });
     });
-    // 看门狗：网络异常可能导致进程悬挂，240s 强杀
+    // 看门狗：网络异常可能导致进程悬挂，600s 强杀（整段近 1 月 1m 首次拉取约几分钟）
     setTimeout(() => {
       if (rec.state === "running") {
         proc.kill();
         rec.state = "error";
-        rec.error = "回测超时（240s）已终止";
+        rec.error = "回测超时（600s）已终止";
         rec.msg = rec.error;
         btBroadcast({ type: "error", ...rec });
       }
-    }, 240_000).unref();
+    }, 600_000).unref();
 
     // 只保留最近 20 个 job
     if (btJobs.size > 20) {
