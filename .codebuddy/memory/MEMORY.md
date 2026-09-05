@@ -27,8 +27,9 @@
 - 策略=仅一个 `signal(ctx)->{direction:long|short|flat,reason,atr_mult?,rr?}`；ctx 传全量序列引用+n(当前根)+atr+price，无未来数据；脚本策略接口经 scripts/strategy_loader.py（call_signal 兜底 flat）；scripts/strategy_check.py 做语法/红线 import/冒烟 gate。
 - scalper.py（实盘信号）与 scalper_backtest.py（回测）同加 `--strategy <dir>`：同一定义源既回测也实盘；store.scalper.strategyId 空=内置趋势（行为不变）。
 - 回测 job+进度：scalper_backtest.py `--job-id` 向 stderr 周期写 {"p","stage","msg"}；main.ts scalper:btStart spawn（PYTHONIOENCODING=utf-8、600s 看门狗、btJobs Map），`scalper:btEvent` 广播全窗口，UI 进度条+轮询兜底 scalper:btGet。回测缓存库 data/scalper_candles.db（已 gitignore）。
-- 回测多周期/多时段批量（2026-09-05）：数据层只向 OKX 拉 1m 一种 K 线并缓存（SQLite，缺口按段补拉、覆盖判定容差：末端 1 根 / 根数差 ≤2）；5m/15m/30m/1H/4H… 由本地 1m 聚合写入同库（bar 列），同区间任意周期/段只拉一次。`--bar` 透传 TS（scalper.ts backtestArgv / runScalperBacktest）。UI BacktestView：多周期 chips 多选 + 起止区间按天/周/月拆分（winSegs），批量按钮（批量回测选中/回测全部/控制台主按钮）把 策略×周期×时段 笛卡尔展开逐格串行回测，结果展示在「批量回测矩阵」面板（lastGrid，滚动不丢）；单周期+不拆分的单格保留原实时进度+交易明细。持仓超时按分钟折算为该周期根数（max-hold → ceil(min/bar_min)）。
+- 回测多周期/多时段批量（2026-09-05）：数据层只向 OKX 拉 1m 一种 K 线并缓存（SQLite，缺口按段补拉、覆盖判定容差：末端 1 根 / 根数差 ≤2）；5m/15m/30m/1H/4H… 由本地 1m 聚合写入同库（bar 列），同区间任意周期/段只拉一次。`--bar` 透传 TS（scalper.ts backtestArgv / runScalperBacktest）。UI BacktestView：多周期 chips 多选 + 起止区间按天/周/月拆分（winSegs），批量按钮（批量回测选中/回测全部/控制台主按钮）把 策略×周期×时段 笛卡尔展开逐格批量回测，结果展示在「批量回测矩阵」面板（lastGrid，滚动不丢）；单周期+不拆分的单格保留原实时进度+交易明细。持仓超时按分钟折算为该周期根数（max-hold → ceil(min/bar_min)）。
 - UI 在 ScalperView.vue：「策略库」面板（内置默认+自定义：回测/应用到循环/编辑/删除）+ 新建/编辑 modal（思路→LLM 生成→手改→保存并校验）；弹窗复用全局 `.modal/.box/.body/.foot`。
+- 批量回测并行（2026-09-05）：UI `concurrency`（1~4 路，默认 3，chips 持久化）→ runBatch 改并行 worker 池（Promise.all 多个 worker 领号跑格，每格独立 job），`live[key]` keyed + 行内/矩阵按 key 显示进度天然支持多格同跑；批量进度条按「完成数 + 各在跑格实时进度」估算。Python 缓存库 `_db()` 必须 autocommit（isolation_level=None）+ `PRAGMA journal_mode=WAL` + busy_timeout，写缓存统一走 `_tx()` 的 BEGIN IMMEDIATE 短事务——否则多进程并行「先读后写锁升级」死锁（busy_timeout 不生效）。
 
 - **报告是 HTML**：每轮归档后由 LLM 生成（职责边界：语义/排版/解读交给模型，落盘与聚合留在 TS），输出 `reports/<round_id>/summary.html` + `<expert>.html`；`reports/index.html` 记录表由 TS 确定性生成。LLM 失败/mock → 纯数据兜底页，保证每轮都有详情。
 - HTML 必须走 `llm.complete()`（不能用 `decide()`：其 `extractJson()` 会被 `<style>{...}` 花括号破坏）。
