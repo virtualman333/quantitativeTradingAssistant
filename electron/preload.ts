@@ -107,6 +107,8 @@ contextBridge.exposeInMainWorld("api", {
   reportsOpen: (p: string) => safeInvoke("reports:open", p),
   reportsDir: () => safeInvoke("reports:dir"),
   reportsGen: (kind: string) => safeInvoke("reports:gen", kind),
+  // 本机 CPU 核心数（批量回测并行度上限）
+  cpuCores: () => safeInvoke("system:cpuCores"),
   // 热门行情（OKX 公共 REST）
   marketTickers: () => safeInvoke("market:tickers"),
   marketKline: (instId: string, bar?: string, limit?: number) =>

@@ -11,6 +11,7 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { spawn, exec, execFileSync, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -778,6 +779,14 @@ ipcMain.handle("scalper:btAnalyze", async (_e, p: any = {}) => {
     return { ok: r.ok, ...r };
   } catch (e) {
     return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
+/** 本机 CPU 逻辑核心数（供批量回测并行度上限自动计算） */
+ipcMain.handle("system:cpuCores", () => {
+  try {
+    return { ok: true, cores: os.cpus().length || 1 };
+  } catch {
+    return { ok: true, cores: 1 };
   }
 });
 /** 超短线回测：独立窗口打开（与主窗口同一份 UI，#scalp hash 直达页签；页签 k 是 scalp，不是 scalper） */

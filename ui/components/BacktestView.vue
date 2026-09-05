@@ -432,12 +432,11 @@ const BT_BARS = [
   { v: "1H", t: "1h" },
   { v: "4H", t: "4h" },
 ];
-/** 批量回测并行路数（多进程同时跑，数据缓存同段只拉一次） */
+/** 批量回测并行路数快捷档（多进程同时跑；数值可自定义，上限按本机 CPU 核心数自动限制） */
 const BT_CONC = [
-  { v: 1, t: "1", h: "逐格串行（最省资源，与旧版一致）" },
-  { v: 2, t: "2", h: "同时跑 2 个回测进程" },
-  { v: 3, t: "3", h: "默认：同时跑 3 个回测进程" },
-  { v: 4, t: "4", h: "大网格快速跑完（行情只拉一次，同段写缓存由 SQLite 协调）" },
+  { v: 1, t: "1 路", h: "串行，最省资源" },
+  { v: 2, t: "2 路", h: "轻量并行" },
+  { v: 4, t: "4 路", h: "常规并行" },
 ];
 /** 区间拆分：不拆分 / 按天 / 按周 / 按月（批量时每段各回测一次，验证跨时段稳健性） */
 const BT_SPLITS = [
@@ -454,7 +453,7 @@ function btFormDefaults() {
     end: toLocalInput(now),
     bars: ["1m"], // 批量回测的 K 线周期集合（至少保留一个；单跑用第一个）
     split: "whole", // 批量回测的区间拆分方式
-    concurrency: 3, // 批量回测并行路数（多进程同时跑）
+    concurrency: 0, // 批量回测并行路数（0=自动取本机上限）
     atrMult: 2.5,
     feeRate: 0.0005,
     notional: 10000,
@@ -612,10 +611,19 @@ function toggleBtBar(v) {
 function toggleBtSplit(v) {
   btForm.value.split = v;
 }
-/** 批量并行路数：取表单值 ∩ [1,4]，再按实际格子数封顶 */
+/** 本机 CPU 逻辑核心数（onMounted 从主进程拉取，未就绪时用兜底 8） */
+const cores = ref(0);
+/** 最大并行路数：按本机 CPU 核心数自动限制（每核一路，封顶 8，避免 OKX 限频与内存峰值） */
+const maxConc = computed(() => {
+  const c = cores.value > 0 ? cores.value : 8;
+  return Math.max(1, Math.min(8, c));
+});
+/** 批量并行路数：0/空/非法 = 自动取上限；否则 clamp 到 [1, maxConc] */
 function btConcurrency() {
-  const n = Number(btForm.value?.concurrency) || 3;
-  return Math.max(1, Math.min(4, n));
+  const n = Number(btForm.value?.concurrency);
+  const max = maxConc.value;
+  if (!Number.isFinite(n) || n <= 0) return max;
+  return Math.max(1, Math.min(max, Math.round(n)));
 }
 /** 回测阶段 → 中文文案（后端上报的 stage 是英文内部名） */
 function stageLabel(s) {
@@ -979,6 +987,9 @@ function fmtTs(iso) {
 
 onMounted(() => {
   loadStrategies();
+  api.cpuCores().then((r) => {
+    if (r?.ok && r.cores) cores.value = r.cores;
+  }).catch(() => {});
 });
 onBeforeUnmount(() => {
   if (saveBtTimer) clearTimeout(saveBtTimer);
@@ -1211,10 +1222,12 @@ onBeforeUnmount(() => {
 
       <div class="row">
         <label>并行度</label>
+        <input v-model.number="btForm.concurrency" type="number" :min="1" :max="maxConc" step="1" style="max-width:76px" title="并行回测进程数（0=自动）" />
         <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <button v-for="c in BT_CONC" :key="c.v" :class="['chip', (btForm.concurrency || 3) === c.v && 'on']" :title="c.h" @click="btForm.concurrency = c.v">{{ c.t }} 路</button>
+          <button v-for="c in BT_CONC" :key="c.v" :class="['chip', btForm.concurrency === c.v && 'on']" :title="c.h" @click="btForm.concurrency = c.v">{{ c.t }}</button>
+          <button :class="['chip', !btForm.concurrency && 'on']" title="取本机可用的最大并行路数" @click="btForm.concurrency = 0">自动</button>
         </span>
-        <span class="hint">批量时同时启动的 Python 回测进程数（每格独立 job，行情同段只拉一次）</span>
+        <span class="hint">本机 {{ cores || "…" }} 核 CPU，自动限制最大 {{ maxConc }} 路；可手填任意值，0/超限 = 取上限。路数过高会增加内存与 OKX 限频风险</span>
       </div>
 
       <div class="cfg-head">
