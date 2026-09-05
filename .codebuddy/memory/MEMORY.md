@@ -57,6 +57,7 @@
 - 轮次时间格式必须 `YYYY-MM-DD HH:MM:SS`（archive_round.py strptime 严格解析）。
 
 ## 踩过的坑（改代码前先看）
+- **密钥不入库（2026-09-05）**：金十 MCP 的 token 曾硬编码在 `mcpPresets.ts` 与 `jin10_client.py` 并推送到 GitHub。已改为：脚本侧读 `JIN10_MCP_TOKEN` 环境变量 / `--token`；HTTP MCP 预设用 `envVars` 让用户在安装时填，`main.ts mcp:install` 把 `JIN10_MCP_TOKEN` 转成 `Authorization` 头只存本地 store.json。任何新接入的数据源凭证一律走环境变量/本地配置，禁止写死。
 - **IPC 克隆**：Vue Proxy 参数在 contextBridge 传参时即被 structuredClone 报错 → 修复在渲染进程 `ui/lib/api.js` 的 `buildApi()`（复制成新普通对象 + JSON 往返拍平）。**不能用 Proxy 包装 `window.api`**（冻结对象的 get 不变量会抛 TypeError）。
 - **preload 旧产物**：`dist/electron/preload.js` 是遗留旧文件，`resolvePreload()` 须优先 `dist/preload/preload.js`。「api.xxx is not a function」先查是不是加载到旧 preload。
 - **Windows renameSync**：覆盖被占用的 target 会 EPERM → 原子写须捕获 EPERM/EEXIST/EBUSY/EACCES 回退 `writeFileSync`。
