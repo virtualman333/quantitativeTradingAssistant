@@ -547,6 +547,61 @@ export function backtestArgv(args: {
 }
 
 /**
+ * LLM 分析一次回测结果：返回中文 Markdown 分析报告（不落盘，供界面展示）。
+ * 回测结果无敏感标识，无需混淆（obfuscated=false）；走 complete 拿纯文本，避免 decide 的 extractJson。
+ */
+export async function analyzeBacktest(
+  result: Record<string, unknown>,
+  strategyName = ""
+): Promise<{ ok: boolean; text: string; modelId?: string; error?: string }> {
+  const cfg = resolveModel();
+  if (!cfg || cfg.provider === "mock") {
+    return {
+      ok: false,
+      text: "",
+      error: "未配置真实模型，无法分析。请在「设置-模型」添加 API Key 并设为默认。",
+    };
+  }
+  const llm = createProvider(cfg, false);
+  const summary = (result.summary || {}) as Record<string, unknown>;
+  const params = (result.params || {}) as Record<string, unknown>;
+  const trades = Array.isArray(result.trades) ? (result.trades as Record<string, unknown>[]) : [];
+  // 交易明细只取最近 60 笔 + 关键字段，避免超长撑爆上下文
+  const slim = trades.slice(-60).map((t) => ({
+    n: t.n,
+    side: t.side,
+    entry: t.entry,
+    exit: t.exit,
+    bars: t.bars,
+    reason: t.reason,
+    pnlPct: t.pnlPct,
+    netPnlPct: t.netPnlPct,
+    netPnlUsdt: t.netPnlUsdt,
+  }));
+
+  const sys = `你是加密货币永续合约超短线策略的量化研究员。请基于给定的一次回测结果，输出一份简洁、可执行的中文分析报告（Markdown）。要求：
+1. 先给结论：该区间策略表现如何，是否值得实盘或继续优化。
+2. 分点解读关键指标：笔数、胜率、盈亏比(PF)、最大回撤、夏普、总净盈亏，并指出数值是否健康。
+3. 结合每笔交易（方向、持仓根数、平仓原因、盈亏）指出主要问题，例如：假突破频繁、止损过近、盈利拿不住、手续费侵蚀、方向判断反了等。
+4. 给出 2~3 条具体可落地的改进建议，最好能对应到 signal(ctx) 的写法。
+不要复述原始数据，要给出判断和洞察；总字数控制在 400 字以内。`;
+
+  const user = `策略：${strategyName || (params.strategy as string) || "内置趋势策略"}
+标的：${result.inst || ""}  周期：${result.bar || "1m"}
+区间：${result.start || ""} ~ ${result.end || ""}
+参数：${JSON.stringify(params)}
+汇总：${JSON.stringify(summary)}
+最近 ${slim.length} 笔交易明细：${JSON.stringify(slim)}`;
+
+  try {
+    const text = await llm.complete(sys, user);
+    return { ok: true, text, modelId: cfg.id };
+  } catch (e) {
+    return { ok: false, text: "", error: String(e).slice(0, 300) };
+  }
+}
+
+/**
  * 一键平仓：平掉超短线所有在持标的的持仓。
  *
  * 范围 = 开仓记录里 status=open 的标的 ∪ 当前配置标的（兜底），

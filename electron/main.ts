@@ -770,6 +770,16 @@ ipcMain.handle("scalper:btGet", (_e, jobId: string) => {
   if (!rec) return { ok: false, error: "任务不存在" };
   return { ok: true, ...rec };
 });
+/** LLM 分析一次回测结果（中文 Markdown 报告，供界面展示） */
+ipcMain.handle("scalper:btAnalyze", async (_e, p: any = {}) => {
+  try {
+    const mod = await loadDist<any>("scalper.js");
+    const r = await mod.analyzeBacktest(p?.result || {}, p?.strategyName || "");
+    return { ok: r.ok, ...r };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
 /** 超短线回测：独立窗口打开（与主窗口同一份 UI，#scalp hash 直达页签；页签 k 是 scalp，不是 scalper） */
 ipcMain.handle("scalper:openWindow", () => {
   const exist = BrowserWindow.getAllWindows().find((w) => w.getTitle().includes("超短线回测"));

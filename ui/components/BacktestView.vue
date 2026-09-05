@@ -70,6 +70,8 @@ function loadRowRes() {
 }
 /** key -> { at, ok, summary?, error? }：该策略最近一次回测摘要（本会话保留） */
 const rowRes = ref(loadRowRes());
+/** key -> 完整回测结果（内存，供「查看详情 / AI 分析」；sessionStorage 只存摘要，避免膨胀） */
+const btResults = ref({});
 function saveRowRes() {
   try {
     sessionStorage.setItem(RES_KEY, JSON.stringify(rowRes.value));
@@ -114,6 +116,7 @@ function noteRowRes(k, ok, payload) {
     const sum = payload && payload.summary;
     if (!sum) return;
     rowRes.value[k] = { at: new Date().toISOString(), ok: true, summary: sum };
+    if (payload && payload.summary) btResults.value[k] = payload; // 完整结果供详情/分析
   } else {
     rowRes.value[k] = { at: new Date().toISOString(), ok: false, error: String(payload || "回测失败").slice(0, 300) };
   }
@@ -621,6 +624,12 @@ function stageLabel(s) {
   if (s === "启动" || s === "start") return "启动中";
   return s || "回测中";
 }
+/** 当前回测表单所选策略的展示名（供详情/分析标题与提示词） */
+function btStrategyName() {
+  const sid = btForm.value?.strategyId || "";
+  if (!sid) return "内置趋势策略";
+  return strategies.value.find((s) => s.id === sid)?.name || sid;
+}
 /** 策略集合 × 周期 × 时段 → 批量队列行（展开态每格独立 key，整段单周期保持策略 key） */
 function expandRows(strats) {
   const bars = btForm.value?.bars?.length ? btForm.value.bars : ["1m"];
@@ -766,6 +775,60 @@ const gridStateC = computed(() => ({
   err: lastGrid.value ? lastGrid.value.rows.filter((r) => r.status === "err").length : 0,
 }));
 
+// ── 回测详情 + LLM 分析（弹窗统一承载：摘要 + 明细 + AI 分析） ──
+const btDetail = ref(null); // { result, title, strategyName } | null
+const btAnalyzing = ref(false);
+const btAnalysis = ref("");
+const btAnalysisErr = ref("");
+
+function openBtDetail(result, title, strategyName) {
+  if (!result) return;
+  btDetail.value = { result, title, strategyName: strategyName || "" };
+  btAnalysis.value = "";
+  btAnalysisErr.value = "";
+}
+async function runAnalyze() {
+  if (!btDetail.value || btAnalyzing.value) return;
+  btAnalyzing.value = true;
+  btAnalysis.value = "";
+  btAnalysisErr.value = "";
+  try {
+    const r = await api.scalperBtAnalyze({ result: btDetail.value.result, strategyName: btDetail.value.strategyName || "" });
+    if (!r?.ok) throw new Error(r?.error || "分析失败");
+    btAnalysis.value = r.text || "";
+  } catch (e) {
+    btAnalysisErr.value = errText(e);
+  } finally {
+    btAnalyzing.value = false;
+  }
+}
+/** 轻量 Markdown → HTML（先转义再套标题/列表/加粗/行内代码，防注入） */
+function escapeHtml(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function mdInline(s) {
+  return escapeHtml(s)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+function renderMd(md) {
+  const lines = String(md || "").replace(/\r\n/g, "\n").split("\n");
+  let html = "";
+  let inUl = false;
+  const closeUl = () => { if (inUl) { html += "</ul>"; inUl = false; } };
+  for (const raw of lines) {
+    let m = raw.match(/^(#{1,6})\s+(.*)$/);
+    if (m) { closeUl(); const lv = m[1].length; html += `<h${lv} class="md-h">${mdInline(m[2])}</h${lv}>`; continue; }
+    m = raw.match(/^\s*[-*+]\s+(.*)$/);
+    if (m) { if (!inUl) { html += "<ul>"; inUl = true; } html += `<li>${mdInline(m[1])}</li>`; continue; }
+    closeUl();
+    if (!raw.trim()) continue;
+    html += `<p>${mdInline(raw)}</p>`;
+  }
+  closeUl();
+  return html;
+}
+
 /** 批量串行回测队列：rows 来自 expandRows（策略 key 或 策略×周期×时段 网格 key） */
 async function runBatch(list) {
   if (btRunning.value) {
@@ -814,8 +877,9 @@ async function runBatch(list) {
       const w = await waitBtJob(r.jobId, row.key);
       if (w.ok) {
         const rs = w.result?.summary;
+        if (w.result && rs) btResults.value[row.key] = w.result; // 完整结果供详情/分析
         if (row.grid) {
-          if (rs) gridPatch(row.key, { status: "ok", at: new Date().toISOString(), sum: rs });
+          if (rs) gridPatch(row.key, { status: "ok", at: new Date().toISOString(), sum: rs, result: w.result });
           else gridPatch(row.key, { status: "err", err: "结果无摘要", at: new Date().toISOString() });
         } else noteRowRes(row.key, true, w.result);
         batch.value.ok += 1;
@@ -1053,6 +1117,7 @@ onBeforeUnmount(() => {
               <td class="nowrap"><span v-if="currentStrategyId === s.id" class="tag t-on">当前</span><span v-else class="hint">—</span></td>
               <td class="nowrap">
                 <button class="sm" :disabled="btBusy" @click="btForStrategy(s.id)">回测</button>
+                <button v-if="btResults[keyOf(s)]" class="sm" @click="openBtDetail(btResults[keyOf(s)], s.name + ' · 回测详情', s.name)">详情</button>
                 <button v-if="s.engine" class="sm" :disabled="!currentStrategyId" @click="applyStrat('')">
                   恢复引擎默认
                 </button>
@@ -1244,6 +1309,7 @@ onBeforeUnmount(() => {
                   {{ fmtNum(r.sum.totalNetPnlPct ?? 0, 3) }}%
                 </span>
                 <span class="hint">{{ gridShort(r) }}</span>
+                <button v-if="r.result" class="sm" style="margin-left:6px" @click="openBtDetail(r.result, r.name + ' · ' + r.win, r.name)">详情</button>
               </template>
               <span v-if="r.err" class="hint" style="color:var(--c-danger)">{{ r.err }}</span>
             </td>
@@ -1259,7 +1325,7 @@ onBeforeUnmount(() => {
       <span v-if="btForm.strategyId" :class="['tag','t-info']">策略：{{ strategies.find((s) => s.id === btForm.strategyId)?.name || btForm.strategyId }}</span>
       <span v-else :class="['tag','t-hold']">内置趋势策略</span>
       <span v-if="btResult.bar && btResult.bar !== '1m'" class="tag t-info">K线 {{ barT(btResult.bar) }}</span>
-      结果摘要已记录——在「编辑策略」弹窗里点「LLM 改写优化」会自动带上本次回测做针对性改进。
+      <button class="sm" @click="openBtDetail(btResult, btStrategyName() + ' · 回测详情', btStrategyName())">查看详情 / AI 分析</button>
     </div>
     <div class="cards">
       <div class="card"><div class="k">回测笔数</div><div class="v">{{ btResult.summary.trades }}</div></div>
@@ -1393,6 +1459,72 @@ onBeforeUnmount(() => {
         <button class="primary" :disabled="genLoading || saveLoading" @click="doSaveStrategy">
           {{ saveLoading ? "保存校验中…" : "保存并校验" }}
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 回测详情 + AI 分析弹窗（摘要 + LLM 分析 + 交易明细） -->
+  <div v-if="btDetail" class="modal" @click.self="btDetail = null">
+    <div class="box" style="width:940px;max-width:96vw;max-height:92vh;overflow:auto">
+      <h3>
+        {{ btDetail.title }}<span class="spacer"></span>
+        <button class="sm" @click="btDetail = null">关闭</button>
+      </h3>
+      <div class="body">
+        <div v-if="btDetail.result?.summary" class="cards">
+          <div class="card"><div class="k">回测笔数</div><div class="v">{{ btDetail.result.summary.trades }}</div></div>
+          <div class="card"><div class="k">胜率</div><div class="v">{{ btDetail.result.summary.winRate == null ? "—" : btDetail.result.summary.winRate + "%" }}</div></div>
+          <div class="card"><div class="k">总净盈亏(USDT)</div><div :class="['v', btDetail.result.summary.totalNetPnlUsdt >= 0 ? 'up' : 'down']">{{ fmtNum(btDetail.result.summary.totalNetPnlUsdt, 2) }}</div></div>
+          <div class="card"><div class="k">总净盈亏(%)</div><div :class="['v', btDetail.result.summary.totalNetPnlPct >= 0 ? 'up' : 'down']">{{ fmtNum(btDetail.result.summary.totalNetPnlPct, 3) }}%</div></div>
+          <div class="card"><div class="k">盈亏比</div><div class="v">{{ btDetail.result.summary.profitFactor == null ? "—" : fmtNum(btDetail.result.summary.profitFactor, 2) }}</div></div>
+          <div class="card"><div class="k">最大回撤</div><div class="v down">{{ fmtNum(btDetail.result.summary.maxDrawdownPct, 2) }}%</div></div>
+          <div class="card"><div class="k">总手续费</div><div class="v">{{ fmtNum(btDetail.result.summary.totalFeeUsdt, 2) }}</div></div>
+          <div class="card"><div class="k">夏普</div><div class="v">{{ btDetail.result.summary.sharpe == null ? "—" : fmtNum(btDetail.result.summary.sharpe, 2) }}</div></div>
+        </div>
+        <div v-if="btDetail.result?.cache" class="hint" style="margin-top:6px">
+          数据缓存：库内命中 {{ btDetail.result.cache.fromDb || 0 }} 根，本次新拉 {{ btDetail.result.cache.fetched || 0 }} 根
+        </div>
+
+        <div class="cfg-head" style="margin-top:12px">
+          <span class="cfg-ic"></span><b>LLM 分析</b>
+          <span class="spacer"></span>
+          <button class="primary sm" :disabled="btAnalyzing" @click="runAnalyze">{{ btAnalyzing ? "分析中…（约 30s）" : "AI 分析此结果" }}</button>
+        </div>
+        <div v-if="btAnalysis" class="bt-md" v-html="renderMd(btAnalysis)"></div>
+        <div v-else-if="btAnalyzing" class="hint" style="margin-top:6px">正在调用模型解读本次回测…</div>
+        <div v-if="btAnalysisErr" class="alert err" style="margin-top:6px">{{ btAnalysisErr }}</div>
+
+        <div class="cfg-head" style="margin-top:12px">
+          <span class="cfg-ic"></span><b>交易明细（{{ btDetail.result?.trades?.length || 0 }} 笔）</b>
+        </div>
+        <table v-if="btDetail.result?.trades?.length">
+          <thead>
+            <tr>
+              <th>#</th><th>方向</th><th>开仓时间</th><th>平仓时间</th>
+              <th>开仓价</th><th>平仓价</th><th>止损</th><th>止盈</th>
+              <th>持仓(根)</th><th>原因</th><th>盈亏(USDT)</th><th>手续费</th><th>净盈亏(USDT)</th><th>净盈亏(%)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in btDetail.result.trades" :key="t.n">
+              <td>{{ t.n }}</td>
+              <td><span :class="['tag', t.side === 'short' ? 't-sell' : 't-buy']">{{ t.side === "short" ? "空" : "多" }}</span></td>
+              <td class="nowrap">{{ t.entryTs }}</td>
+              <td class="nowrap">{{ t.exitTs }}</td>
+              <td>{{ t.entry }}</td>
+              <td>{{ t.exit }}</td>
+              <td>{{ t.sl }}</td>
+              <td>{{ t.tp }}</td>
+              <td>{{ t.bars }}</td>
+              <td>{{ t.reason }}</td>
+              <td :class="t.pnlUsdt >= 0 ? 'up' : 'down'">{{ fmtNum(t.pnlUsdt, 2) }}</td>
+              <td>{{ fmtNum(t.feeUsdt, 2) }}</td>
+              <td :class="t.netPnlUsdt >= 0 ? 'up' : 'down'">{{ fmtNum(t.netPnlUsdt, 2) }}</td>
+              <td :class="t.netPnlPct >= 0 ? 'up' : 'down'">{{ fmtNum(t.netPnlPct, 4) }}%</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">该区间未产生交易</div>
       </div>
     </div>
   </div>
@@ -1753,5 +1885,51 @@ td.bt-cell {
 .bt-quick .chip:hover {
   border-color: var(--blue);
   color: var(--blue);
+}
+
+/* ── 回测详情弹窗：LLM 分析 Markdown 渲染 ── */
+.bt-md {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+.bt-md p {
+  margin: 4px 0;
+}
+.bt-md ul {
+  margin: 4px 0 4px 18px;
+}
+.bt-md li {
+  margin: 2px 0;
+}
+.bt-md .md-h {
+  color: var(--text);
+  margin: 8px 0 4px;
+  font-weight: 700;
+}
+.bt-md h1 {
+  font-size: 15px;
+}
+.bt-md h2 {
+  font-size: 14px;
+}
+.bt-md h3 {
+  font-size: 13px;
+}
+.bt-md h4,
+.bt-md h5,
+.bt-md h6 {
+  font-size: 12.5px;
+}
+.bt-md strong {
+  color: var(--text);
+}
+.bt-md code {
+  background: var(--bg2, rgba(255, 255, 255, 0.06));
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 11.5px;
 }
 </style>

@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld("api", {
   strategyApply: (id: string) => safeInvoke("strategy:apply", id),
   scalperBtStart: (p: unknown) => safeInvoke("scalper:btStart", p),
   scalperBtGet: (jobId: string) => safeInvoke("scalper:btGet", jobId),
+  scalperBtAnalyze: (p: unknown) => safeInvoke("scalper:btAnalyze", p),
   onScalperBtEvent: (cb: (e: unknown) => void) => {
     const h = (_e: unknown, ev: unknown) => cb(ev);
     ipcRenderer.on("scalper:btEvent", h);
