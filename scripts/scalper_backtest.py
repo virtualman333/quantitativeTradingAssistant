@@ -87,8 +87,19 @@ DB_PATH = os.path.join(
 
 
 def _db() -> sqlite3.Connection:
+    """打开缓存库连接（autocommit + WAL，兼容多个回测 job 并行写缓存）。
+
+    Python sqlite3 默认在事务里「先读后写」会触发锁升级死锁（SQLITE_BUSY 且 busy_timeout
+    不生效）；批量回测是多进程并行时一定会遇到。isolation_level=None 让每条语句即时提交，
+    写缓存只走下面 _tx() 的 BEGIN IMMEDIATE 短事务 + busy_timeout 等锁，读写互不阻塞。
+    """
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except sqlite3.Error:
+        pass  # 只读/极端环境下 WAL 设置失败不致命
     conn.execute(
         "CREATE TABLE IF NOT EXISTS candles ("
         "inst TEXT NOT NULL, bar TEXT NOT NULL, ts INTEGER NOT NULL,"
@@ -96,6 +107,21 @@ def _db() -> sqlite3.Connection:
         "PRIMARY KEY (inst, bar, ts))"
     )
     return conn
+
+
+def _tx(conn: sqlite3.Connection, sql: str, data: list[tuple]) -> None:
+    """单批写入的短事务：BEGIN IMMEDIATE 先抢写锁（busy_timeout 内等待其他进程），
+    整批一次提交后立刻释放，最大限度减少多进程并行时的写锁冲突。"""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(sql, data)
+        conn.execute("COMMIT")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
 
 
 def parse_time(s: str) -> int:
@@ -182,11 +208,13 @@ def _gaps(conn, inst: str, bar: str, start_ms: int, end_ms: int, bms: int) -> li
 def _write_1m(conn, inst: str, gs: int, ge: int) -> int:
     """补拉一段 1m 缺口并入库，返回入库根数。"""
     rows = fetch_okx(inst, "1m", gs, ge)
-    conn.executemany(
+    if not rows:
+        return 0
+    _tx(
+        conn,
         "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)",
         [(inst, "1m", r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
     )
-    conn.commit()
     return len(rows)
 
 
@@ -219,8 +247,7 @@ def _agg_bucket(conn, inst: str, bar: str, lo_ms: int, hi_ms: int, bms: int) -> 
     if cur_ts is not None:
         out.append(tuple(cur))
     if out:
-        conn.executemany("INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)", out)
-        conn.commit()
+        _tx(conn, "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)", out)
 
 
 def fetch_history(inst: str, bar: str, start_ms: int, end_ms: int) -> tuple[list[list[float]], dict]:

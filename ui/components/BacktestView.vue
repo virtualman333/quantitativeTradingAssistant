@@ -124,7 +124,7 @@ const btOkCount = computed(() => Object.values(rowRes.value).filter((v) => v && 
 const btAllResCount = computed(() => Object.values(rowRes.value).filter((v) => v).length);
 
 // ── 批量队列状态 ──
-const batch = ref({ running: false, list: [], idx: -1, cancel: false, ok: 0, fail: 0, startedAt: 0, curKey: "", curName: "" });
+const batch = ref({ running: false, list: [], cancel: false, ok: 0, fail: 0, startedAt: 0 });
 const live = ref({}); // key -> { st: 'wait'|'run', p, stage, msg }
 const batchStopped = ref(false);
 const btBusy = computed(() => batch.value.running || btRunning.value);
@@ -429,6 +429,13 @@ const BT_BARS = [
   { v: "1H", t: "1h" },
   { v: "4H", t: "4h" },
 ];
+/** 批量回测并行路数（多进程同时跑，数据缓存同段只拉一次） */
+const BT_CONC = [
+  { v: 1, t: "1", h: "逐格串行（最省资源，与旧版一致）" },
+  { v: 2, t: "2", h: "同时跑 2 个回测进程" },
+  { v: 3, t: "3", h: "默认：同时跑 3 个回测进程" },
+  { v: 4, t: "4", h: "大网格快速跑完（行情只拉一次，同段写缓存由 SQLite 协调）" },
+];
 /** 区间拆分：不拆分 / 按天 / 按周 / 按月（批量时每段各回测一次，验证跨时段稳健性） */
 const BT_SPLITS = [
   { v: "whole", t: "不拆分", h: "整个起止区间回测一次" },
@@ -444,6 +451,7 @@ function btFormDefaults() {
     end: toLocalInput(now),
     bars: ["1m"], // 批量回测的 K 线周期集合（至少保留一个；单跑用第一个）
     split: "whole", // 批量回测的区间拆分方式
+    concurrency: 3, // 批量回测并行路数（多进程同时跑）
     atrMult: 2.5,
     feeRate: 0.0005,
     notional: 10000,
@@ -601,6 +609,11 @@ function toggleBtBar(v) {
 function toggleBtSplit(v) {
   btForm.value.split = v;
 }
+/** 批量并行路数：取表单值 ∩ [1,4]，再按实际格子数封顶 */
+function btConcurrency() {
+  const n = Number(btForm.value?.concurrency) || 3;
+  return Math.max(1, Math.min(4, n));
+}
 /** 策略集合 × 周期 × 时段 → 批量队列行（展开态每格独立 key，整段单周期保持策略 key） */
 function expandRows(strats) {
   const bars = btForm.value?.bars?.length ? btForm.value.bars : ["1m"];
@@ -643,7 +656,7 @@ function batchConfirmMsg(stN, rows) {
   const dims = rows.some((r) => r.grid)
     ? `${stN} 个策略 × ${btDimText()} = ${rows.length} 格`
     : `${stN} 个策略`;
-  return `将依次回测 ${dims}，共用下方「回测控制台」的参数（标的/止损/止盈/成本…）。数据层按段按周期只拉一次行情、落 SQLite 缓存，已跑过的段重复回测秒开不重复请求。期间可停止后续队列。确认？`;
+  return `将以 ${btConcurrency()} 路并行回测 ${dims}，共用下方「回测控制台」的参数（标的/止损/止盈/成本…）。数据层按段按周期只拉一次行情、落 SQLite 缓存，已跑过的段重复回测秒开不重复请求。确认？`;
 }
 
 async function runBacktest() {
@@ -770,17 +783,14 @@ async function runBatch(list) {
     };
   }
   const t0 = Date.now();
-  batch.value = { running: true, list: rows, idx: -1, cancel: false, ok: 0, fail: 0, startedAt: t0, curKey: "", curName: "" };
+  const conc = btConcurrency();
+  batch.value = { running: true, list: rows, cancel: false, ok: 0, fail: 0, startedAt: t0 };
   batchStopped.value = false;
   const lv = {};
-  rows.forEach((r) => (lv[r.key] = { st: "wait", p: 0, stage: "", msg: "" }));
+  rows.forEach((r) => (lv[r.key] = { st: "wait", p: 0, stage: "", msg: "", name: r.grid ? r.full : r.name }));
   live.value = lv;
-  for (let i = 0; i < rows.length; i++) {
-    if (batch.value.cancel) break;
-    const row = rows[i];
-    batch.value.idx = i;
-    batch.value.curKey = row.key;
-    batch.value.curName = row.grid ? row.full : row.name;
+  /** 跑一个格子 → 更新矩阵/行内标记与成败计数（并发 worker 共用同一批 live/grid 状态） */
+  const runCell = async (row) => {
     const cur = live.value[row.key];
     if (cur) {
       cur.st = "run";
@@ -814,7 +824,18 @@ async function runBatch(list) {
     } finally {
       delete live.value[row.key];
     }
-  }
+  };
+  // 并行 worker 池：每路 worker 顺序领取下一格；点击「停止后续」后不再领新格（正在跑的格跑完自然结束）
+  let next = 0;
+  const worker = async () => {
+    while (!batch.value.cancel) {
+      const i = next++;
+      if (i >= rows.length) break;
+      await runCell(rows[i]);
+    }
+  };
+  const nWorkers = Math.max(1, Math.min(conc, rows.length));
+  await Promise.all(Array.from({ length: nWorkers }, () => worker()));
   const stopped = batch.value.cancel;
   const okN = batch.value.ok;
   const failN = batch.value.fail;
@@ -861,12 +882,21 @@ async function runAllBatch() {
   await runBatch(rows);
 }
 
+/** 当前正在运行的格子 key（live map 中 st==='run'；并行批量时可能有多个） */
+const btActiveKeys = computed(() =>
+  Object.keys(live.value).filter((k) => live.value[k] && live.value[k].st === "run")
+);
 function batchPct() {
   const b = batch.value;
   if (!b.running || !b.list.length) return 0;
-  const lv = b.curKey ? live.value[b.curKey] : null;
-  const curP = lv && lv.p ? lv.p : 0;
-  return Math.max(1, Math.min(100, Math.round(((b.idx + curP / 100) / b.list.length) * 100)));
+  const total = b.list.length;
+  let p = (b.ok + b.fail) / total; // 已收尾的格
+  for (const k of btActiveKeys.value) {
+    const x = live.value[k];
+    const pp = x && typeof x.p === "number" ? x.p : 1;
+    p += Math.max(0, Math.min(100, pp)) / 100 / total; // 进行中的格按各自进度计入
+  }
+  return Math.round(Math.max(0.5, Math.min(100, p * 100)) * 10) / 10;
 }
 
 function fmtTs(iso) {
@@ -939,14 +969,18 @@ onBeforeUnmount(() => {
 
       <div v-if="batch.running" class="bt-strip">
         <div class="bt-strip-h">
-          <span class="tag t-info">批量回测 {{ batch.idx + 1 }}/{{ batch.list.length }}</span>
-          <b>{{ batch.curName }}</b>
+          <span class="tag t-info">批量回测 {{ batch.ok + batch.fail }}/{{ batch.list.length }}</span>
+          <b>{{ btActiveKeys.length ? btActiveKeys.length + " 路并行中" : "收尾中…" }}</b>
           <span class="hint">成功 {{ batch.ok }} · 失败 {{ batch.fail }}</span>
           <span class="spacer"></span>
           <button class="sm" :disabled="batch.cancel" @click="stopBatch">停止后续</button>
         </div>
         <div class="bt-track"><div class="bt-fill" :style="{ width: batchPct() + '%' }"></div></div>
-        <div class="hint" style="margin-top:3px">{{ live[batch.curKey]?.stage || "" }}{{ live[batch.curKey]?.msg ? " · " + live[batch.curKey].msg : "" }}</div>
+        <div v-if="btActiveKeys.length" class="hint" style="margin-top:3px;line-height:1.7">
+          <span v-for="(k, ix) in btActiveKeys" :key="k" class="nowrap" style="margin-right:12px">
+            {{ live[k]?.name }}：<b class="pmin">{{ live[k]?.p || 1 }}%</b><template v-if="live[k]?.stage"> · {{ live[k].stage }}</template>
+          </span>
+        </div>
       </div>
       <div v-else-if="batchStopped" class="hint" style="margin:-2px 0 8px">
         上次批量已手动停止，行内保留已完成的结果标记；可重新勾选未完成的策略继续。
@@ -1149,6 +1183,19 @@ onBeforeUnmount(() => {
           <template v-if="(btForm.split || 'whole') === 'whole'">整个区间一次回测</template>
           <template v-else>大区间（如近 1 个月）按「{{ (btForm.split === 'day' && '天') || (btForm.split === 'week' && '周') || '月' }}」切成 {{ winSegs().length }} 段，每段独立一份结果；与策略库「批量回测选中/全部」组合 = 策略×周期×时段网格</template>
         </span>
+      </div>
+
+      <div class="cfg-head">
+        <span class="cfg-ic"></span><b>并行度</b>
+        <span class="spacer"></span>
+        <span class="hint">批量时同时启动的 Python 回测进程数；每格独立 job，互不干扰</span>
+      </div>
+      <div class="row">
+        <label>并行路数</label>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button v-for="c in BT_CONC" :key="c.v" :class="['chip', (btForm.concurrency || 3) === c.v && 'on']" :title="c.h" @click="btForm.concurrency = c.v">{{ c.t }} 路</button>
+        </span>
+        <span class="hint">并行 job 各跑各的，行情同段只拉一次；并发写缓存由 SQLite 短事务协调</span>
       </div>
 
       <div class="cfg-head">
