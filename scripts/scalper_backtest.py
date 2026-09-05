@@ -250,12 +250,13 @@ def _agg_bucket(conn, inst: str, bar: str, lo_ms: int, hi_ms: int, bms: int) -> 
         _tx(conn, "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)", out)
 
 
-def fetch_history(inst: str, bar: str, start_ms: int, end_ms: int) -> tuple[list[list[float]], dict]:
+def fetch_history(inst: str, bar: str, start_ms: int, end_ms: int, job_id: str = "") -> tuple[list[list[float]], dict]:
     """带 SQLite 缓存的取数：先查库，缺口区间才拉，拉到即入库。
 
     1m 是唯一会请求 OKX 的周期；其余周期先确保底层 1m 完整，再本地聚合成目标周期。
     因此同一区间无论回测多少次、多少周期、多少策略都只拉一次 1m。
     返回 ([ts,o,h,l,c,vol] 升序, 缓存信息 {fromDb, fetched})。
+    job_id 非空时每补一段缺口上报一次「数据拉取中」进度（已入库根数）。
     """
     bms = bar_ms(bar)
     conn = _db()
@@ -274,6 +275,11 @@ def fetch_history(inst: str, bar: str, start_ms: int, end_ms: int) -> tuple[list
                     for s1, e1 in _gaps(conn, inst, "1m", agg_lo, ge, MIN_MS):
                         fetched += _write_1m(conn, inst, s1, e1)
                     _agg_bucket(conn, inst, bar, agg_lo, ge, bms)
+                # 数据阶段占总进度 1~5%，按已入库根数在区间内推进（避免大窗口看起来卡死）
+                report_progress(
+                    job_id, min(4, 1 + fetched // 400), "data",
+                    f"数据拉取中：已入库 {fetched} 根 1m（{fmt_ts(gs)} 起）…",
+                )
         out = conn.execute(
             "SELECT ts, o, h, l, c, vol FROM candles "
             "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ? ORDER BY ts",
@@ -331,13 +337,13 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
     hold_bars = 0
     if max_hold and max_hold > 0:
         hold_bars = max(1, math.ceil(max_hold / (bms // MIN_MS)))
-    report_progress(job_id, 1, "data", f"正在取数：{bar}（1m 为源，SQLite 缓存，只拉一次）…")
+    report_progress(job_id, 1, "data", f"数据拉取中：{bar} 行情（1m 为源，SQLite 缓存，只拉一次）…")
     strat_mod = None
     if strategy_dir:
         strat_mod = load_strategy(strategy_dir)  # 失败会抛 RuntimeError，由 main 统一报错
 
     warmup = 60  # 预热 K 线（ATR 14 + 斜率 5，留足余量）
-    candles, cache_info = fetch_history(inst, bar, start_ms - warmup * bms, end_ms)
+    candles, cache_info = fetch_history(inst, bar, start_ms - warmup * bms, end_ms, job_id=job_id)
     if len(candles) < warmup + 5:
         raise RuntimeError(f"{bar} 已收盘 K 线不足（仅 {len(candles)} 根）")
 
@@ -401,7 +407,10 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
 
     loop_start = warmup
     loop_total = max(1, len(candles) - 1 - warmup)
-    report_progress(job_id, 5, "backtest", "开始逐根回放…")
+    report_progress(
+        job_id, 5, "backtest",
+        f"数据就绪：缓存命中 {cache_info['fromDb']} 根，本次新拉 {cache_info['fetched']} 根，开始逐根回放…",
+    )
 
     i = loop_start
     while i < len(candles) - 1:

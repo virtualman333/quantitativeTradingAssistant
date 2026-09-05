@@ -614,6 +614,13 @@ function btConcurrency() {
   const n = Number(btForm.value?.concurrency) || 3;
   return Math.max(1, Math.min(4, n));
 }
+/** 回测阶段 → 中文文案（后端上报的 stage 是英文内部名） */
+function stageLabel(s) {
+  if (s === "data") return "数据拉取中";
+  if (s === "backtest") return "逐根回放中";
+  if (s === "启动" || s === "start") return "启动中";
+  return s || "回测中";
+}
 /** 策略集合 × 周期 × 时段 → 批量队列行（展开态每格独立 key，整段单周期保持策略 key） */
 function expandRows(strats) {
   const bars = btForm.value?.bars?.length ? btForm.value.bars : ["1m"];
@@ -923,7 +930,7 @@ onBeforeUnmount(() => {
     </div>
     <div class="bt-hero-m">
       <div class="bt-hero-t">策略实验室</div>
-      <div class="bt-hero-d">同一标的与回测参数下横向对比策略：勾选若干后「批量回测选中」或一键「全部回测」；支持一次选多个 K 线周期（1m/5m/15m/…）并「按天/周/月」拆分长区间——例如选近 1 个月按天拆分，每天独立回测一份结果，验证策略是否稳定复现。行情只拉一次落 SQLite，跑过的段秒开。胜出的策略「应用到循环」投入超短线实盘。</div>
+      <div class="bt-hero-d">勾选策略横向对比，可选多 K 线周期并按天/周/月拆分长区间，逐格批量回测；行情只拉一次落缓存，跑过的段秒开，胜出策略「应用到循环」即可投入实盘。</div>
     </div>
     <div class="bt-hero-stats">
       <div class="st"><b class="hl">{{ allRows.length }}</b><span>策略</span></div>
@@ -977,8 +984,8 @@ onBeforeUnmount(() => {
         </div>
         <div class="bt-track"><div class="bt-fill" :style="{ width: batchPct() + '%' }"></div></div>
         <div v-if="btActiveKeys.length" class="hint" style="margin-top:3px;line-height:1.7">
-          <span v-for="(k, ix) in btActiveKeys" :key="k" class="nowrap" style="margin-right:12px">
-            {{ live[k]?.name }}：<b class="pmin">{{ live[k]?.p || 1 }}%</b><template v-if="live[k]?.stage"> · {{ live[k].stage }}</template>
+          <span v-for="(k, ix) in btActiveKeys" :key="k" class="nowrap" style="margin-right:12px" :title="live[k]?.msg || ''">
+            {{ live[k]?.name }}：<b class="pmin">{{ live[k]?.p || 1 }}%</b> · {{ stageLabel(live[k]?.stage) }}
           </span>
         </div>
       </div>
@@ -1021,7 +1028,7 @@ onBeforeUnmount(() => {
                     <span class="bt-dot"></span>
                     <template v-if="live[keyOf(s)].st === 'run'">
                       <b class="pmin">{{ live[keyOf(s)].p || 1 }}%</b>
-                      <span class="hint">{{ live[keyOf(s)].stage || "回测中" }}</span>
+                      <span class="hint" :title="live[keyOf(s)].msg || ''">{{ stageLabel(live[keyOf(s)].stage) }}</span>
                     </template>
                     <template v-else>排队中…</template>
                   </div>
@@ -1070,54 +1077,6 @@ onBeforeUnmount(() => {
         <code>signal(ctx)</code> 判向（long/short/flat + 一句理由），可覆盖 ATR 止损系数 / 盈亏比；也可返回
         <code>sl</code>/<code>tp</code> 止盈止损点位；禁止危险 import、禁止未来数据——同一份代码既回测也实盘。
       </div>
-    </div>
-  </div>
-
-  <!-- ── 批量回测矩阵：策略 × 周期 × 时段 展开批量时的每格结果 ── -->
-  <div v-if="lastGrid && lastGrid.rows.length" class="panel">
-    <h2>
-      批量回测矩阵<span class="spacer"></span>
-      <span class="tag t-info">{{ lastGrid.dim }}</span>
-      <span class="hint">{{ lastGrid.rows.length }} 格 · 完成 {{ gridStateC.ok }} · 失败 {{ gridStateC.err }}</span>
-    </h2>
-    <div class="body">
-      <div class="hint" style="margin-bottom:6px">
-        {{ fmtTs(lastGrid.at) }} 启动。每格独立回测一份结果；行情只向 OKX 拉一次并缓存到 SQLite，跨格/跨次不重复请求。非 1m 周期由本地 1m 聚合生成。
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th><th>状态</th><th>策略</th><th>周期</th><th>时段</th><th>结果</th><th>完成</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(r, ix) in lastGrid.rows" :key="r.key">
-            <td>{{ ix + 1 }}</td>
-            <td class="nowrap">
-              <template v-if="r.status === 'run'">
-                <span class="tag t-on">运行中 {{ live[r.key]?.p || 1 }}%</span>
-                <span class="hint">{{ live[r.key]?.stage || "" }}</span>
-              </template>
-              <span v-else-if="r.status === 'wait'" class="tag t-hold">排队</span>
-              <span v-else-if="r.status === 'ok'" class="tag t-buy">完成</span>
-              <span v-else class="tag t-sell">失败</span>
-            </td>
-            <td class="nowrap">{{ r.name }}</td>
-            <td class="nowrap">{{ barT(r.bar) }}</td>
-            <td class="nowrap">{{ r.win }}</td>
-            <td class="wrap">
-              <template v-if="r.sum">
-                <span :class="['m-net', (r.sum.totalNetPnlPct ?? 0) >= 0 ? 'up' : 'down']">
-                  {{ fmtNum(r.sum.totalNetPnlPct ?? 0, 3) }}%
-                </span>
-                <span class="hint">{{ gridShort(r) }}</span>
-              </template>
-              <span v-if="r.err" class="hint" style="color:var(--c-danger)">{{ r.err }}</span>
-            </td>
-            <td class="nowrap hint">{{ fmtTs(r.at) }}</td>
-          </tr>
-        </tbody>
-      </table>
     </div>
   </div>
 
@@ -1185,17 +1144,12 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
-      <div class="cfg-head">
-        <span class="cfg-ic"></span><b>并行度</b>
-        <span class="spacer"></span>
-        <span class="hint">批量时同时启动的 Python 回测进程数；每格独立 job，互不干扰</span>
-      </div>
       <div class="row">
-        <label>并行路数</label>
+        <label>并行度</label>
         <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           <button v-for="c in BT_CONC" :key="c.v" :class="['chip', (btForm.concurrency || 3) === c.v && 'on']" :title="c.h" @click="btForm.concurrency = c.v">{{ c.t }} 路</button>
         </span>
-        <span class="hint">并行 job 各跑各的，行情同段只拉一次；并发写缓存由 SQLite 短事务协调</span>
+        <span class="hint">批量时同时启动的 Python 回测进程数（每格独立 job，行情同段只拉一次）</span>
       </div>
 
       <div class="cfg-head">
@@ -1243,12 +1197,60 @@ onBeforeUnmount(() => {
           {{ batch.running ? "批量进行中，结束后再发起新任务。" : expandDim ? "已开启多周期 / 时段拆分：把当前所选策略按上方配置展开成网格逐格回测（要横向对比多个策略，用策略库的「批量回测选中 / 回测全部」）。" : btForm.strategyId ? "回测自定义策略（逐根调用 signal，支持 flat 观望）" : "回放内置超短线规则（5 根收盘斜率 + ATR 止损 + RR 止盈）" }}
         </span>
       </div>
-      <div v-if="btRunning" class="row" style="margin-top:6px">
+      <div v-if="btRunning" class="row" style="margin-top:6px;align-items:center">
         <label>进度</label>
-        <div class="sg-pbar"><div class="sg-pfill" :style="{ width: (btProgress?.p || 1) + '%' }"></div></div>
-        <span class="hint">{{ btProgress?.p || 1 }}% · {{ btProgress?.stage || "" }} {{ btProgress?.msg || "" }}</span>
+        <div class="bt-track" style="flex:1;max-width:320px"><div class="bt-fill" :style="{ width: (btProgress?.p || 1) + '%' }"></div></div>
+        <span class="hint">{{ btProgress?.p || 1 }}% · {{ stageLabel(btProgress?.stage) }}<template v-if="btProgress?.msg">（{{ btProgress.msg }}）</template></span>
       </div>
       <div v-if="btError" class="alert err" style="margin-top:6px">{{ btError }}</div>
+    </div>
+  </div>
+
+  <!-- ── 批量回测矩阵：策略 × 周期 × 时段 展开批量时的每格结果 ── -->
+  <div v-if="lastGrid && lastGrid.rows.length" class="panel">
+    <h2>
+      批量回测矩阵<span class="spacer"></span>
+      <span class="tag t-info">{{ lastGrid.dim }}</span>
+      <span class="hint">{{ lastGrid.rows.length }} 格 · 完成 {{ gridStateC.ok }} · 失败 {{ gridStateC.err }}</span>
+    </h2>
+    <div class="body">
+      <div class="hint" style="margin-bottom:6px">
+        {{ fmtTs(lastGrid.at) }} 启动。每格独立回测一份结果；行情只向 OKX 拉一次并缓存到 SQLite，跨格/跨次不重复请求。非 1m 周期由本地 1m 聚合生成。
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>状态</th><th>策略</th><th>周期</th><th>时段</th><th>结果</th><th>完成</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, ix) in lastGrid.rows" :key="r.key">
+            <td>{{ ix + 1 }}</td>
+            <td class="nowrap">
+              <template v-if="r.status === 'run'">
+                <span class="tag t-on">运行中 {{ live[r.key]?.p || 1 }}%</span>
+                <span class="hint" :title="live[r.key]?.msg || ''">{{ stageLabel(live[r.key]?.stage) }}</span>
+              </template>
+              <span v-else-if="r.status === 'wait'" class="tag t-hold">排队</span>
+              <span v-else-if="r.status === 'ok'" class="tag t-buy">完成</span>
+              <span v-else class="tag t-sell">失败</span>
+            </td>
+            <td class="nowrap">{{ r.name }}</td>
+            <td class="nowrap">{{ barT(r.bar) }}</td>
+            <td class="nowrap">{{ r.win }}</td>
+            <td class="wrap">
+              <template v-if="r.sum">
+                <span :class="['m-net', (r.sum.totalNetPnlPct ?? 0) >= 0 ? 'up' : 'down']">
+                  {{ fmtNum(r.sum.totalNetPnlPct ?? 0, 3) }}%
+                </span>
+                <span class="hint">{{ gridShort(r) }}</span>
+              </template>
+              <span v-if="r.err" class="hint" style="color:var(--c-danger)">{{ r.err }}</span>
+            </td>
+            <td class="nowrap hint">{{ fmtTs(r.at) }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
