@@ -31,6 +31,7 @@
 - UI 在 ScalperView.vue：「策略库」面板（内置默认+自定义：回测/应用到循环/编辑/删除）+ 新建/编辑 modal（思路→LLM 生成→手改→保存并校验）；弹窗复用全局 `.modal/.box/.body/.foot`。
 - 批量回测并行（2026-09-05）：UI `concurrency`（1~4 路，默认 3，chips 持久化）→ runBatch 改并行 worker 池（Promise.all 多个 worker 领号跑格，每格独立 job），`live[key]` keyed + 行内/矩阵按 key 显示进度天然支持多格同跑；批量进度条按「完成数 + 各在跑格实时进度」估算。Python 缓存库 `_db()` 必须 autocommit（isolation_level=None）+ `PRAGMA journal_mode=WAL` + busy_timeout，写缓存统一走 `_tx()` 的 BEGIN IMMEDIATE 短事务——否则多进程并行「先读后写锁升级」死锁（busy_timeout 不生效）。
 - 回测进度协议（2026-09-05）：Python 经 stderr 逐行上报 `{"p","stage","msg"}`，stage 是英文内部名 `data`（取数）/`backtest`（逐根回放）；UI 用 `stageLabel()` 映射中文（数据拉取中/逐根回放中），完整 msg 放 title。取数阶段按已入库根数在 p=1~4 内推进，`fetch_history` 加 job_id 上报。BacktestView 面板顺序 = 策略库 → 回测控制台 → 批量回测矩阵 → 单跑结果/明细；单跑进度条复用 `.bt-track/.bt-fill`。
+- 回测详情 + LLM 分析（2026-09-05）：`scalper.ts` 导出 `analyzeBacktest(result, strategyName)`，走 `createProvider(cfg,false)` + `llm.complete()`（非 decide）返回中文 Markdown；IPC `scalper:btAnalyze`，preload `scalperBtAnalyze`。UI 用内存 `btResults[key]` 缓存完整结果（sessionStorage 只存 summary），弹窗 `btDetail` 展示摘要卡片 + AI 分析（`renderMd` 先 escapeHtml 再转标题/列表/加粗，v-html）+ 交易明细；入口=单跑摘要行/矩阵格/策略行三处「详情」按钮。分析 prompt 只喂最近 60 笔明细关键字段防超长。
 
 - **报告是 HTML**：每轮归档后由 LLM 生成（职责边界：语义/排版/解读交给模型，落盘与聚合留在 TS），输出 `reports/<round_id>/summary.html` + `<expert>.html`；`reports/index.html` 记录表由 TS 确定性生成。LLM 失败/mock → 纯数据兜底页，保证每轮都有详情。
 - HTML 必须走 `llm.complete()`（不能用 `decide()`：其 `extractJson()` 会被 `<style>{...}` 花括号破坏）。
