@@ -465,6 +465,14 @@ ipcMain.handle("mcp:install", async (_e, payload: { presetId?: string; env?: Rec
     if (String(v ?? "").trim()) env[k] = String(v).trim();
   }
 
+  // HTTP 型（如金十）：把 token 从 env 转成 Authorization 头（只存本地 store，不入库）
+  const headers: Record<string, string> = preset.headers ? { ...preset.headers } : {};
+  if (preset.url) {
+    const t = env.JIN10_MCP_TOKEN;
+    if (t) headers.Authorization = "Bearer " + t;
+    delete env.JIN10_MCP_TOKEN;
+  }
+
   await withStore((s) =>
     s.upsertMcpServer({
       id: preset.id,
@@ -473,7 +481,7 @@ ipcMain.handle("mcp:install", async (_e, payload: { presetId?: string; env?: Rec
       command: preset.command || undefined,
       args: preset.args?.length ? preset.args : undefined,
       url: preset.url,
-      headers: preset.headers,
+      headers: Object.keys(headers).length ? headers : undefined,
       env: Object.keys(env).length ? env : undefined,
       windowsCmdWrap: preset.windowsCmdWrap,
       enabled: true,

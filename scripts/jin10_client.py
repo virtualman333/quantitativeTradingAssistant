@@ -64,8 +64,7 @@ DEFAULT_SERVER_URL = "https://mcp.jin10.com/mcp"
 DEFAULT_PROTOCOL = "2025-11-25"
 # 握手失败时的回退协议版本（按常见版本排列）
 FALLBACK_PROTOCOLS = ["2024-11-05", "2025-06-18", "2025-03-26"]
-# 默认 Token：可用环境变量 JIN10_MCP_TOKEN 或 --token 覆盖（推荐放环境变量，勿入库）
-DEFAULT_TOKEN = "sk-R7V5Q69CqBwTmuX52qmdO0qnH_CgsCdT9cAV96LZ4I4"
+# Token 从环境变量 JIN10_MCP_TOKEN 或 --token 提供（勿在代码里内置明文 token）
 
 # 金十限流错误提示（来自服务约定）
 RATE_LIMIT_MSG = "今日该工具调用次数已达上限，请明日再试"
@@ -79,8 +78,7 @@ class Jin10MCPClient:
     def __init__(self, server_url=DEFAULT_SERVER_URL, token=None,
                  protocol=None, timeout=30):
         self.server_url = server_url.rstrip("/")
-        self.token = (token or os.environ.get("JIN10_MCP_TOKEN")
-                      or DEFAULT_TOKEN)
+        self.token = token or os.environ.get("JIN10_MCP_TOKEN") or ""
         self.protocol = (protocol or os.environ.get("JIN10_MCP_PROTOCOL")
                          or DEFAULT_PROTOCOL)
         self.timeout = timeout
@@ -94,9 +92,10 @@ class Jin10MCPClient:
         h = {
             "Content-Type": "application/json",
             "Accept": accept,
-            "Authorization": "Bearer " + self.token,
             "User-Agent": "okx-trader-jin10/1.0",
         }
+        if self.token:
+            h["Authorization"] = "Bearer " + self.token
         if self.session_id:
             h["Mcp-Session-Id"] = self.session_id
         if self.server_protocol:

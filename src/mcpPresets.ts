@@ -132,13 +132,13 @@ export const MCP_PRESETS: McpPreset[] = [
     command: "",
     args: [],
     windowsCmdWrap: false,
-    envVars: [],
+    envVars: [
+      { key: "JIN10_MCP_TOKEN", label: "Bearer Token", required: false, placeholder: "留空则仅公开端点；token 仅本地保存，不入库" },
+    ],
     kind: "data",
     url: "https://mcp.jin10.com/mcp",
-    headers: {
-      Authorization: "Bearer sk-R7V5Q69CqBwTmuX52qmdO0qnH_CgsCdT9cAV96LZ4I4",
-    },
-    note: "金十数据源（token 已内置）；如失效可在 MCP 页修改 Authorization 头。",
+    headers: {},
+    note: "金十数据源：如需鉴权端点请填 Bearer Token（只存本地，勿提交到仓库）。",
   },
 ];
 
