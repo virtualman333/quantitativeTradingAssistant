@@ -12,6 +12,11 @@ scalper_backtest.py — 超短线策略历史回测引擎
   出场  ：可选 --rr 固定止盈倍率（0=自动凯利/策略优先）、--max-hold 持仓超时（分钟）平仓
   执行  ：信号在已收盘 K 线后产生 → 下一根开盘价入场（无未来函数）
 
+K 线周期：
+  --bar 1m/3m/5m/15m/30m/1H/4H/6H/12H/1D…，默认 1m。数据层只向 OKX 拉 1m 一种
+  K 线（含 SQLite 缓存，同区间只拉一次）；5m/15m/1H 等由 1m 本地聚合入库后再回测，
+  因此同一区间无论按多少周期、拆成多少段批量回测，都不会重复请求行情。
+
 支持自定义策略：
   --strategy DIR  加载 agent/strategies/<id>/strategy.py 的 signal(ctx) 逐根判向，
                   支持 flat（观望不开仓）、可选覆盖 atr_mult / rr，
@@ -40,7 +45,32 @@ from market_scan import _http_get
 from strategy_loader import load_strategy, call_signal, make_ctx, resolve_stops
 
 CST = timezone(timedelta(hours=8))
-BAR_MS = 60_000  # 1m
+MIN_MS = 60_000
+HOUR_MS = 3_600_000
+DAY_MS = 86_400_000
+BAR_MS = MIN_MS  # 1m（内置策略基准周期）
+BAR_OPTIONS = ("1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D")
+
+
+def bar_ms(bar: str) -> int:
+    """K 线周期 → 毫秒（结尾单位 m/h/d/w，如 5m/15m/1H/4H/1D）。"""
+    s = bar.strip().lower()
+    if len(s) < 2:
+        raise ValueError(f"无法解析 K 线周期: {bar}")
+    try:
+        num = int(s[:-1])
+    except ValueError as exc:
+        raise ValueError(f"无法解析 K 线周期: {bar}") from exc
+    unit = s[-1]
+    if unit == "m":
+        return num * MIN_MS
+    if unit == "h":
+        return num * HOUR_MS
+    if unit == "d":
+        return num * DAY_MS
+    if unit == "w":
+        return num * 7 * DAY_MS
+    raise ValueError(f"无法解析 K 线周期: {bar}")
 
 
 def report_progress(job_id: str, pct: int, stage: str, msg: str = "") -> None:
@@ -58,7 +88,7 @@ DB_PATH = os.path.join(
 
 def _db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS candles ("
         "inst TEXT NOT NULL, bar TEXT NOT NULL, ts INTEGER NOT NULL,"
@@ -82,8 +112,8 @@ def fmt_ts(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, CST).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def fetch_okx(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
-    """从 OKX 拉 [start_ms, end_ms] 区间的 1m 已收盘 K 线，升序返回 [ts,o,h,l,c,vol]。
+def fetch_okx(inst: str, bar: str, start_ms: int, end_ms: int) -> list[list[float]]:
+    """从 OKX 拉 [start_ms, end_ms] 区间的已收盘 K 线，升序返回 [ts,o,h,l,c,vol]。
 
     注意：history-candles 用 `after` 游标向前翻页（返回该时间戳「之前」更旧的数据），
     与 /market/candles 的 before 语义相反，踩过坑。
@@ -93,10 +123,10 @@ def fetch_okx(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
     while True:
         res = _http_get(
             "/api/v5/market/history-candles",
-            {"instId": inst, "bar": "1m", "limit": "100", "after": str(after)},
+            {"instId": inst, "bar": bar, "limit": "100", "after": str(after)},
         )
         if res.get("code") != "0":
-            raise RuntimeError(f"history-candles {inst}: {res.get('msg')}")
+            raise RuntimeError(f"history-candles {inst} {bar}: {res.get('msg')}")
         data = res.get("data", [])
         if not data:
             break
@@ -115,55 +145,115 @@ def fetch_okx(inst: str, start_ms: int, end_ms: int) -> list[list[float]]:
     return rows
 
 
-def fetch_history(inst: str, start_ms: int, end_ms: int) -> tuple[list[list[float]], dict]:
-    """带 SQLite 缓存的取数：先查库，缺口区间才拉 OKX，拉到即入库。
+def _row_hits(conn, inst: str, bar: str, lo_ms: int, hi_ms: int) -> tuple[int, int, int]:
+    """库内 [lo_ms, hi_ms] 范围已存 K 线的 (min ts, max ts, 根数)。"""
+    return conn.execute(
+        "SELECT COALESCE(MIN(ts),0), COALESCE(MAX(ts),0), COUNT(*) FROM candles "
+        "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ?",
+        (inst, bar, lo_ms, hi_ms),
+    ).fetchone()
 
-    返回 ([ts,o,h,l,c,vol] 升序, 缓存信息 {fromDb, fetched})。
-    判定命中：库内覆盖 [start, end]（末端容差 1 根，因最后一根可能刚收盘）且无内部空洞。
+
+def _gaps(conn, inst: str, bar: str, start_ms: int, end_ms: int, bms: int) -> list[tuple[int, int]]:
+    """返回需要补拉的缺口区间。
+
+    判定命中：库内覆盖 [start, end]（末端容差 1 根，因最后一根可能刚收盘）
+    且无内部空洞（根数接近满配，容差 2 根，防交易所个别缺根导致永远不命中）。
+    有洞时回退为整段补拉，保证收敛。
     """
+    lo, hi, cnt = _row_hits(conn, inst, bar, start_ms, end_ms)
+    if cnt > 0 and lo <= start_ms and hi >= end_ms - bms:
+        expected = (hi - lo) // bms + 1
+        if expected - cnt <= 2:
+            return []
+    if cnt == 0:
+        return [(start_ms, end_ms)]
+    expected = (hi - lo) // bms + 1
+    if expected - cnt > 2:
+        return [(start_ms, end_ms)]  # 中间有洞 → 整段重补
+    segs: list[tuple[int, int]] = []
+    if lo > start_ms:
+        segs.append((start_ms, min(lo - bms, end_ms)))
+    if hi < end_ms - bms:
+        segs.append((max(hi + bms, start_ms), end_ms))
+    return [g for g in segs if g[1] >= g[0]]
+
+
+def _write_1m(conn, inst: str, gs: int, ge: int) -> int:
+    """补拉一段 1m 缺口并入库，返回入库根数。"""
+    rows = fetch_okx(inst, "1m", gs, ge)
+    conn.executemany(
+        "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)",
+        [(inst, "1m", r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def _agg_bucket(conn, inst: str, bar: str, lo_ms: int, hi_ms: int, bms: int) -> None:
+    """把库内 1m 数据按 K 线周期本地聚合（o 取首、h/l 取极值、c 取末、vol 求和），
+    写入 bar 层缓存。5m/15m/1H 等回测因此只拉一次 1m，所有周期共享同一份底层数据。"""
+    rows = conn.execute(
+        "SELECT ts,o,h,l,c,vol FROM candles WHERE inst=? AND bar='1m' "
+        "AND ts BETWEEN ? AND ? ORDER BY ts",
+        (inst, lo_ms, hi_ms),
+    ).fetchall()
+    if not rows:
+        return
+    cur_ts = None
+    cur: list = []
+    out: list[tuple] = []
+    for r in rows:
+        ts, o, h, l, c, v = r
+        b = ts // bms * bms
+        if b != cur_ts:
+            if cur_ts is not None:
+                out.append(tuple(cur))
+            cur = [inst, bar, b, o, h, l, c, v]
+            cur_ts = b
+        else:
+            cur[4] = max(cur[4], h)
+            cur[5] = min(cur[5], l)
+            cur[6] = c
+            cur[7] += v
+    if cur_ts is not None:
+        out.append(tuple(cur))
+    if out:
+        conn.executemany("INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)", out)
+        conn.commit()
+
+
+def fetch_history(inst: str, bar: str, start_ms: int, end_ms: int) -> tuple[list[list[float]], dict]:
+    """带 SQLite 缓存的取数：先查库，缺口区间才拉，拉到即入库。
+
+    1m 是唯一会请求 OKX 的周期；其余周期先确保底层 1m 完整，再本地聚合成目标周期。
+    因此同一区间无论回测多少次、多少周期、多少策略都只拉一次 1m。
+    返回 ([ts,o,h,l,c,vol] 升序, 缓存信息 {fromDb, fetched})。
+    """
+    bms = bar_ms(bar)
     conn = _db()
     try:
-        lo, hi, cnt = conn.execute(
-            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM candles "
-            "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ?",
-            (inst, "1m", start_ms, end_ms),
-        ).fetchone()
-
-        def _covered() -> bool:
-            if lo is None or hi is None:
-                return False
-            if lo > start_ms or hi < end_ms - BAR_MS:
-                return False
-            # 库内根数应接近满配（允许 2 根容差，防交易所个别缺根导致永远不命中）
-            return cnt >= (hi - lo) // BAR_MS + 1 - 2
-
         fetched = 0
-        if not _covered():
-            segs: list[tuple[int, int]] = []
-            if lo is None:
-                segs.append((start_ms, end_ms))
-            else:
-                if lo > start_ms:
-                    segs.append((start_ms, min(lo - BAR_MS, end_ms)))
-                if hi < end_ms - BAR_MS:
-                    segs.append((max(hi + BAR_MS, start_ms), end_ms))
-            for s, e in segs:
-                if e < s:
-                    continue
-                rows = fetch_okx(inst, s, e)
-                conn.executemany(
-                    "INSERT OR REPLACE INTO candles VALUES (?,?,?,?,?,?,?,?)",
-                    [(inst, "1m", r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
-                )
-                conn.commit()
-                fetched += len(rows)
-
+        # 缺口按 3 轮收敛（极端情况下某段拉不到会返回，由上层根数不足检查兜底报错）
+        for _ in range(3):
+            gaps = _gaps(conn, inst, bar, start_ms, end_ms, bms)
+            if not gaps:
+                break
+            for gs, ge in gaps:
+                if bar == "1m":
+                    fetched += _write_1m(conn, inst, gs, ge)
+                else:
+                    agg_lo = gs // bms * bms  # 缺口对齐到目标周期桶边界
+                    for s1, e1 in _gaps(conn, inst, "1m", agg_lo, ge, MIN_MS):
+                        fetched += _write_1m(conn, inst, s1, e1)
+                    _agg_bucket(conn, inst, bar, agg_lo, ge, bms)
         out = conn.execute(
             "SELECT ts, o, h, l, c, vol FROM candles "
             "WHERE inst=? AND bar=? AND ts BETWEEN ? AND ? ORDER BY ts",
-            (inst, "1m", start_ms, end_ms),
+            (inst, bar, start_ms, end_ms),
         ).fetchall()
-        return [list(r) for r in out], {"fromDb": cnt or 0, "fetched": fetched}
+        hits = _row_hits(conn, inst, bar, start_ms, end_ms)
+        return [list(r) for r in out], {"fromDb": hits[2], "fetched": fetched}
     finally:
         conn.close()
 
@@ -199,25 +289,30 @@ def kelly_rr(win_rate: float) -> float:
 
 
 def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
-        strategy_dir=None, job_id="", rr=0.0, slippage_bps=0.0, max_hold=0):
+        strategy_dir=None, job_id="", rr=0.0, slippage_bps=0.0, max_hold=0, bar="1m"):
     """回测主循环。
 
-    strategy_dir 为空 → 内置规则（最近 5 根 1m 斜率判向，与 scalper.py 严格一致）；
+    strategy_dir 为空 → 内置规则（最近 5 根收盘斜率判向，与 scalper.py 严格一致）；
     strategy_dir 指定 → 逐根调用 strategy.py 的 signal(ctx)，支持 flat / 覆盖 atr_mult / rr。
+    bar: K 线周期（1m/5m/15m/1H…），信号逻辑与周期无关，按该周期 K 线回放。
     job_id 非空 → 向 stderr 上报进度 JSON 行。
     rr: >0 强制固定止盈倍率（策略显式返回 rr 时优先；0=自动：内置凯利 / 策略默认）
     slippage_bps: 单边滑点（1 bps=0.01%），开平仓均按不利方向计入成交价
-    max_hold: 持仓最长分钟数，0=不限；到点以当前收盘价超时平仓
+    max_hold: 持仓最长分钟数（跨周期按根折算），0=不限；到点以当前收盘价超时平仓
     """
-    report_progress(job_id, 1, "data", "正在拉取 1m K 线（含 SQLite 缓存）…")
+    bms = bar_ms(bar)
+    hold_bars = 0
+    if max_hold and max_hold > 0:
+        hold_bars = max(1, math.ceil(max_hold / (bms // MIN_MS)))
+    report_progress(job_id, 1, "data", f"正在取数：{bar}（1m 为源，SQLite 缓存，只拉一次）…")
     strat_mod = None
     if strategy_dir:
         strat_mod = load_strategy(strategy_dir)  # 失败会抛 RuntimeError，由 main 统一报错
 
     warmup = 60  # 预热 K 线（ATR 14 + 斜率 5，留足余量）
-    candles, cache_info = fetch_history(inst, start_ms - warmup * BAR_MS, end_ms)
+    candles, cache_info = fetch_history(inst, bar, start_ms - warmup * bms, end_ms)
     if len(candles) < warmup + 5:
-        raise RuntimeError(f"1m 已收盘 K 线不足（仅 {len(candles)} 根）")
+        raise RuntimeError(f"{bar} 已收盘 K 线不足（仅 {len(candles)} 根）")
 
     ts = [c[0] for c in candles]
     o = [c[1] for c in candles]
@@ -313,7 +408,7 @@ def run(inst, start_ms, end_ms, atr_mult, fee_rate, notional, close_on_reversal,
             # 反转平仓：自定义策略 flat=观望不平；内置规则只要反向就平
             if exit_px is None and close_on_reversal and direction is not None and direction != pos["side"]:
                 exit_px, reason = c[i], "趋势反转"
-            if exit_px is None and max_hold and (i - pos["open_i"]) >= max_hold:
+            if exit_px is None and hold_bars and (i - pos["open_i"]) >= hold_bars:
                 exit_px, reason = c[i], "持仓超时"
             if exit_px is not None:
                 close_trade(exit_px, i, reason)
@@ -457,6 +552,7 @@ def main() -> int:
     ap.add_argument("--max-hold", type=int, default=0, help="持仓最长分钟数，0=不限（超时以当前收盘价平仓）")
     ap.add_argument("--close-on-reversal", action="store_true", help="趋势反转平仓")
     ap.add_argument("--strategy", default="", help="自定义策略目录 agent/strategies/<id>（空=内置规则）")
+    ap.add_argument("--bar", default="1m", choices=list(BAR_OPTIONS), help="K 线周期（默认 1m；其他周期由 1m 本地聚合，不重复拉取行情）")
     ap.add_argument("--job-id", default="", help="回测任务 ID（非空时向 stderr 上报进度 JSON）")
     args = ap.parse_args()
 
@@ -473,13 +569,16 @@ def main() -> int:
             rr=args.rr,
             slippage_bps=args.slippage_bps,
             max_hold=args.max_hold,
+            bar=args.bar,
         )
         out = {
             "inst": args.inst,
+            "bar": args.bar,
             "start": fmt_ts(start_ms),
             "end": fmt_ts(end_ms),
             "cache": result.get("cache", {}),
             "params": {
+                "bar": args.bar,
                 "atrMult": args.atr_mult,
                 "feeRate": args.fee_rate,
                 "feePct": round(args.fee_rate * 2 * 100, 3),

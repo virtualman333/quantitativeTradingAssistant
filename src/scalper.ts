@@ -497,9 +497,11 @@ export async function runScalperBacktest(args: {
   notional?: number;
   closeOnReversal?: boolean;
   strategyId?: string;
+  bar?: string;
 }): Promise<Record<string, unknown>> {
   const argv = ["--inst", args.inst, "--start", args.start];
   if (args.end) argv.push("--end", args.end);
+  if (args.bar && args.bar !== "1m") argv.push("--bar", args.bar);
   if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
   if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
   if (args.notional != null) argv.push("--notional", String(args.notional));
@@ -527,9 +529,11 @@ export function backtestArgv(args: {
   rr?: number;
   slippageBps?: number;
   maxHold?: number;
+  bar?: string;
 }): string[] {
   const argv = ["--inst", args.inst, "--start", args.start];
   if (args.end) argv.push("--end", args.end);
+  if (args.bar && args.bar !== "1m") argv.push("--bar", args.bar);
   if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
   if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
   if (args.notional != null) argv.push("--notional", String(args.notional));

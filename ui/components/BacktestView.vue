@@ -419,12 +419,30 @@ const QUICK_RANGES = [
   { d: 14, t: "近 14 天" },
   { d: 30, t: "近 1 月" },
 ];
+/** 可选 K 线周期（批量回测多选时笛卡尔展开；非 1m 由 1m 本地聚合，数据只拉一次） */
+const BT_BARS = [
+  { v: "1m", t: "1m" },
+  { v: "5m", t: "5m" },
+  { v: "15m", t: "15m" },
+  { v: "30m", t: "30m" },
+  { v: "1H", t: "1h" },
+  { v: "4H", t: "4h" },
+];
+/** 区间拆分：不拆分 / 按天 / 按周 / 按月（批量时每段各回测一次，验证跨时段稳健性） */
+const BT_SPLITS = [
+  { v: "whole", t: "不拆分", h: "整个起止区间回测一次" },
+  { v: "day", t: "按天", h: "区间按自然天拆成多段，逐段独立回测" },
+  { v: "week", t: "按周", h: "区间按 7 天拆成多段，逐段独立回测" },
+  { v: "month", t: "按月", h: "区间按自然月拆成多段，逐段独立回测" },
+];
 function btFormDefaults() {
   const now = new Date();
   return {
     inst: "BTC-USDT-SWAP",
     start: toLocalInput(new Date(now.getTime() - 7 * 24 * 3600 * 1000)),
     end: toLocalInput(now),
+    bars: ["1m"], // 批量回测的 K 线周期集合（至少保留一个；单跑用第一个）
+    split: "whole", // 批量回测的区间拆分方式
     atrMult: 2.5,
     feeRate: 0.0005,
     notional: 10000,
@@ -507,24 +525,140 @@ function onBtEvent(ev) {
   }
 }
 
-/** 与批量队列共用一套回测参数（保证横向对比公平） */
-function btParams() {
+/** 组装一次回测的 job 参数（批量每格可覆盖周期 / 起止时间，其余共用控制台配置） */
+function btParamsFor(o = {}) {
+  const f = btForm.value;
+  const startRaw = o.start ?? f.start;
+  const endRaw = o.end ?? f.end;
   return {
-    inst: String(btForm.value.inst || "BTC-USDT-SWAP").trim().toUpperCase(),
-    start: btForm.value.start ? btForm.value.start.replace("T", " ") + ":00" : "",
-    end: btForm.value.end ? btForm.value.end.replace("T", " ") + ":00" : "",
-    atrMult: Number(btForm.value.atrMult) || 2.5,
-    feeRate: Number(btForm.value.feeRate) || 0.0005,
-    notional: Number(btForm.value.notional) || 10000,
-    rr: Math.max(0, Number(btForm.value.rrOverride) || 0),
-    slippageBps: Math.max(0, Number(btForm.value.slippageBps) || 0),
-    maxHold: Math.max(0, Math.round(Number(btForm.value.maxHoldBars) || 0)),
-    closeOnReversal: !!btForm.value.closeOnReversal,
+    inst: String(f.inst || "BTC-USDT-SWAP").trim().toUpperCase(),
+    start: startRaw ? String(startRaw).replace("T", " ") + ":00" : "",
+    end: endRaw ? String(endRaw).replace("T", " ") + ":00" : "",
+    bar: o.bar || (Array.isArray(f.bars) && f.bars.length ? f.bars[0] : "1m"),
+    atrMult: Number(f.atrMult) || 2.5,
+    feeRate: Number(f.feeRate) || 0.0005,
+    notional: Number(f.notional) || 10000,
+    rr: Math.max(0, Number(f.rrOverride) || 0),
+    slippageBps: Math.max(0, Number(f.slippageBps) || 0),
+    maxHold: Math.max(0, Math.round(Number(f.maxHoldBars) || 0)),
+    closeOnReversal: !!f.closeOnReversal,
   };
+}
+/** 当前表单（首个周期 + 全区间）的默认参数，单跑 / 兼容旧调用用 */
+function btParams() {
+  return btParamsFor({});
+}
+const barT = (b) => (b === "1H" ? "1h" : b);
+/** 当前区间按 split 拆成的子窗口 [{start,end,label}]；不拆分时为单个全区间 */
+function winSegs() {
+  const f = btForm.value;
+  const s = f.start;
+  const e = f.end;
+  const whole = [{ start: s, end: e, label: "全区间" }];
+  if (!s || !e) return whole;
+  const mode = f.split || "whole";
+  if (mode === "whole") return whole;
+  const st = new Date(s);
+  const en = new Date(e);
+  if (en.getTime() <= st.getTime()) return whole;
+  const p = (n) => String(n).padStart(2, "0");
+  const fmt = (d) =>
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  const tag = { day: "D", week: "W", month: "M" }[mode] || "S";
+  const out = [];
+  let cur = new Date(st.getTime());
+  let guard = 0;
+  while (cur.getTime() < en.getTime() && guard++ < 500) {
+    let nxt;
+    if (mode === "month") nxt = new Date(cur.getFullYear(), cur.getMonth() + 1, 1, cur.getHours(), cur.getMinutes());
+    else nxt = new Date(cur.getTime() + (mode === "week" ? 604800000 : 86400000));
+    if (nxt.getTime() > en.getTime()) nxt = new Date(en.getTime());
+    const a = fmt(cur);
+    const b = fmt(nxt);
+    const sh = (x) => x.slice(5).replace("-", "/").slice(0, 5); // MM/DD
+    out.push({ start: a, end: b, label: `${tag}${String(out.length + 1).padStart(2, "0")} ${sh(a)}~${sh(b)}` });
+    cur = nxt;
+  }
+  return out.length ? out : whole;
+}
+/** 是否处于「展开批量」：多周期或区间拆分 → 网格回测；否则等价于旧版单格批量 */
+const expandDim = computed(() => {
+  const bars = btForm.value?.bars || ["1m"];
+  return bars.length > 1 || winSegs().length > 1;
+});
+const btBarOn = (v) => (btForm.value.bars || []).includes(v);
+function toggleBtBar(v) {
+  const b = btForm.value.bars || (btForm.value.bars = []);
+  const i = b.indexOf(v);
+  if (i >= 0) {
+    if (b.length === 1) return; // 至少保留一个周期
+    b.splice(i, 1);
+  } else {
+    b.push(v);
+  }
+}
+function toggleBtSplit(v) {
+  btForm.value.split = v;
+}
+/** 策略集合 × 周期 × 时段 → 批量队列行（展开态每格独立 key，整段单周期保持策略 key） */
+function expandRows(strats) {
+  const bars = btForm.value?.bars?.length ? btForm.value.bars : ["1m"];
+  const wins = winSegs();
+  const expanded = bars.length > 1 || wins.length > 1;
+  const rows = [];
+  for (const st of strats) {
+    for (const bar of bars) {
+      for (const w of wins) {
+        const grid = expanded;
+        const key = grid ? `${st.key}|${bar}|${w.start}` : st.key;
+        const sub = [];
+        if (grid) sub.push(barT(bar));
+        if (grid && w.label !== "全区间") sub.push(w.label);
+        rows.push({
+          key,
+          strategyId: st.strategyId || "",
+          name: st.name,
+          bar,
+          win: w.label,
+          full: sub.length ? `${st.name} · ${sub.join(" · ")}` : st.name,
+          start: w.start,
+          end: w.end,
+          grid,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+/** 当前表单选中的回测范围描述（用于按钮 / 确认框） */
+function btDimText() {
+  const bars = btForm.value?.bars?.length ? btForm.value.bars : ["1m"];
+  const wins = winSegs();
+  return `${bars.length} 个周期(${bars.map(barT).join("/")}) × ${wins.length} 段${wins[0]?.label === "全区间" ? "" : `（${BT_SPLITS.find((x) => x.v === btForm.value.split)?.t || ""}拆分）`}`;
+}
+/** 批量确认框文案 */
+function batchConfirmMsg(stN, rows) {
+  const dims = rows.some((r) => r.grid)
+    ? `${stN} 个策略 × ${btDimText()} = ${rows.length} 格`
+    : `${stN} 个策略`;
+  return `将依次回测 ${dims}，共用下方「回测控制台」的参数（标的/止损/止盈/成本…）。数据层按段按周期只拉一次行情、落 SQLite 缓存，已跑过的段重复回测秒开不重复请求。期间可停止后续队列。确认？`;
 }
 
 async function runBacktest() {
-  if (batch.value.running) return; // 批量运行中不接受单跑
+  if (batch.value.running) return; // 批量运行中不接受单跑/网格
+  const sid = btForm.value.strategyId || "";
+  const st0 = allRows.value.find((x) => x.id === sid);
+  const rows = expandRows([
+    { key: sid ? sid : "__engine", strategyId: sid, name: sid ? st0?.name || sid : "内置趋势策略" },
+  ]);
+  if (rows.length > 1) {
+    // 多周期 / 时段拆分 → 展开成网格批量（每格独立一份结果）
+    if (rows.length > 6 && !(await ask(batchConfirmMsg(1, rows), { title: "网格批量回测", confirmText: "开始批量回测" }))) return;
+    await runBatch(rows);
+    return;
+  }
+  // 单格（单周期 + 不拆分）：保留原实时进度 + 结果明细详情
   if (btRunning.value) return;
   btRunning.value = true;
   btResult.value = null;
