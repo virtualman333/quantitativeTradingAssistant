@@ -1,15 +1,20 @@
-# OKX 自主交易 Agent
+# quantitativeTradingAssistant（量化交易助手）
 
-OKX 自主交易专用 Agent：一个 **TypeScript 常驻进程**，每 5 分钟自驱完成一轮「取数 → 调度专家 → 汇总拍板 → 执行 → 归档」，不依赖人工聊天会话。
+> 仓库：<https://github.com/virtualman333/quantitativeTradingAssistant>
 
-它是上层交易章程（`AGENT_TRADING_RULES.md`）的工程化实现——L1 硬约束在类型与执行层守住，其余裁量交给多专家 + 主 Agent。
+一个 **TypeScript 常驻进程**的 OKX 自主交易 Agent：每 5 分钟自驱完成一轮「取数 → 调度专家 → 汇总拍板 → 执行 → 归档」，不依赖人工聊天会话；配合 Electron + Vue3 桌面端，内置超短线策略库与多周期批量回测。
 
-## 与父目录的关系
+它是交易章程（`AGENT_TRADING_RULES.md`）的工程化实现——L1 硬约束在类型与执行层守住，其余裁量交给多专家 + 主 Agent。
 
-本仓库是「单仓库双系统」中的 **B 系统**：
+## 仓库结构
 
-- **父目录（Python 体系）**：行情扫描 / 新闻采集 / 复盘 / 归档 / 邮件 等确定性脚本，`scripts/*.py`。
-- **`agent/`（本目录，TS 体系）**：自主决策 Agent，通过复用父目录 Python 脚本完成取数与下单副作用。
+本仓库**根目录即工程本体**，单仓库三层协作：
+
+- **TS 体系（根 `src/`）**：自主决策 Agent（LangGraph 多专家编排）。
+- **Python 体系（`scripts/`）**：行情扫描 / 新闻采集 / 复盘 / 归档 / 邮件等确定性脚本；TS 侧通过 `src/okx.ts` 复用它们完成取数与下单副作用。
+- **桌面端（`electron/` + `ui/`）**：Electron 主进程 + Vite/Vue3 界面，多窗口（行情 / 持仓 / 日志 / 报告 / 回测 / 设置）。
+
+运行时数据（`logs/`、`state/`、`ledger/`、`news/`、`reports/`、`data/store.json`）含真实账户信息，已在 `.gitignore` 中排除，不入库。
 
 ## 架构拓扑
 
@@ -31,7 +36,7 @@ collect → plan →(Send 并行扇出)→ 专家们 → adjudge → execute →
 ## 目录结构
 
 ```
-agent/
+quantitativeTradingAssistant/
 ├── src/                # 核心源码
 │   ├── main.ts         # 主入口（副作用：取数/下单/归档）
 │   ├── graph.ts        # LangGraph 编排图
@@ -39,7 +44,7 @@ agent/
 │   ├── obfuscate.ts    # 提示词混淆层（防 LLM 提供方记录泄密）
 │   ├── llm.ts          # 多模型适配（OpenAI 兼容 / Anthropic / mock）
 │   ├── mcp.ts          # MCP 客户端（写操作不走 MCP）
-│   ├── okx.ts          # 复用父目录 Python 脚本的受控通道
+│   ├── okx.ts          # 复用 scripts/ 下 Python 脚本的受控通道
 │   ├── store.ts        # JSON 本地持久化（data/store.json）
 │   └── ...
 ├── experts/            # 专家定义（可插拔，见下）
@@ -48,7 +53,9 @@ agent/
 │       └── knowledge/        # 专家专属知识库（*.md）
 ├── electron/           # Electron 主进程 + preload（桌面壳）
 ├── ui/                 # Vite + Vue3 界面
-├── scripts/            # 构建辅助（postbuild 等）
+├── strategies/         # 策略库（内置 + 自定义，strategy.py + meta.json）
+├── skills/             # 技能定义（可插拔）
+├── scripts/            # Python 确定性脚本（取数/归档/复盘/回测）
 └── data/               # 运行时配置（store.json）
 ```
 
