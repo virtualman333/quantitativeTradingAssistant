@@ -136,7 +136,16 @@ pnpm run dry
 # 桌面界面
 pnpm run ui        # 构建 + Electron
 pnpm run ui:dev    # Vite dev server + Electron（热更新）
+
+# 自测（L1 硬约束回归，零额外依赖）
+pnpm test
 ```
+
+### 测试
+
+`tests/guard.test.ts` 是 `src/guard.ts` 的回归测试——guard 是「LLM 意图 → 能否下单」之间唯一的硬闸门，任何一次重构若改坏了 5x 杠杆上限、止损必挂、禁双向/禁亏损加仓，都会在这里红灯。
+
+用 Node 22 原生 TypeScript 支持 + 内置 test runner 运行，无需 jest/vitest：源码以 `.ts` 扩展名直接引入。**改动 `guard.ts` 或章程 §1 的 L1 条款后，必须同步更新本测试。**
 
 模型配置在界面「模型」页增删改（`data/store.json`）。`dry-run` 是**模式**不是单轮；只有 `--once` 才跑一轮就退出。
 

@@ -1,12 +1,13 @@
 {
   "name": "okx-trader-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "OKX 自主交易专用 Agent（TS 常驻进程，5 分钟自驱决策，不依赖聊天会话）",
   "type": "module",
   "main": "dist/electron/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.electron.json && tsc -p tsconfig.preload.json && node scripts/postbuild.mjs && vite build",
+    "test": "node --test \"tests/**/*.test.ts\"",
     "dev": "tsx src/main.ts",
     "start": "node dist/src/main.js",
     "once": "tsx src/main.ts --once",
