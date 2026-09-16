@@ -250,6 +250,11 @@ def render(rnd, runtime, month_state, tier_key, tier, mp):
     A("   月度目标进度（目标 +%.1f%%）" % MONTHLY_TARGET_PCT)
     A("   ├ 月初基准   %.2f USDT" % mp["month_start_equity"])
     A("   ├ 当前权益   %.2f USDT（月度 %.2f%%）" % (equity, mp["month_pnl_pct"]))
+    # 回撤一行此前只在「触发降档」时才以告警形式出现一次；档位判据一直是它，正文里却看不见。
+    A("   ├ 月度回撤   %s" % (
+        "**—** ⚠ 状态文件损坏，基准不可信"
+        if mp.get("month_state_corrupt") else
+        "%.2f%%（自当月峰值）" % mp["month_dd_pct"]))
     A("   ├ 已实现盈亏 %+.2f USDT（%d 笔平仓，手续费 %.2f）" % (
         mp["realized_pnl"], mp["realized_n"], mp["fee"]))
     A("   ├ 时间进度   %.1f%%（第 %d/%d 天）" % (
@@ -344,7 +349,13 @@ def render(rnd, runtime, month_state, tier_key, tier, mp):
                 alerts.append("⚠ 裸仓告警：%s 无止损委托" % p.get("instrument"))
     if runtime.get("circuit_breaker"):
         alerts.append("⚠ 熔断中：当日已止损 %s 次，本轮起停止开新仓" % runtime.get("day_sl_count"))
-    if mp["month_dd_pct"] <= -5.0:
+    if mp.get("month_state_corrupt"):
+        # 这条必须在最前：基准不可信时下面那句「月度回撤 x% 已触发降档」读的就是虚拟重置出来的 0，
+        # 报它等于用一个假数字安慰人。
+        alerts.append("⚠ 月度状态文件损坏（%s）：月度基准与峰值不可信，本封邮件里的回撤是"
+                      "「虚拟重置后的 0」而**不是结论**；下一轮归档会把坏文件隔离留档"
+                      "（state/month_state.json.corrupt-*）并按真实权益重建基准" % (mp.get("corrupt_error") or "原因未记录"))
+    elif mp["month_dd_pct"] <= -5.0:
         alerts.append("⚠ 月度回撤 %.2f%%，已触发降档保护" % mp["month_dd_pct"])
 
     A("6. 告警与待办")
@@ -407,6 +418,10 @@ def main():
         "days_in_month": m["days_in_month"],
         "time_progress": m["time_progress"],
         "achieved_pct_of_target": m["achieved_pct_of_target"],
+        # 状态文件损坏时上面那些数字来自「虚拟重置」，不是结论 —— 报表必须说清楚，
+        # 否则一封写着「月度回撤 0.00%」的邮件比不写更糟（它长得像一切正常）。
+        "month_state_corrupt": m.get("month_state_corrupt"),
+        "corrupt_error": m.get("corrupt_error"),
     }
 
     tier_key, tier = pick_risk_tier(m["month_pnl_pct"], m["time_progress"], m["month_dd_pct"])

@@ -23,6 +23,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import month_risk
+import jsonstore
 
 CST = timezone(timedelta(hours=8))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -220,9 +221,10 @@ def update_runtime(r: dict) -> dict:
         ):
             st.pop(k, None)
         st["month_dd_error"] = f"{type(e).__name__}: {e}"
-    os.makedirs(os.path.dirname(RUNTIME), exist_ok=True)
-    with open(RUNTIME, "w", encoding="utf-8") as fh:
-        json.dump(st, fh, ensure_ascii=False, indent=2)
+    # ★ 原子写（jsonstore）：runtime.json 是「熔断 / 月度回撤」两条 L1 的读数，
+    #   半截文件会让 loadRunState() 退回「全部字段未知」——`?? 0` 那条教训说明
+    #   「读不到」必须始终保持可分辨，不能让一次崩溃把它变成「看起来正常」。
+    jsonstore.atomic_write_json(RUNTIME, st)
     return st
 
 

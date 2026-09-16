@@ -238,6 +238,9 @@ def build(args):
             dim = m["days_in_month"]
             pnl_pct = m["month_pnl_pct"]
             dd_pct = m["month_dd_pct"]
+            # 状态文件损坏时 dd_pct 是「虚拟重置后的 0」，不是「这个月没有回撤」——
+            # 展示层必须把它显示成「—」，否则用户看到的是一个和「一切正常」长得一样的假数字。
+            corrupt = bool(m.get("month_state_corrupt"))
             tp = m["time_progress"]
             ach = m["achieved_pct_of_target"]
             m0 = m["month_start_equity"]
@@ -259,11 +262,19 @@ def build(args):
             A("| 当前权益 | %.2f USDT |" % demo_eq)
             A("| 月度收益率 | **%+.2f%%** %s |"
               % (pnl_pct, "✅ 已达标" if pnl_pct >= _mr.MONTHLY_TARGET_PCT else ""))
-            A("| 月度回撤（自峰值） | %.2f%% |" % dd_pct)
+            A("| 月度回撤（自峰值） | %s |"
+              % ("**—** ⚠ 状态文件损坏" if corrupt else "%.2f%%" % dd_pct))
             A("| 已实现盈亏 | %+.2f USDT（%d 笔平仓，手续费 %.2f）|" % (realized, realized_n, fee))
             A("| **当前风险档位** | **%s** — risk_pct = **%.1f%%** |" % (tier["label"], tier["risk_pct"]))
             A("| 档位依据 | %s |" % tier["note"])
             A("")
+            if corrupt:
+                # 「0% 回撤」是最危险的一种谎：它和「一切正常」长得一模一样。
+                A("> ⚠ **月度状态文件损坏**（%s）：月度基准与峰值不可信，上表的回撤是"
+                  "「虚拟重置后的 0」而**不是结论**，档位仅供参照。`archive_round.py` "
+                  "下一轮会把坏文件隔离留档（`.corrupt-<时间戳>`）并按真实权益重建基准，"
+                  "这一轮的回撤进日志与邮件告警。" % (m.get("corrupt_error") or "原因未记录"))
+                A("")
             if dd_pct <= -8.0:
                 A("> 🔴 **已触发 DEFEND 防守档**：月度回撤 %.2f%%。本月目标已放弃，只做最高确定性单。" % dd_pct)
                 A("")

@@ -49,6 +49,29 @@ month_risk.py — 月度风险口径的唯一来源（月度基准 / 峰值 / �
   - `update_month_state()` = **唯一写入口**，只允许交易主循环（`archive_round.py`）调用；
   - `read_month_state()` = 只读视图，跨月时**虚拟重置**（不落盘）；
   - `month_metrics()` = **纯计算**，`state` 缺省时走只读视图，**绝不写盘**。
+
+为什么坏文件不能当成「首次初始化」
+----------------------------------
+上面两条挡的是「不该写的人写」。还有第三条路能让分母消失，而且**根本不用写**：
+
+`_load_state()` 此前是 `except Exception: return {}` —— 文件读不出来就当首次初始化。
+于是只要 `state/month_state.json` 变成半截（进程在 `json.dump` 中途被杀 / 断电 / 磁盘满），
+下一次 `update_month_state()` 就会把 `month_peak_equity` **重新初始化成当前权益**：
+真实回撤立刻归零，L1-6 熔断在当月剩余时间里再也触发不了，而且**不留任何痕迹** ——
+用户看到的是一份干净的 `month_state.json` 和一条「回撤 0.00%，正常」。
+
+所以现在「文件不存在」与「文件读不出来」是**两件事**：
+
+  - 不存在   → 首次运行，正常，照旧 `_reset_state()`；
+  - 读不出来 → **数据丢了**：坏文件原样留档（`.corrupt-<时间戳>`，不删不改，那是排查线索），
+               新状态照写（否则每轮都算不出回撤），但**本轮抛 `MonthStateCorrupt`** ——
+               让 `archive_round.py` 把 `month_dd_error` 落盘、让 `guard.ts` 走它自己那条
+               「回撤未知 + 点名告警」的路。重置后的那个 0% 不是「这个月没有回撤」，
+               只是「峰值丢了」，不能拿它当结论。
+
+展示路径仍然不抛异常（看板/邮件不该因为一个坏文件整页报错），但返回值里带
+`state_corrupt`，界面据此把回撤显示成「—」而不是 `0.00%` ——
+「0% 回撤」是最危险的一种谎，它长得和「一切正常」一模一样。
 """
 
 import calendar
@@ -56,10 +79,23 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 
+import jsonstore
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CST = timezone(timedelta(hours=8))
 
 MONTH_STATE = os.path.join(ROOT, "state", "month_state.json")
+
+# 坏文件的留档后缀（`month_state.json.corrupt-20260917-060000`）
+CORRUPT_SUFFIX = ".corrupt-"
+
+
+class MonthStateCorrupt(RuntimeError):
+    """`state/month_state.json` 存在但读不出来（= 数据丢了，不是首次运行）。
+
+    专门给一个异常类型，是因为这条路此前被 `except: 当作首次初始化` 吞掉：
+    月度峰值被静默清零 → 真实回撤恒为 0 → L1-6 熔断当月起再也触发不了，且不留痕迹。
+    """
 
 # 月度目标收益率（%），章程 §0.1 进阶目标
 MONTHLY_TARGET_PCT = 10.0
@@ -78,14 +114,34 @@ def days_in_month(y, m):
 
 
 def _load_state():
-    if not os.path.exists(MONTH_STATE):
-        return {}
-    try:
-        with open(MONTH_STATE, encoding="utf-8") as f:
-            st = json.load(f)
-        return st if isinstance(st, dict) else {}
-    except Exception:  # noqa: BLE001 —— 状态文件坏了就当作首次初始化，不阻断整轮
-        return {}
+    """返回 `(state, error)` —— 「没有文件」与「文件坏了」是两件事。
+
+    - `({}  , None)`   —— 文件还不存在：首次运行，可以初始化
+    - `(None, "原因")` —— 文件存在但读不出来 / 结构不对：**数据丢了**，调用方必须显式处理
+    """
+    data, err = jsonstore.read_json_state(MONTH_STATE)
+    if err:
+        return None, err
+    if data is None:
+        return {}, None
+    missing = [k for k in ("month", "month_peak_equity") if k not in data]
+    if missing:
+        # 能被 json 解析、但结构不是本模块写出来的形状（被别的程序覆写、被编辑坏）
+        return None, "缺少必要字段：%s" % "、".join(missing)
+    return data, None
+
+
+def _quarantine_broken_state(now):
+    """把读不出来的状态文件**原样留档**到 `.corrupt-<时间戳>`，返回目标路径。
+
+    用 `os.replace()`（同目录同分区，原子）而不是「复制 + 删除」：坏文件本身是排查线索，
+    必须完整留档。挪不动就干脆不写新状态并抛异常 —— 宁可这一轮算不出回撤
+    （会被 `guard.ts` 点名），也不能先覆盖证据再假装什么都没发生。
+    """
+    dest = MONTH_STATE + CORRUPT_SUFFIX + now.strftime("%Y%m%d-%H%M%S")
+    os.makedirs(os.path.dirname(MONTH_STATE), exist_ok=True)
+    os.replace(MONTH_STATE, dest)
+    return dest
 
 
 def _reset_state(equity, now, note):
@@ -107,7 +163,14 @@ def read_month_state(equity, now=None):
     `update_month_state()` 的事（它拿的才是当轮真实权益）。
     """
     now = _now(now)
-    st = _load_state()
+    st, err = _load_state()
+    if err:
+        # 只读视图不抛异常（看板 / 邮件不该因为一个坏文件整页报错），但**绝不假装没事**：
+        # 返回值带 `state_corrupt`，展示层据此把回撤显示成「—」而不是 0.00%。
+        out = _reset_state(float(equity or 0), now, "只读视图：月度状态文件损坏，基准不可信（未落盘）")
+        out["state_corrupt"] = True
+        out["corrupt_error"] = err
+        return out
     if st.get("month") != now.strftime("%Y-%m"):
         return _reset_state(float(equity or 0), now, "只读视图：跨月虚拟重置（未落盘）")
     return st
@@ -122,18 +185,33 @@ def update_month_state(equity, now=None):
     now = _now(now)
     ym = now.strftime("%Y-%m")
     equity = float(equity or 0)
-    st = _load_state()
-    if st.get("month") != ym:
+    st, err = _load_state()
+    if err:
+        # 坏文件先留档再初始化 —— 顺序不能反：先写新状态就把唯一的排查线索覆盖掉了。
+        try:
+            dest = _quarantine_broken_state(now)
+        except OSError as e:
+            raise MonthStateCorrupt("%s（且坏文件也挪不动，未改动任何状态：%s）" % (err, e))
+        st = _reset_state(
+            equity, now, "原状态文件损坏，已隔离为 %s 并按本轮权益重新初始化" % os.path.basename(dest)
+        )
+        # 把「这里出过事」写进状态本身，免得下次有人看到一份干净的 month_state.json 以为从没出过事
+        st["recovered_from"] = os.path.basename(dest)
+        st["recovered_error"] = err
+    elif st.get("month") != ym:
         st = _reset_state(equity, now, "跨月自动重置（或首次初始化）")
     else:
         # 峰值只增不减；真实回撤 = (当前权益 - 峰值) / 峰值
         if equity > float(st.get("month_peak_equity") or 0):
             st["month_peak_equity"] = equity
     st["last_update_cst"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    os.makedirs(os.path.dirname(MONTH_STATE), exist_ok=True)
-    # 注意：json.dump 的 fp 必须传位置参数，不能写成 fp=f（会 TypeError）
-    with open(MONTH_STATE, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=2)
+    # ★ 原子写：半截文件会被读方当成「首次初始化」，进而把峰值静默清零（详见 jsonstore 模块头）。
+    jsonstore.atomic_write_json(MONTH_STATE, st)
+    if err:
+        # 新基准已经写好（下一轮起恢复正常），但**这一轮必须失败**：重置出来的 0% 不是
+        # 「这个月没有回撤」，只是「峰值丢了」。抛出去 → archive_round 记 month_dd_error
+        # → guard.ts 走「回撤未知 + 点名告警」那条路，而不是拿 0 去放行。
+        raise MonthStateCorrupt(err)
     return st
 
 
@@ -173,6 +251,10 @@ def month_metrics(equity, now=None, state=None):
         "time_progress": time_progress,
         "achieved_pct_of_target": (month_pnl_pct / MONTHLY_TARGET_PCT * 100) if MONTHLY_TARGET_PCT else 0.0,
         "monthly_target_pct": MONTHLY_TARGET_PCT,
+        # 状态文件损坏时上面的回撤是「虚拟重置后的 0」，不是结论。
+        # 一律带上这个标记，展示层才有机会把它显示成「—」而不是一个看起来很正常的 0.00%。
+        "month_state_corrupt": bool(st.get("state_corrupt")),
+        "corrupt_error": st.get("corrupt_error"),
     }
 
 

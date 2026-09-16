@@ -619,3 +619,260 @@ print(json.dumps({
     assert.equal(out.writer_files["archive_round.py"], 1, "archive_round.py 里写入口的调用次数不是 1");
   });
 });
+
+// ── G. 分母的第三条死法：根本不用写，读坏就行 ─────────────────────────────
+
+describe("月度状态文件损坏时 · 不许当成「首次初始化」，更要留证", () => {
+  /**
+   * 上一节挡的是「不该写的人写」。这一节挡的是**根本不用写**的那条路：
+   *
+   * `_load_state()` 原来是 `except Exception: return {}` —— 文件读不出来就当首次初始化。
+   * 而写入口的语义是「跨月 / 首次 → 基准与峰值都取当前权益」，于是只要
+   * `state/month_state.json` 变成半截（`open(w)` + `json.dump` 写到一半被杀 / 断电 /
+   * 磁盘满都行），下一轮就会把 `month_peak_equity` **重新初始化成当前权益**：
+   * 真实回撤立刻归零 → L1-6 熔断在当月剩余时间里再也触发不了 → 而这一切**不留痕迹**，
+   * 用户看到的是一份干净的 month_state.json 和一条「回撤 0.00%，正常」。
+   * 峰值是「只增不减、抬高一次不可逆」的：丢了就是丢了，所以必须当场可见、必须留证。
+   *
+   * 顺带把「写」也堵上：非原子写正是造出半截文件的成因，`state/*.json` 一律走 jsonstore。
+   */
+  const driver = `
+import glob, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import archive_round, jsonstore, month_risk
+
+tmp = tempfile.mkdtemp(prefix="qta_month_corrupt_")
+month_risk.MONTH_STATE = os.path.join(tmp, "month_state.json")
+archive_round.RUNTIME = os.path.join(tmp, "runtime.json")
+
+BROKEN = '{"month": "2026-09", "month_start_equity": 10000.0, "month_peak_eq'
+
+
+def run(equity):
+    return archive_round.update_runtime({
+        "time_cst": "2026-09-17 10:00:00",
+        "round_id": "R000001",
+        "equity_usdt": equity,
+        "sl_triggered": 0,
+        "trades": [],
+        "positions": [],
+    })
+
+
+def read_bytes(p):
+    with open(p, "rb") as f:
+        return f.read()
+
+
+def write_raw(p, text):
+    # newline="" —— 免掉 Windows 的 \\\\n → \\\\r\\\\n 转换，留档比对才是逐字节的
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+# ① 正常两轮：基准 10000，峰值抬到 11000
+run(10000.0)
+run(11000.0)
+peak_ok = json.loads(read_bytes(month_risk.MONTH_STATE).decode("utf-8"))["month_peak_equity"]
+
+# ② 文件被写坏（半截 —— 真实成因就是 json.dump 写到一半进程被杀）
+write_raw(month_risk.MONTH_STATE, BROKEN)
+
+# ③ 交易主循环这一轮
+bad = run(9000.0)
+
+# ④ 坏文件应被原样留档
+archives = sorted(glob.glob(month_risk.MONTH_STATE + ".corrupt-*"))
+archive_text = read_bytes(archives[0]).decode("utf-8") if archives else None
+new_state = json.loads(read_bytes(month_risk.MONTH_STATE).decode("utf-8"))
+stray_tmp = sorted(glob.glob(os.path.join(tmp, "*.tmp")))
+runtime_keys = sorted(json.loads(read_bytes(archive_round.RUNTIME).decode("utf-8")).keys())
+
+# ⑤ 下一轮应完全恢复正常：基准与峰值都重建为本轮权益，之后由真实权益接管
+recovered = run(9200.0)
+peak_rebuilt = json.loads(read_bytes(month_risk.MONTH_STATE).decode("utf-8"))["month_peak_equity"]
+after_recovery = run(8800.0)
+
+# ⑥ 只读视图遇到坏文件：不抛异常、带标记、且绝不改动文件
+write_raw(month_risk.MONTH_STATE, "这根本不是 JSON")
+before_view = read_bytes(month_risk.MONTH_STATE)
+view = month_risk.read_month_state(9000.0)
+metrics = month_risk.month_metrics(9000.0)
+after_view = read_bytes(month_risk.MONTH_STATE)
+
+# ⑦ 原子写失败：不留半截文件、不动原文件
+atomic_path = os.path.join(tmp, "atomic.json")
+jsonstore.atomic_write_json(atomic_path, {"keep": 1})
+before_atomic = read_bytes(atomic_path)
+atomic_err = None
+try:
+    jsonstore.atomic_write_json(atomic_path, {"bad": object()})
+except Exception as e:
+    atomic_err = type(e).__name__
+after_atomic = read_bytes(atomic_path)
+
+print(json.dumps({
+    "peak_ok": peak_ok,
+    "bad_dd": bad.get("month_dd_pct"),
+    "bad_error": bad.get("month_dd_error"),
+    "runtime_keys": runtime_keys,
+    "archives": [os.path.basename(a) for a in archives],
+    "archive_text": archive_text,
+    "broken_text": BROKEN,
+    "new_peak": new_state.get("month_peak_equity"),
+    "recovered_from": new_state.get("recovered_from"),
+    "recovered_error": new_state.get("recovered_error"),
+    "reset_note": new_state.get("reset_note"),
+    "stray_tmp": stray_tmp,
+    "recovered_dd": recovered.get("month_dd_pct"),
+    "recovered_error_flag": recovered.get("month_dd_error"),
+    "peak_rebuilt": peak_rebuilt,
+    "after_recovery_dd": after_recovery.get("month_dd_pct"),
+    "after_recovery_error": after_recovery.get("month_dd_error"),
+    "view_corrupt": view.get("state_corrupt"),
+    "view_error": view.get("corrupt_error"),
+    "view_dd": view.get("month_dd_pct"),
+    "view_touched": before_view != after_view,
+    "metrics_corrupt": metrics.get("month_state_corrupt"),
+    "metrics_error": metrics.get("corrupt_error"),
+    "atomic_err": atomic_err,
+    "atomic_kept": before_atomic == after_atomic,
+    "atomic_tmp": sorted(glob.glob(os.path.join(tmp, ".atomic*"))),
+}, ensure_ascii=False))
+`;
+
+  const py = process.env.PYTHON || "python";
+  const hasPython = spawnSync(py, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
+
+  function runCorruptDriver(t: { skip: (m: string) => void }) {
+    if (!hasPython) {
+      t.skip(`本机没有可用的 ${py} —— 这条锁没生效，CI 上必须能跑`);
+      return null;
+    }
+    const f = tmpFile("driver_corrupt.py");
+    fs.writeFileSync(f, driver, "utf8");
+    const r = spawnSync(py, [f, path.join(ROOT, "scripts")], { encoding: "utf8" });
+    assert.equal(r.status, 0, `Python 驱动失败：${r.stderr?.slice(0, 500)}`);
+    return JSON.parse(r.stdout.trim()) as Record<string, never> & {
+      peak_ok: number;
+      bad_dd: number | null;
+      bad_error: string | null;
+      runtime_keys: string[];
+      archives: string[];
+      archive_text: string | null;
+      broken_text: string;
+      new_peak: number;
+      recovered_from: string | null;
+      recovered_error: string | null;
+      reset_note: string;
+      stray_tmp: string[];
+      recovered_dd: number | null;
+      recovered_error_flag: string | null;
+      peak_rebuilt: number;
+      after_recovery_dd: number | null;
+      after_recovery_error: string | null;
+      view_corrupt: boolean | null;
+      view_error: string | null;
+      view_dd: number;
+      view_touched: boolean;
+      metrics_corrupt: boolean;
+      metrics_error: string | null;
+      atomic_err: string | null;
+      atomic_kept: boolean;
+      atomic_tmp: string[];
+    };
+  }
+
+  it("坏文件 → 该轮必须报错（回撤「未知」），而不是拿重置出来的 0 去放行", (t) => {
+    const out = runCorruptDriver(t);
+    if (!out) return;
+
+    assert.equal(out.peak_ok, 11000, "前置条件不成立：正常两轮没能把峰值抬到 11000");
+    // 关键：这一轮的回撤必须是「未知」，而不是重置后的 0.00%
+    assert.equal(out.bad_dd, null, "坏文件那一轮仍然给出了回撤数字 —— 重置出来的 0% 不是「这个月没有回撤」");
+    assert.ok(
+      out.runtime_keys.includes("month_dd_error"),
+      `坏文件没被记录成错误：${out.runtime_keys.join(", ")} —— guard.ts 会拿 0 去放行 L1-6`
+    );
+    assert.ok(
+      (out.bad_error ?? "").includes("MonthStateCorrupt"),
+      `错误类型没带上：${out.bad_error} —— 三种成因（坏了 / 算错 / 读不动）要分得开`
+    );
+
+    // 坏文件必须原样留档（那是唯一的排查线索，不许覆盖）
+    assert.equal(out.archives.length, 1, `坏文件没有留档，或留了多份：${out.archives.join(", ")}`);
+    assert.ok(out.archives[0].includes(".corrupt-"), `留档命名看不出是坏文件：${out.archives[0]}`);
+    assert.equal(out.archive_text, out.broken_text, "留档内容与坏文件不一致 —— 必须逐字节原样保存");
+
+    // 新基准按真实权益重建，并且**把这件事写进状态本身**
+    assert.equal(out.new_peak, 9000, `重建后的峰值不是本轮真实权益：${out.new_peak}`);
+    assert.equal(out.recovered_from, out.archives[0], "状态里没记住坏文件叫什么 —— 下次看到干净文件会以为从没出过事");
+    assert.ok((out.recovered_error ?? "").length > 0, "状态里没记下损坏原因");
+    assert.ok(out.reset_note.includes("损坏"), `reset_note 没说明成因：${out.reset_note}`);
+
+    // 不留垃圾临时文件（半截 .tmp 也是「下次读不到」的成因）
+    assert.deepEqual(out.stray_tmp, [], `留下了临时文件：${out.stray_tmp.join(", ")}`);
+  });
+
+  it("下一轮完全恢复正常（错误标记要被擦掉，新基准要真的在管事）", (t) => {
+    const out = runCorruptDriver(t);
+    if (!out) return;
+    assert.equal(out.recovered_error_flag, null, "一次损坏之后错误标记永久残留 —— 界面会一直显示「数据缺失」");
+    // 重建那一轮：基准与峰值都取自本轮权益，所以回撤就是 0（这是「重置」的语义，不是「没回撤」——
+    // 它之所以成立，是因为上一轮的真相（峰值丢了）已经以 MonthStateCorrupt 的形式报出去了）
+    assert.equal(out.recovered_dd, 0, `重建基准那一轮的回撤应为 0：${out.recovered_dd}`);
+    assert.equal(out.peak_rebuilt, 9200, `重建后的峰值没跟着真实权益走：${out.peak_rebuilt}`);
+    // 关键：重建之后回撤必须重新从**新基准**算起，而不是继续拿 9000/11000 这两个旧数（也没有旧数了）
+    assert.ok(
+      Math.abs((out.after_recovery_dd ?? 0) - -4.3478) < 0.01,
+      `重建后的回撤口径不对（8800 / 峰值 9200 应约 -4.35%）：${out.after_recovery_dd}`
+    );
+    assert.equal(out.after_recovery_error, null, "恢复之后又出现错误标记");
+  });
+
+  it("只读视图不抛异常，但必须把「损坏」标记带出去（界面才有机会显示「—」）", (t) => {
+    const out = runCorruptDriver(t);
+    if (!out) return;
+    assert.equal(out.view_corrupt, true, "只读视图把坏文件当成了「首次初始化」—— 界面会显示一个假的 0.00% 回撤");
+    assert.ok((out.view_error ?? "").length > 0, "只读视图没带出损坏原因");
+    assert.equal(out.view_touched, false, "只读视图改动了坏文件 —— 排查线索被覆盖");
+    assert.equal(out.metrics_corrupt, true, "month_metrics 没把损坏标记传出去 —— 展示层无从判断该不该显示「—」");
+    assert.ok((out.metrics_error ?? "").length > 0, "month_metrics 没带出损坏原因");
+  });
+
+  it("原子写失败不留半截文件、不动原文件", (t) => {
+    const out = runCorruptDriver(t);
+    if (!out) return;
+    assert.equal(out.atomic_err, "TypeError", `序列化失败应原样抛出：${out.atomic_err}`);
+    assert.equal(out.atomic_kept, true, "写失败时动了原文件 —— 原文件至少还是上一次的完整内容，不该被破坏");
+    assert.deepEqual(out.atomic_tmp, [], `写失败留下临时文件：${out.atomic_tmp.join(", ")}`);
+  });
+
+  it("结构锁：state/*.json 的写一律走 jsonstore（就地 json.dump 正是半截文件的成因）", () => {
+    // Python 的行注释是 `#`（_src.ts 的 stripComments 只认 C 风格），先按行剔掉再判，
+    // 否则注释里提一句 `json.dump` 就会误红 —— 「结构锁读源码前必须先剥注释」本仓已栽过三次。
+    const codeOnly = (src: string) =>
+      src
+        .split(/\r?\n/)
+        .filter((l) => !l.trim().startsWith("#"))
+        .join("\n");
+    for (const f of ["scripts/month_risk.py", "scripts/archive_round.py"]) {
+      const src = codeOnly(read(f));
+      assert.ok(
+        !src.includes("json.dump("),
+        `${f} 里又出现了就地 json.dump —— 半截文件会让 L1-6 的分母被静默清零`
+      );
+      assert.ok(src.includes("jsonstore.atomic_write_json("), `${f} 没走原子写`);
+    }
+    const store = codeOnly(read("scripts/jsonstore.py"));
+    assert.ok(store.includes("os.replace("), "jsonstore 的原子替换不见了");
+    assert.ok(store.includes("os.fsync("), "jsonstore 少了 fsync —— 换名是原子的，内容有没有落盘是另一件事");
+    // 「读不出来就当首次初始化」正是峰值被静默清零的那一步。锁它的**落点**而不是某段字面量
+    // （断言一段固定写法在改坏之后照样能通过，等于没锁）：读状态必须经由
+    // `jsonstore.read_json_state` 这个「没有文件 / 文件坏了」分得开的入口。
+    assert.ok(
+      codeOnly(read("scripts/month_risk.py")).includes("jsonstore.read_json_state("),
+      "month_risk 又自己 open+json.load 读状态了 —— 那条路分不出「首次运行」与「数据丢了」"
+    );
+  });
+});
