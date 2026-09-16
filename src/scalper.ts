@@ -487,7 +487,14 @@ export async function getScalperOverview(): Promise<ScalperOverview> {
   return { trades, ticks, positions, realizedPnl, realizedNetPnl, totalFee, unrealizedPnl };
 }
 
-/** 超短线历史回测（同步版，供兼容）：拉 1m 数据回放策略，返回汇总 + 每笔记录 */
+/**
+ * 超短线历史回测（同步版，供兼容）：拉 1m 数据回放策略，返回汇总 + 每笔记录。
+ *
+ * 【为什么参数走 backtestArgv 而不是自己拼】此前这里手写了一份 argv 拼装，
+ * 与 job 版（`backtestArgv`）各写一遍，很快就漂移了：这条路径漏掉了 `--rr` /
+ * `--slippage-bps` / `--max-hold` / `--job-id`，同一个 UI 表单换条通道进来，
+ * 参数会被静默吞掉、回测结果对不上，而且不报错。收敛为单一来源后不会再漂。
+ */
 export async function runScalperBacktest(args: {
   inst: string;
   start: string;
@@ -498,15 +505,12 @@ export async function runScalperBacktest(args: {
   closeOnReversal?: boolean;
   strategyId?: string;
   bar?: string;
+  jobId?: string;
+  rr?: number;
+  slippageBps?: number;
+  maxHold?: number;
 }): Promise<Record<string, unknown>> {
-  const argv = ["--inst", args.inst, "--start", args.start];
-  if (args.end) argv.push("--end", args.end);
-  if (args.bar && args.bar !== "1m") argv.push("--bar", args.bar);
-  if (args.atrMult != null) argv.push("--atr-mult", String(args.atrMult));
-  if (args.feeRate != null) argv.push("--fee-rate", String(args.feeRate));
-  if (args.notional != null) argv.push("--notional", String(args.notional));
-  if (args.closeOnReversal) argv.push("--close-on-reversal");
-  if (args.strategyId) argv.push("--strategy", strategyDir(args.strategyId));
+  const argv = backtestArgv(args);
   const out = await runPy("scalper_backtest.py", argv, 180_000);
   try {
     return JSON.parse(out) as Record<string, unknown>;
@@ -515,7 +519,10 @@ export async function runScalperBacktest(args: {
   }
 }
 
-/** 同步版回测的 CLI 参数组装（供 main.ts 的 job 版 spawn 复用） */
+/**
+ * 回测 CLI 参数组装的**唯一来源**：同步版 `runScalperBacktest` 与
+ * job 版 spawn（electron/main.ts）都走这里，两侧参数因此永远一致。
+ */
 export function backtestArgv(args: {
   inst: string;
   start: string;

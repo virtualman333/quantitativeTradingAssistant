@@ -145,7 +145,9 @@ pnpm test
 
 `tests/guard.test.ts` 是 `src/guard.ts` 的回归测试——guard 是「LLM 意图 → 能否下单」之间唯一的硬闸门，任何一次重构若改坏了 5x 杠杆上限、止损必挂、禁双向/禁亏损加仓，都会在这里红灯。
 
-用 Node 22 原生 TypeScript 支持 + 内置 test runner 运行，无需 jest/vitest：源码以 `.ts` 扩展名直接引入。**改动 `guard.ts` 或章程 §1 的 L1 条款后，必须同步更新本测试。**
+`tests/scalper.test.ts` 锁的是**回测参数契约**（`src/scalper.ts` 的 `backtestArgv`）：用户看到的每个回测数字都来自这条 argv → `scripts/scalper_backtest.py` 的链路，参数漏拼不会报错、只会静默按默认值跑。这里同时有一条「反重复」断言，盯着 `backtestArgv` 是回测 argv 的**唯一来源**——此前同步版与 job 版各写了一份，同步版漏传 `--rr` / `--slippage-bps` / `--max-hold` / `--job-id`，即属此类漂移。
+
+用 Node 22 内置 test runner + `tsx` loader 运行（`tsx` 负责把源码里的 `.js` 后缀解析回 `.ts`，否则只能测那些「零运行时 import」的模块），无需 jest/vitest。**改动 `guard.ts` 或章程 §1 的 L1 条款后，必须同步更新 guard 测试；改回测参数后必须同步更新 scalper 测试。**
 
 模型配置在界面「模型」页增删改（`data/store.json`）。`dry-run` 是**模式**不是单轮；只有 `--once` 才跑一轮就退出。
 
