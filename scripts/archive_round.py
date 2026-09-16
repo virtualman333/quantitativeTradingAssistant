@@ -183,14 +183,38 @@ def update_runtime(r: dict) -> dict:
     # ── 月度回撤：章程 L1-6「月度回撤 ≥12% → 强制停止开新仓」的判据 ──────────
     # 这个字段 src/main.ts 一直在读（`j.month_dd_pct ?? 0`），但**从来没有任何脚本写过**，
     # 于是那条 L1 熔断恒不触发。口径归 month_risk.py，本文件只负责落盘。
+    # 顺带把阈值也落盘：总览页要显示「回撤 -3.5% / 熔断线 -12%」，但界面**不许**
+    # 自己抄一份章程常量（本仓「同一事实两处写法必然漂移」已连续多轮命中）。
+    # 两个数都取自 month_risk.py，与 l1_6_tripped 的判据同源。
     try:
         mm = month_risk.month_metrics(r["equity_usdt"])
         st["month_dd_pct"] = round(float(mm["month_dd_pct"]), 4)
         st["month_pnl_pct"] = round(float(mm["month_pnl_pct"]), 4)
         st["month_start_equity"] = round(float(mm["month_start_equity"]), 4)
         st["month_peak_equity"] = round(float(mm["month_peak_equity"]), 4)
+        st["month_dd_cap_pct"] = round(float(month_risk.L1_MONTH_DD_PCT), 4)
+        st["monthly_target_pct"] = round(float(mm["monthly_target_pct"]), 4)
         st["l1_6_tripped"] = month_risk.month_dd_circuit_tripped(mm["month_dd_pct"])
+        # 算成功就把上一轮的错误擦掉 —— 否则一次失败会永久留在文件里，
+        # 界面会一直显示「数据缺失」，而实际上数据早就恢复了（stale key 陷阱）。
+        st.pop("month_dd_error", None)
     except Exception as e:  # noqa: BLE001 —— 月度状态算不出来不该让整轮归档失败
+        # 失败时**要把上一轮的月度数值一并清掉**：st 是「读旧文件 + 覆盖字段」，
+        # 不清就是把上一轮的回撤当成这一轮的呈现。陈旧的回撤比没有回撤更危险 ——
+        # 从高点摔下来那一轮若恰好算不出数，界面会拿旧的小回撤告诉用户「还安全」，
+        # 而这条 L1 恰恰是「没有下一笔了」级别的闸门。
+        # 清成缺失后，guard.ts 走的是它自己声明的那条路径：放行 + 点名告警
+        # （「不知道回撤多少」≠「没有回撤」）。
+        for k in (
+            "month_dd_pct",
+            "month_pnl_pct",
+            "month_start_equity",
+            "month_peak_equity",
+            "month_dd_cap_pct",
+            "monthly_target_pct",
+            "l1_6_tripped",
+        ):
+            st.pop(k, None)
         st["month_dd_error"] = f"{type(e).__name__}: {e}"
     os.makedirs(os.path.dirname(RUNTIME), exist_ok=True)
     with open(RUNTIME, "w", encoding="utf-8") as fh:

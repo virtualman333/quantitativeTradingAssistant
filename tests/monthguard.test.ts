@@ -34,6 +34,7 @@ import { spawnSync } from "node:child_process";
 
 import { MAX_MONTH_DD_PCT, guardMonthlyDrawdown } from "../src/guard.ts";
 import { loadRunState } from "../src/runstate.ts";
+import { monthRiskView } from "../ui/lib/riskbrief.js";
 import { ROOT, read, stripComments } from "./_src.ts";
 
 const tmpFile = (name: string) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "qta-month-")), name);
@@ -154,15 +155,23 @@ def run(equity):
 
 seq = [10000.0, 11000.0, 9700.0, 8500.0, 10000.0, 11000.0]
 steps = []
+snapshots = []
 for eq in seq:
     st = run(eq)
     steps.append({
         "equity": eq,
         "month_dd_pct": st.get("month_dd_pct"),
         "month_pnl_pct": st.get("month_pnl_pct"),
+        "month_dd_cap_pct": st.get("month_dd_cap_pct"),
+        "monthly_target_pct": st.get("monthly_target_pct"),
         "l1_6_tripped": st.get("l1_6_tripped"),
     })
-print(json.dumps({"steps": steps, "runtime_keys": sorted(json.load(open(archive_round.RUNTIME, encoding="utf-8")).keys())}, ensure_ascii=False))
+    snapshots.append(st)
+print(json.dumps({
+    "steps": steps,
+    "snapshots": snapshots,
+    "runtime_keys": sorted(json.load(open(archive_round.RUNTIME, encoding="utf-8")).keys()),
+}, ensure_ascii=False))
 `;
 
   const py = process.env.PYTHON || "python";
@@ -180,7 +189,15 @@ print(json.dumps({"steps": steps, "runtime_keys": sorted(json.load(open(archive_
     assert.equal(r.status, 0, `Python 驱动失败：${r.stderr?.slice(0, 400)}`);
 
     const out = JSON.parse(r.stdout.trim()) as {
-      steps: { equity: number; month_dd_pct: number | null; month_pnl_pct: number | null; l1_6_tripped: boolean }[];
+      steps: {
+        equity: number;
+        month_dd_pct: number | null;
+        month_pnl_pct: number | null;
+        month_dd_cap_pct: number | null;
+        monthly_target_pct: number | null;
+        l1_6_tripped: boolean;
+      }[];
+      snapshots: Record<string, unknown>[];
       runtime_keys: string[];
     };
 
@@ -209,6 +226,117 @@ print(json.dumps({"steps": steps, "runtime_keys": sorted(json.load(open(archive_
     // ⑤ **跨语言同结论**：Python 写出的数直接喂 TS 闸门，结论必须一致
     assert.equal(guardMonthlyDrawdown(at9700.month_dd_pct).ok, true);
     assert.equal(guardMonthlyDrawdown(at8500.month_dd_pct).ok, false);
+
+    // ⑥ 阈值也随判据一起落盘：界面要显示「回撤 -3.5% / 熔断线 -12%」，
+    //    但它不许自己抄一份章程常量。写出去的必须就是 guard 的那一个数。
+    for (const s of out.steps) {
+      assert.equal(
+        s.month_dd_cap_pct,
+        MAX_MONTH_DD_PCT,
+        `runtime.json 的 month_dd_cap_pct（${s.month_dd_cap_pct}）与 guard 的熔断线（${MAX_MONTH_DD_PCT}）不一致 —— 界面会照着它显示一个假阈值`
+      );
+    }
+    assert.equal(back11000.monthly_target_pct, 10.0, "月度目标没落盘");
+
+    // ⑦ **拿归档脚本真跑出来的 runtime.json 直接喂界面展示层**。
+    //    上面那些断言用的是我手写的字段名；万一 Python 侧改名（比如
+    //    `month_dd_cap_pct` → `month_cap_pct`），手写字段名的界面测试会照常全绿，
+    //    而用户看到的是「月度回撤 — / 未知」。这条把两边的字段名真正钉在一起。
+    const views = out.snapshots.map((s) => monthRiskView(s));
+    for (let i = 0; i < views.length; i++) {
+      const v = views[i];
+      assert.notEqual(v.level, "unknown", `第 ${i} 轮界面判不出来 —— 两边的字段名对不上了：${JSON.stringify(out.snapshots[i])}`);
+      assert.equal(v.level === "tripped", out.steps[i].l1_6_tripped, `第 ${i} 轮档位与判据不一致`);
+      assert.notEqual(v.ddText, "—", `第 ${i} 轮界面读不到月度回撤`);
+      assert.notEqual(v.capText, "—", `第 ${i} 轮界面读不到熔断线`);
+      assert.ok(!v.summary.includes("NaN"), `第 ${i} 轮摘要出现 NaN：${v.summary}`);
+    }
+    // 权益从峰值 11000 砸到 8500（-22.7%）那一轮：界面必须明说已熔断
+    assert.equal(views[3].level, "tripped");
+    assert.ok(views[3].summary.includes("已触发章程 L1-6"), views[3].summary);
+    // 回到峰值那一轮：回撤归零，界面不再报警
+    assert.equal(views[5].level, "ok");
+    assert.equal(views[5].ddText, "0.00%");
+  });
+});
+
+// ── E. 失败路径：陈旧的回撤比没有回撤更危险 ──────────────────────────────
+
+describe("月度状态算不出来时：不许把上一轮的数值当成这一轮的", () => {
+  /**
+   * `update_runtime()` 是「读旧文件 → 覆盖字段 → 写回」。月度那段 try/except 若在
+   * 失败时只写一个 `month_dd_error` 而**不清掉**上一轮的 month_dd_pct / l1_6_tripped，
+   * 那么从高点摔下来那一轮恰好算不出数时，界面与闸门拿到的都是旧的小回撤 ——
+   * 显示「正常」，然后继续开新仓。反过来，算成功时若不清 `month_dd_error`，
+   * 一次失败会让界面永久显示「数据缺失」。
+   * 这两种都不会报错，所以只能靠真跑一遍把它钉住。
+   */
+  const driver = `
+import json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import month_risk, archive_round
+
+tmp = tempfile.mkdtemp(prefix="qta_month_fail_")
+month_risk.MONTH_STATE = os.path.join(tmp, "month_state.json")
+archive_round.RUNTIME = os.path.join(tmp, "runtime.json")
+
+def run(equity):
+    return archive_round.update_runtime({
+        "time_cst": "2026-09-17 10:00:00",
+        "round_id": "R000001",
+        "equity_usdt": equity,
+        "sl_triggered": 0,
+        "trades": [],
+        "positions": [],
+    })
+
+ok1 = run(10000.0)          # 正常一轮：有月度数值
+orig = month_risk.month_metrics
+def boom(*a, **k):
+    raise RuntimeError("boom")
+month_risk.month_metrics = boom
+bad = run(9000.0)           # 这一轮算不出来
+month_risk.month_metrics = orig
+ok2 = run(9200.0)           # 恢复
+
+def pick(st):
+    return {k: st.get(k) for k in ("month_dd_pct", "l1_6_tripped", "month_dd_cap_pct", "month_dd_error")}
+
+print(json.dumps({"ok1": pick(ok1), "bad": pick(bad), "ok2": pick(ok2)}, ensure_ascii=False))
+`;
+
+  const py = process.env.PYTHON || "python";
+  const hasPython = spawnSync(py, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
+
+  it("失败轮清掉月度数值、恢复轮清掉错误标记（隔离临时目录实跑）", (t) => {
+    if (!hasPython) {
+      t.skip(`本机没有可用的 ${py} —— 这条锁没生效，CI 上必须能跑`);
+      return;
+    }
+    const f = tmpFile("driver_fail.py");
+    fs.writeFileSync(f, driver, "utf8");
+    const r = spawnSync(py, [f, path.join(ROOT, "scripts")], { encoding: "utf8" });
+    assert.equal(r.status, 0, `Python 驱动失败：${r.stderr?.slice(0, 400)}`);
+
+    const out = JSON.parse(r.stdout.trim()) as Record<
+      "ok1" | "bad" | "ok2",
+      { month_dd_pct: number | null; l1_6_tripped: boolean | null; month_dd_cap_pct: number | null; month_dd_error: string | null }
+    >;
+
+    assert.equal(out.ok1.month_dd_pct, 0.0, "首轮没有回撤，该写 0");
+    assert.equal(out.ok1.l1_6_tripped, false);
+    assert.equal(out.ok1.month_dd_error, null, "首轮不该有错误标记");
+
+    // 失败轮：数值必须变成「未知」，不能留着上一轮的 0 和 false
+    assert.equal(out.bad.month_dd_pct, null, "失败轮沿用了上一轮的回撤 —— 界面会把旧值当成当前值");
+    assert.equal(out.bad.l1_6_tripped, null, "失败轮沿用了上一轮的熔断判据");
+    assert.equal(out.bad.month_dd_cap_pct, null);
+    assert.ok(out.bad.month_dd_error?.includes("boom"), `失败原因没落盘：${out.bad.month_dd_error}`);
+
+    // 恢复轮：错误标记必须被清掉，否则界面会一直说「数据缺失」
+    assert.equal(out.ok2.month_dd_error, null, "一次失败后错误标记永久残留 —— 界面会一直显示「数据缺失」");
+    assert.equal(out.ok2.month_dd_pct, -8.0, `恢复轮回撤算错：${out.ok2.month_dd_pct}`);
+    assert.equal(out.ok2.l1_6_tripped, false);
   });
 });
 

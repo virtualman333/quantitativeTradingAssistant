@@ -13,6 +13,7 @@ import {
   capOf,
   leverageText,
   maxUsage,
+  monthRiskView,
   pctText,
   riskBudgetText,
   rowState,
@@ -54,6 +55,14 @@ const capRiskText = computed(() => (riskCap.value === null ? "—" : pctText(ris
 const leverLevel = computed(() => usageLevel(maxLeverUsage.value));
 const riskLevel = computed(() => usageLevel(maxRiskUsage.value));
 const approvalReasons = computed(() => brief.value?.approval_reasons || brief.value?.approvalReasons || []);
+
+// ── 月度风控（章程 L1-6）───────────────────────────────────
+// 本月还能不能开新仓，是全部硬约束里后果最重的一条（不是这笔亏了，是没有下一笔了）。
+// 它的判据在运行态里（runtime.json 由 archive_round.py 每轮写），而界面此前
+// 只用运行态显示过「本日止损」—— 这条 L1 修好之后一年多来第一次真会触发，
+// 却仍然只活在日志与邮件里。这里把它摆到用户面前。
+// 展示层不重算判据，只读 l1_6_tripped（口径见 ui/lib/riskbrief.js 的 monthRiskView）。
+const month = computed(() => monthRiskView(status.runtime));
 const DECISION_TEXT = { OPEN: "开仓", HOLD: "持有", CLOSE: "平仓", STANDBY: "观望" };
 const RISK_TEXT = { BASE: "基准", AGG: "激进", DEF: "防守" };
 const syncedAt = computed(() => {
@@ -230,6 +239,42 @@ onUnmounted(stopTick);
         </div>
       </div>
       <div v-else class="empty">暂无决策记录（跑一轮后产生）</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>
+      月度风控 · 章程 L1-6
+      <span class="hint" style="font-weight:400">月度回撤 ≥ {{ month.capText }} → 强制停止开新仓</span>
+      <span class="spacer"></span>
+      <span :class="['tag', month.tagCls]">{{ month.tagText }}</span>
+    </h2>
+    <div class="body">
+      <div class="rb-bars">
+        <div class="rb-item">
+          <div class="rb-k">当前月度回撤</div>
+          <div class="rb-v">
+            <b :class="month.barCls">{{ month.ddText }}</b>
+            <span class="rb-sub">/ 熔断线 {{ month.capText }}</span>
+          </div>
+          <div class="rb-track">
+            <i :class="['rb-fill', month.barCls]" :style="{ width: month.barPct + '%' }"></i>
+          </div>
+          <div :class="['rb-tip', month.barCls]">{{ month.ddTip }}</div>
+        </div>
+        <div class="rb-item">
+          <div class="rb-k">月度收益 / 目标</div>
+          <div class="rb-v">
+            <b>{{ month.pnlText }}</b>
+            <span class="rb-sub">/ 目标 {{ month.targetText }}</span>
+          </div>
+          <div class="rb-track">
+            <i :class="['rb-fill', 'lv-ok']" :style="{ width: month.progressBarPct + '%' }"></i>
+          </div>
+          <div class="rb-tip">{{ month.progressTip }}</div>
+        </div>
+      </div>
+      <div class="rb-sum">{{ month.summary }}</div>
     </div>
   </div>
 

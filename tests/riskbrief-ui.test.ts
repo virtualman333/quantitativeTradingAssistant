@@ -25,18 +25,22 @@ import assert from "node:assert/strict";
 import {
   ACTION_TEXT,
   LEVEL_TEXT,
+  MONTH_LEVEL_TEXT,
   NEAR_PCT,
   STATE_TEXT,
   barWidth,
   capOf,
+  ddUsage,
   leverageText,
   maxUsage,
+  monthRiskView,
   pctText,
   riskBudgetText,
   rowState,
   usageLevel,
   usageText,
 } from "../ui/lib/riskbrief.js";
+import { read, stripComments } from "./_src.ts";
 
 // ── 档位 ──────────────────────────────────────────────────────────────────
 
@@ -238,5 +242,142 @@ describe("riskbrief-ui · 与 src/riskbrief.ts 的数据流口径", () => {
     // 否则界面上显示的「/ 硬顶 5.0x」会是个假数字。
     assert.ok(Math.abs((capOf(brief.maxImpliedLeverage, leverUsage) as number) - MAX_LEVERAGE) < 1e-9);
     assert.ok(Math.abs((capOf(brief.maxRiskPct, riskUsage) as number) - MAX_RISK_PCT) < 1e-12);
+  });
+});
+
+// ── 月度风控（章程 L1-6）───────────────────────────────────────────────────
+//
+// 这一块守的是「今天还能不能开新仓」—— 全部硬约束里后果最重的一条
+// （不是这笔亏了，是没有下一笔了）。它此前只活在日志与邮件里，现在界面会显示它，
+// 而**显示错了不会报错**：一个误判成「正常」的月度回撤，会让人放心地继续下单。
+describe("riskbrief-ui · 月度风控（L1-6）", () => {
+  /** 真实运行态的样子（archive_round.py 落盘的字段名，snake_case） */
+  const rt = (o: Record<string, unknown> = {}) => ({
+    round_count: 12,
+    equity_usdt: 9700,
+    month_dd_pct: -3.5,
+    month_pnl_pct: 2.1,
+    month_start_equity: 10000,
+    month_peak_equity: 10050,
+    month_dd_cap_pct: -12.0,
+    monthly_target_pct: 10.0,
+    l1_6_tripped: false,
+    ...o,
+  });
+
+  it("熔断判据只认 l1_6_tripped —— 界面不自己拿回撤去比熔断线", () => {
+    assert.equal(monthRiskView(rt()).level, "ok");
+    assert.equal(monthRiskView(rt({ l1_6_tripped: true })).level, "tripped");
+    // 判据说熔断就该显示熔断（哪怕回撤数字看着还没到线）——边界只有一个实现
+    assert.equal(monthRiskView(rt({ l1_6_tripped: true, month_dd_pct: -2.0 })).tripped, true);
+  });
+
+  it("回撤与判据互相矛盾时如实报「数据不一致」，不替其中一方下结论", () => {
+    const v = monthRiskView(rt({ month_dd_pct: -13.4, l1_6_tripped: false }));
+    assert.equal(v.level, "inconsistent");
+    assert.ok(v.summary.includes("矛盾"), v.summary);
+    assert.equal(v.barCls, "lv-over");
+  });
+
+  it("80% 熔断线起是提醒；恰好到线（100%）仍只是提醒，越线才是异常", () => {
+    assert.equal(ddUsage(-9.6, -12), 80);
+    assert.equal(monthRiskView(rt({ month_dd_pct: -9.59 })).level, "ok");
+    assert.equal(monthRiskView(rt({ month_dd_pct: -9.6 })).level, "near");
+    assert.equal(monthRiskView(rt({ month_dd_pct: -12 })).level, "near");
+  });
+
+  it("「没有回撤数据」不许显示成 0.00% —— 那会被读成「安全」", () => {
+    const noDd = monthRiskView(rt({ month_dd_pct: undefined }));
+    assert.equal(noDd.ddText, "—");
+    assert.equal(noDd.usagePct, null);
+    assert.equal(noDd.barPct, 0);
+
+    // 0 是有效数据：确实没有回撤
+    const zero = monthRiskView(rt({ month_dd_pct: 0 }));
+    assert.equal(zero.ddText, "0.00%");
+    assert.equal(zero.usagePct, 0);
+    assert.equal(zero.level, "ok");
+  });
+
+  it("旧运行态没有 l1_6_tripped → unknown，并说清「重跑一轮就能看到」", () => {
+    const v = monthRiskView(rt({ l1_6_tripped: undefined }));
+    assert.equal(v.level, "unknown");
+    assert.equal(v.tagText, MONTH_LEVEL_TEXT.unknown);
+    assert.ok(v.summary.includes("重跑一轮"), v.summary);
+    // 空串 / 字符串 "false" 都不算布尔判据（宁可说未知，不要猜）
+    assert.equal(monthRiskView(rt({ l1_6_tripped: "" })).level, "unknown");
+    assert.equal(monthRiskView(rt({ l1_6_tripped: "false" })).level, "unknown");
+  });
+
+  it("本轮月度状态算不出来（month_dd_error）→ unknown 且带出原因", () => {
+    const v = monthRiskView(
+      rt({ month_dd_error: "ValueError: bad equity", month_dd_pct: undefined, l1_6_tripped: undefined })
+    );
+    assert.equal(v.level, "unknown");
+    assert.ok(v.summary.includes("ValueError: bad equity"), v.summary);
+  });
+
+  it("没有任何运行态时是 unknown，不是「正常」", () => {
+    assert.equal(monthRiskView(null).level, "unknown");
+    assert.equal(monthRiskView({}).level, "unknown");
+    assert.equal(monthRiskView(undefined).tagText, MONTH_LEVEL_TEXT.unknown);
+  });
+
+  it("回撤基准写清楚是「当月峰值」，否则用户拿月初权益对不上账", () => {
+    const v = monthRiskView(rt({ month_start_equity: 10000, month_peak_equity: 11000 }));
+    assert.ok(v.summary.includes("峰值 11000.00"), v.summary);
+    assert.ok(v.summary.includes("月初 10000.00"), v.summary);
+  });
+
+  it("零 NaN / 零 undefined：任何输入形态下展示字段都要有内容", () => {
+    const inputs = [
+      rt(),
+      rt({ l1_6_tripped: true }),
+      rt({ month_dd_pct: undefined }),
+      rt({ month_dd_cap_pct: undefined }),
+      rt({ monthly_target_pct: 0 }),
+      {},
+      { month_dd_pct: "abc", l1_6_tripped: false },
+      { month_dd_pct: -3, month_dd_cap_pct: null, l1_6_tripped: false },
+    ];
+    const fields = [
+      "tagText",
+      "tagCls",
+      "barCls",
+      "ddText",
+      "capText",
+      "pnlText",
+      "targetText",
+      "progressTip",
+      "ddTip",
+      "summary",
+    ] as const;
+    for (const input of inputs) {
+      const v = monthRiskView(input as never);
+      for (const k of fields) {
+        assert.ok(typeof v[k] === "string" && v[k].length > 0, `${k} 缺失（输入 ${JSON.stringify(input)}）`);
+        assert.ok(!v[k].includes("NaN"), `${k} 出现 NaN：${v[k]}`);
+        assert.ok(!v[k].includes("undefined"), `${k} 出现 undefined：${v[k]}`);
+      }
+      for (const k of ["barPct", "progressBarPct"] as const) {
+        assert.ok(Number.isFinite(v[k]) && v[k] >= 0 && v[k] <= 100, `${k} 越界：${v[k]}`);
+      }
+    }
+  });
+
+  it("界面侧不许再抄一份章程熔断线（阈值只能来自运行态的 month_dd_cap_pct）", () => {
+    const src = stripComments(read("ui/lib/riskbrief.js"));
+    assert.ok(
+      !/-12(\.0+)?\b/.test(src),
+      "ui/lib/riskbrief.js 里出现了章程熔断线的字面量 —— 改章程时必然会漂移"
+    );
+  });
+
+  it("总览页真的把它渲染出来了（不是算完放那儿没人看）", () => {
+    const vue = stripComments(read("ui/components/DashboardView.vue"));
+    assert.ok(vue.includes("monthRiskView"), "总览页没接月度风控视图");
+    assert.ok(vue.includes("month.ddText"), "回撤数值没渲染");
+    assert.ok(vue.includes("month.capText"), "熔断线没渲染");
+    assert.ok(vue.includes("month.tagText"), "熔断状态标签没渲染");
   });
 });
