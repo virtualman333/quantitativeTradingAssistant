@@ -13,6 +13,10 @@
  *   L1-10 禁亏损加仓
  * 其余 L1 在别处兜底：L1-3（live 只读）在 okx.ts，L1-8（clOrdId 幂等）在 genClOrdId，
  * L1-6（月度回撤熔断）在 main.ts 执行前。
+ *
+ * 两条下单路径都要过闸门：
+ *   - 主 Agent 路径：main.ts → riskbrief.checkIntent() → guardIntent()（按订单意图校验）
+ *   - 超短线路径：scalper.ts → guardScalperConfig()（按用户配置的参数校验，无订单意图）
  */
 import type { AccountSnapshot, GuardResult, TradeIntent } from "./types.js";
 
@@ -39,6 +43,50 @@ export function impliedLeverage(riskPct: number, slDist: number, refPrice: numbe
   if (!(refPrice > 0) || !(slDist > 0) || !(riskPct > 0)) return null;
   return riskPct / (slDist / refPrice);
 }
+/**
+ * 超短线（scalper）路径的 L1 参数闸门。
+ *
+ * 为什么需要一个独立的函数：`guardIntent()` 校验的是**订单意图** —— 风险比例、止损距离、
+ * 由三者反推的隐含杠杆；而超短线下单参数是**用户在界面上直接配置**的
+ * （`ScalperConfig.leverage` / `riskPct`），没有 LLM 意图可校验。
+ * 这条路径此前一个 L1 检查都没有：界面提供 10x 选项（提示语自己都写着「>5x 超过章程 L1-2 上限」），
+ * `riskPct` 允许填到 10%（L1-5 硬顶是 2.5%），而 `scalper.ts` 只把杠杆 clamp 到 20。
+ * 结果就是章程「触碰 L1 → 一律不执行」在**第二条会下真单的路径**上等于不存在。
+ *
+ * 上限一律取自本模块的 `MAX_LEVERAGE` / `MAX_RISK_PCT` —— 与 `guardIntent` 共用同一份常量，
+ * 不在这里重新写 5 / 2.5%。
+ */
+export function guardScalperConfig(cfg: { leverage?: unknown; riskPct?: unknown }): GuardResult {
+  const violations: string[] = [];
+  const warnings: string[] = [];
+
+  // L1-2 杠杆设定 ≤5x（章程原文：`swap_set_leverage` 设定值不得 > 5）
+  const lev = Number(cfg?.leverage);
+  if (!Number.isFinite(lev) || lev < 1) {
+    violations.push(`L1-2 杠杆设定「${String(cfg?.leverage ?? "")}」无效（须为 ≥1 的数）`);
+  } else if (lev > MAX_LEVERAGE) {
+    violations.push(`L1-2 杠杆设定 ${lev}x 超过 ${MAX_LEVERAGE}x 上限`);
+  }
+
+  // L1-5 单笔风险硬顶 ≤2.5%
+  const rp = Number(cfg?.riskPct);
+  if (!Number.isFinite(rp) || rp <= 0) {
+    violations.push(`L1-5 单笔风险比例「${String(cfg?.riskPct ?? "")}」无效（须为 >0 的数）`);
+  } else if (rp > MAX_RISK_PCT) {
+    violations.push(`L1-5 单笔风险 ${(rp * 100).toFixed(2)}% 超过 ${MAX_RISK_PCT * 100}% 硬顶`);
+  } else if (rp > APPROVAL_RISK_PCT) {
+    warnings.push(`单笔风险 ${(rp * 100).toFixed(2)}% > ${APPROVAL_RISK_PCT * 100}%，需人工确认（L2）`);
+  }
+
+  return {
+    ok: violations.length === 0,
+    violations,
+    warnings,
+    needsApproval: warnings.length > 0,
+    approvalReason: warnings.length ? warnings.join("；") : undefined,
+  };
+}
+
 const DEVIATION_FIELDS = ["baseline", "actual", "rationale", "falsifier", "riskDelta"] as const;
 
 /**

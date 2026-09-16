@@ -10,10 +10,14 @@
  * 止盈止损仍由凯利公式 + ATR 计算。false 时用规则（5 根 1m 斜率）判向。
  *
  * 独立循环由 main.ts 里单独的定时器驱动；开单记录追加到 data/scalper_trades.jsonl。
+ *
+ * ⚠ L1 闸门：本路径的开单参数来自用户界面（不是 LLM 意图），因此不经过 guardIntent()，
+ * 而是每轮先过 guardScalperConfig()（见 guard.ts）—— 两条路径用的是同一份上限常量。
  */
 import fs from "node:fs";
 import path from "node:path";
 import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
+import { guardScalperConfig } from "./guard.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
 import { strategyDir } from "./strategies.js";
@@ -360,6 +364,15 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
     return { ok: result === "opened", msg: reason, signal };
   };
 
+  // L1 硬闸门。超短线是「用户直接配置下单参数」的路径，与主 Agent 路径一样会下真单，
+  // 此前这条路径上一个 L1 检查都没有（界面可以配出 10x / 10% 并被直接执行）。
+  // 放在最前、连 --dry-run 之前：配置违规不是「这一轮不做」，而是配置本身不合法 ——
+  // 演练也照常报出来，免得用户以为一切正常。
+  const cfgGuard = guardScalperConfig(cfg);
+  if (!cfgGuard.ok) {
+    return finish("error", `触碰 L1 硬约束，拒绝开单：${cfgGuard.violations.join("；")}`);
+  }
+
   // 演练模式（--dry-run）与主轮次一致：不下单
   if (process.argv.includes("--dry-run")) {
     return finish("skipped", "[演练模式] 超短线不下单（--dry-run）");
@@ -429,7 +442,10 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const size = Number((Math.max(spec.minSz, Math.floor(rawSize / spec.lotSz) * spec.lotSz)).toFixed(10));
   if (!(size > 0)) return finish("error", `张数为 0（raw=${rawSize.toFixed(6)}）`, sig, judge);
 
-  const lever = Math.min(Math.max(1, cfg.leverage), 20);
+  // 杠杆直接取配置值：合法性（1 ≤ lever ≤ MAX_LEVERAGE）已由上面的 guardScalperConfig 保证。
+  // 这里此前是 `Math.min(Math.max(1, cfg.leverage), 20)` —— 那个 20 是章程外的数，
+  // 等于在代码里又开了一个「可以到 20x」的口子。
+  const lever = Number(cfg.leverage);
   const side = direction === "long" ? "buy" : "sell";
   const slPx = fmtTick(sl, spec.tickSz);
   const tpPx = fmtTick(tp, spec.tickSz);
@@ -480,10 +496,13 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
     fee: feeUsdt,
   });
 
+  // L2 提示（如「单笔风险 > 2% 需人工确认」）不阻断开单，但必须跟着这一轮的结论一起可见 ——
+  // 超短线是无人值守的循环，写进日志/战绩上一轮记录是唯一能让用户看到它的地方。
+  const warn = cfgGuard.warnings.length ? ` ⚠${cfgGuard.warnings.join("；")}` : "";
   const msg =
     `[超短线] ${cfg.inst} ${direction}(${judge}) ${side} ${size}张 @${price} ` +
     `杠杆${lever}x SL=${slPx} TP=${tpPx} RR=${sig.rr} 费${sig.fee_pct}% ` +
-    `OCO=${oco.ok} 回查=${confirmed}`;
+    `OCO=${oco.ok} 回查=${confirmed}${warn}`;
   return finish(ok ? "opened" : "error", msg, sig, judge);
 }
 

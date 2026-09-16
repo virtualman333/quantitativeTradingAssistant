@@ -528,6 +528,12 @@ ipcMain.handle("store:path", () => path.join(AGENT_ROOT, "data", "store.json"));
 // 超短线（独立板块）
 ipcMain.handle("scalper:get", () => withStore((s) => s.getScalperConfig()));
 ipcMain.handle("scalper:update", (_e, patch) => withStore((s) => s.updateScalperConfig(patch)));
+/**
+ * 超短线配置的 L1 校验（界面保存前 / 载入后自检用）。口径与开单时的闸门是**同一份**
+ * （`guard.ts` 的 guardScalperConfig），并把上限值一并回给界面 ——
+ * 界面因此不需要再写一份 5x / 2.5%。
+ */
+ipcMain.handle("scalper:check", (_e, cfg) => checkScalperConfigSafe(cfg));
 ipcMain.handle("scalper:once", async () => {
   try {
     const cfg = await withStore((s) => s.getScalperConfig());
@@ -884,7 +890,33 @@ function stopScalperLoop() {
   return { ok: true, msg: "超短线循环已停止" };
 }
 
-ipcMain.handle("scalper:start", () => startScalperLoop());
+/**
+ * 超短线配置的 L1 裁决 —— 唯一来源是 `guard.ts` 的 guardScalperConfig（与开单时的闸门同一份）。
+ * 加载不出来时**不放行**：这是风控闸门，宁可拦住也不要静默通过。
+ */
+async function checkScalperConfigSafe(cfg: unknown) {
+  try {
+    const mod = await loadDist<any>("guard.js");
+    const g = mod.guardScalperConfig(cfg ?? {});
+    return {
+      ok: !!g.ok,
+      violations: g.violations ?? [],
+      warnings: g.warnings ?? [],
+      limits: { maxLeverage: mod.MAX_LEVERAGE, maxRiskPct: mod.MAX_RISK_PCT },
+    };
+  } catch (e) {
+    return { ok: false, violations: [`无法加载风控模块（请先 npm run build）：${String(e).slice(0, 160)}`], warnings: [], limits: null };
+  }
+}
+
+// scalper:start 起的是**无人值守循环**：配置违规时循环只会每轮报错，不如在用户点下去的那一刻就说清楚
+// （开单时仍会再拦一次 —— 两道都在，是因为这里挡的是「启动」，那里挡的是「下单」）。
+ipcMain.handle("scalper:start", async () => {
+  const cfg = await withStore((s) => s.getScalperConfig());
+  const g = await checkScalperConfigSafe(cfg);
+  if (!g.ok) return { ok: false, msg: `配置触碰章程 L1 硬约束，未启动：${g.violations.join("；")}` };
+  return startScalperLoop();
+});
 ipcMain.handle("scalper:stop", () => stopScalperLoop());
 ipcMain.handle("scalper:status", () => ({ running: !!scalperLoopTimer }));
 

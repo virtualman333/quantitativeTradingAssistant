@@ -25,7 +25,41 @@ watch(
   { immediate: true }
 );
 
-const LEVERAGES = [1, 2, 3, 5, 10];
+// ── L1 闸门（章程硬约束）──────────────────────────────────
+// 界面**不写** 5x / 2.5% 这两个数：上限的唯一来源是主进程 guard.ts 的
+// MAX_LEVERAGE / MAX_RISK_PCT（与开单时的闸门、与主 Agent 的 guardIntent 都是同一份）。
+// 界面只拿它的裁决和它给的上限值来渲染与拦截 —— 写出第二份，早晚会与章程漂开。
+const guardVerdict = ref(null);
+const limits = computed(() => guardVerdict.value?.limits ?? null);
+
+async function refreshGuard() {
+  const lev = Number(form.value?.leverage);
+  const rp = Number(form.value?.riskPct);
+  // 配置还没载入（form 初始为 {}）时不问：否则会拿 NaN 去校验，
+  // 页面会先闪一条「配置无效」的红色告警，随后又自己消失。
+  if (!Number.isFinite(lev) || !Number.isFinite(rp)) {
+    guardVerdict.value = null;
+    return;
+  }
+  try {
+    guardVerdict.value = await api.scalperCheck({ leverage: lev, riskPct: rp });
+  } catch {
+    guardVerdict.value = null;
+  }
+}
+watch(() => [form.value.leverage, form.value.riskPct], refreshGuard, { immediate: true });
+
+/** 杠杆选项 = 1..章程上限 + （存量配置已超限时仍显示当前值，否则下拉会变成空白，用户看不出问题出在哪） */
+const leverageOptions = computed(() => {
+  const max = Number(limits.value?.maxLeverage);
+  const cur = Number(form.value.leverage);
+  const list = [];
+  for (let l = 1; l <= max; l++) list.push(l);
+  if (Number.isFinite(cur) && cur >= 1 && !list.includes(cur)) list.push(cur);
+  return list;
+});
+const maxLeverageText = computed(() => (limits.value ? `${limits.value.maxLeverage}x` : "…"));
+const maxRiskPctText = computed(() => (limits.value ? `${limits.value.maxRiskPct * 100}%` : "…"));
 
 const dateFrom = ref("");
 const dateTo = ref("");
@@ -105,28 +139,28 @@ const judgeText = (j) => JUDGE_TEXT[j] || String(j ?? "未标注");
 
 async function save() {
   fieldErr.value = "";
-  const lev = Number(form.value.leverage);
-  if (!Number.isFinite(lev) || lev < 1 || lev > 20) {
-    fieldErr.value = "杠杆需在 1–20 之间";
-    return;
-  }
-  const riskPct = Number(form.value.riskPct);
-  if (!Number.isFinite(riskPct) || riskPct <= 0 || riskPct > 0.1) {
-    fieldErr.value = "单笔金额比例需在 0–10% 之间";
+  const patch = {
+    inst: String(form.value.inst || "").trim().toUpperCase() || "BTC-USDT-SWAP",
+    leverage: Math.round(Number(form.value.leverage)),
+    riskPct: Number(form.value.riskPct),
+    atrMult: Number(form.value.atrMult) || 2.5,
+    feeRate: Number(form.value.feeRate) || 0.0005,
+    intervalSec: Math.max(5, Number(form.value.intervalSec) || 60),
+    useLlm: !!form.value.useLlm,
+    closeOnReversal: !!form.value.closeOnReversal,
+  };
+  // L1 闸门：先问主进程（唯一来源是 guard.ts），不通过就不保存。
+  // 这里以前自己判「杠杆 ≤20 / 比例 ≤10%」，那是第二份、且比章程宽得多的口径 ——
+  // 界面放行的配置，开单时会被拒（或更糟：以前根本不拒，直接按 10x 下单）。
+  const v = await api.scalperCheck(patch);
+  guardVerdict.value = v;
+  if (!v?.ok) {
+    fieldErr.value = (v?.violations || ["配置未通过章程 L1 校验"]).join("；");
     return;
   }
   saving.value = true;
   try {
-    await api.scalperUpdate({
-      inst: String(form.value.inst || "").trim().toUpperCase() || "BTC-USDT-SWAP",
-      leverage: Math.round(lev),
-      riskPct,
-      atrMult: Number(form.value.atrMult) || 2.5,
-      feeRate: Number(form.value.feeRate) || 0.0005,
-      intervalSec: Math.max(5, Number(form.value.intervalSec) || 60),
-      useLlm: !!form.value.useLlm,
-      closeOnReversal: !!form.value.closeOnReversal,
-    });
+    await api.scalperUpdate(patch);
     await reload();
     toastOk("已保存");
   } catch (e) {
@@ -277,6 +311,12 @@ function fmtTs(iso) {
       <span :class="['tag', form.enabled ? 't-on' : 't-off']">{{ form.enabled ? "已启用" : "已停用" }}</span>
     </h2>
     <div class="body">
+      <div v-if="guardVerdict && !guardVerdict.ok" class="alert err" style="margin:0 0 10px">
+        ⛔ 当前配置触碰章程 L1 硬约束，超短线已停止开单：{{ guardVerdict.violations.join("；") }}
+      </div>
+      <div v-else-if="guardVerdict && guardVerdict.warnings.length" class="alert" style="margin:0 0 10px">
+        ⚠ {{ guardVerdict.warnings.join("；") }}
+      </div>
       <div class="row">
         <label>实盘策略</label>
         <span class="tag t-info">{{ currentStratName }}</span>
@@ -309,14 +349,14 @@ function fmtTs(iso) {
       <div class="row">
         <label>杠杆倍数</label>
         <select v-model.number="form.leverage" style="max-width:120px">
-          <option v-for="l in LEVERAGES" :key="l" :value="l">{{ l }}x</option>
+          <option v-for="l in leverageOptions" :key="l" :value="l">{{ l }}x</option>
         </select>
-        <span class="hint">>5x 超过章程 L1-2 上限，高风险</span>
+        <span class="hint">章程 L1-2：杠杆设定 ≤ {{ maxLeverageText }}（硬约束，超限将拒绝开单）</span>
       </div>
       <div class="row">
         <label>单笔金额比例</label>
-        <input v-model.number="form.riskPct" type="number" step="0.001" min="0.001" max="0.1" style="max-width:120px" />
-        <span class="hint">总仓位的比例（默认 0.01 = 1%）</span>
+        <input v-model.number="form.riskPct" type="number" step="0.001" min="0.001" style="max-width:120px" />
+        <span class="hint">总仓位的比例（默认 0.01 = 1%）；章程 L1-5 硬顶 {{ maxRiskPctText }}</span>
       </div>
       <div class="row">
         <label>ATR 系数</label>

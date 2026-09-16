@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("api", {
   // 超短线（独立板块）
   scalperGet: () => safeInvoke("scalper:get"),
   scalperUpdate: (p: unknown) => safeInvoke("scalper:update", p),
+  scalperCheck: (p: unknown) => safeInvoke("scalper:check", p),
   scalperOnce: () => safeInvoke("scalper:once"),
   scalperOverview: () => safeInvoke("scalper:overview"),
   scalperRange: (from: string, to: string) => safeInvoke("scalper:range", from, to),
