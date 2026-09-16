@@ -5,6 +5,7 @@
  */
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { api } from "../../lib/api.js";
+import { fmtPrice } from "../../lib/format.js";
 import KlineChart from "../KlineChart.vue";
 
 const props = defineProps({ params: { type: Object, default: () => ({}) } });
@@ -86,13 +87,7 @@ const changePct = computed(() => {
 /** 明细表：最新在前，只取最近 25 根，用来填满窗口下半部分 */
 const rows = computed(() => candles.value.slice(-25).reverse());
 
-function fmtPrice(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
-  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+/** 价格格式化统一走 lib/format.js 的 fmtPrice（别在本文件再写一份） */
 function fmtVol(v) {
   const n = Number(v) || 0;
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";

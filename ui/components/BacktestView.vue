@@ -8,7 +8,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { store, reload } from "../store/index.js";
 import { api, errText } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
-import { fmtNum } from "../lib/format.js";
+import { fmtNum, fmtPrice } from "../lib/format.js";
 
 // ── 自定义策略库（多策略 / LLM 生成 / 校验 / 应用实盘） ──
 const strategies = ref([]); // StrategyMeta[]
@@ -1371,10 +1371,10 @@ onBeforeUnmount(() => {
               <td><span :class="['tag', t.side === 'short' ? 't-sell' : 't-buy']">{{ t.side === "short" ? "空" : "多" }}</span></td>
               <td class="nowrap">{{ t.entryTs }}</td>
               <td class="nowrap">{{ t.exitTs }}</td>
-              <td>{{ t.entry }}</td>
-              <td>{{ t.exit }}</td>
-              <td>{{ t.sl }}</td>
-              <td>{{ t.tp }}</td>
+              <td>{{ fmtPrice(t.entry) }}</td>
+              <td>{{ fmtPrice(t.exit) }}</td>
+              <td>{{ fmtPrice(t.sl) }}</td>
+              <td>{{ fmtPrice(t.tp) }}</td>
               <td>{{ t.bars }}</td>
               <td>{{ t.reason }}</td>
               <td :class="t.pnlUsdt >= 0 ? 'up' : 'down'">{{ fmtNum(t.pnlUsdt, 2) }}</td>
@@ -1524,10 +1524,10 @@ onBeforeUnmount(() => {
               <td><span :class="['tag', t.side === 'short' ? 't-sell' : 't-buy']">{{ t.side === "short" ? "空" : "多" }}</span></td>
               <td class="nowrap">{{ t.entryTs }}</td>
               <td class="nowrap">{{ t.exitTs }}</td>
-              <td>{{ t.entry }}</td>
-              <td>{{ t.exit }}</td>
-              <td>{{ t.sl }}</td>
-              <td>{{ t.tp }}</td>
+              <td>{{ fmtPrice(t.entry) }}</td>
+              <td>{{ fmtPrice(t.exit) }}</td>
+              <td>{{ fmtPrice(t.sl) }}</td>
+              <td>{{ fmtPrice(t.tp) }}</td>
               <td>{{ t.bars }}</td>
               <td>{{ t.reason }}</td>
               <td :class="t.pnlUsdt >= 0 ? 'up' : 'down'">{{ fmtNum(t.pnlUsdt, 2) }}</td>

@@ -6,7 +6,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { api } from "../lib/api.js";
 import { openKlineWin } from "../lib/nav.js";
-import { fmtNum, signCls } from "../lib/format.js";
+import { fmtNum, fmtPrice, signCls } from "../lib/format.js";
 import KlineChart from "./KlineChart.vue";
 
 const all = ref([]);
@@ -72,13 +72,7 @@ function fmtVol(v) {
   if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
   return n.toFixed(0);
 }
-function fmtPrice(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
-  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+// 价格格式化统一走 lib/format.js 的 fmtPrice（别在本文件再写一份）
 function rankText(r) {
   return r >= 9999 ? "—" : `#${r}`;
 }

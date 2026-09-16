@@ -5,6 +5,7 @@
  * 渲染：蜡烛 + 成交量 + MA5/MA10 + 最新价虚线 + 悬停十字光标读数
  */
 import { computed, ref } from "vue";
+import { fmtPrice } from "../lib/format.js";
 
 const props = defineProps({
   candles: { type: Array, default: () => [] },
@@ -21,14 +22,7 @@ const CHART_H = H - PAD_T - VOL_H - GAP - 20;
 
 const hoverIdx = ref(-1);
 
-/** 价格自适应小数位：BTC 给 2 位，SHIB 这类极小数给足有效位 */
-function fmtPrice(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
-  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+/** 价格格式化统一走 lib/format.js 的 fmtPrice（别在本文件再写一份） */
 function fmtVol(v) {
   const n = Number(v) || 0;
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";

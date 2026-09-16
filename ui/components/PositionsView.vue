@@ -6,7 +6,7 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { api } from "../lib/api.js";
 import { toastErr } from "../lib/feedback.js";
-import { fmtNum, signCls } from "../lib/format.js";
+import { fmtNum, fmtPrice, signCls } from "../lib/format.js";
 
 const streaming = ref(false);
 const lastSync = ref("");
@@ -24,6 +24,8 @@ const accounts = computed(() => schema.value?.accounts || []);
 const positions = computed(() => schema.value?.positions || []);
 const orders = computed(() => schema.value?.orders || []);
 
+/** 金额/张数：固定 2 位（USDT 口径）。价格一律走 fmtPrice —— 价格 < 0.005 的标的一旦用
+ *  fmtNum 就会显示成 0.00（实测 OKX 当日 30 个标的），强平价/触发价也不例外。 */
 function fmt(x) {
   return x == null ? "—" : fmtNum(x);
 }
@@ -279,8 +281,8 @@ onUnmounted(() => {
               <td>{{ p.market }}</td>
               <td><span :class="['tag', sideTag(p.side).cls]">{{ sideTag(p.side).t }}</span></td>
               <td>{{ fmt(p.size) }}</td>
-              <td>{{ fmt(p.entryPrice) }}</td>
-              <td>{{ fmt(p.markPrice) }}</td>
+              <td>{{ fmtPrice(p.entryPrice) }}</td>
+              <td>{{ fmtPrice(p.markPrice) }}</td>
               <td>{{ fmt(p.notionalUsd) }}</td>
               <td>
                 <div class="weight">
@@ -291,7 +293,7 @@ onUnmounted(() => {
               <td :class="signCls(p.upl)">{{ p.upl >= 0 ? "+" : "" }}{{ fmt(p.upl) }}</td>
               <td :class="signCls(p.uplRatio)">{{ pct(p.uplRatio) }}</td>
               <td>{{ p.leverage == null ? "—" : p.leverage + "x" }}</td>
-              <td>{{ fmt(p.liqPrice) }}</td>
+              <td>{{ fmtPrice(p.liqPrice) }}</td>
               <td :class="liqCls(liqDist(p))">{{ liqDist(p) == null ? "—" : (liqDist(p) * 100).toFixed(1) + "%" }}</td>
               <td>{{ p.marginMode || "—" }}</td>
             </tr>
@@ -316,8 +318,8 @@ onUnmounted(() => {
             <td>{{ o.ordType }}</td>
             <td>{{ o.side }}</td>
             <td>{{ fmt(o.size) }}</td>
-            <td>{{ fmt(o.slTrigger) }}</td>
-            <td>{{ fmt(o.tpTrigger) }}</td>
+            <td>{{ fmtPrice(o.slTrigger) }}</td>
+            <td>{{ fmtPrice(o.tpTrigger) }}</td>
             <td><span :class="['tag', stateTag(o.state)]">{{ o.state }}</span></td>
           </tr>
         </tbody>

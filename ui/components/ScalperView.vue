@@ -4,7 +4,7 @@ import { ref, computed, watch, onMounted, onActivated, onBeforeUnmount } from "v
 import { store, reload } from "../store/index.js";
 import { api, errText } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
-import { fmtNum } from "../lib/format.js";
+import { fmtNum, fmtPrice } from "../lib/format.js";
 import { goTab } from "../lib/nav.js";
 import { sparkline } from "../lib/sparkline.js";
 
@@ -514,8 +514,8 @@ function fmtTs(iso) {
             <td><b>{{ p.instId }}</b></td>
             <td><span :class="['tag', p.posSide === 'short' ? 't-sell' : 't-buy']">{{ p.posSide === "short" ? "空" : "多" }}</span></td>
             <td>{{ p.pos }}</td>
-            <td>{{ p.avgPx }}</td>
-            <td>{{ p.markPx }}</td>
+            <td>{{ fmtPrice(p.avgPx) }}</td>
+            <td>{{ fmtPrice(p.markPx) }}</td>
             <td>{{ p.lever }}x</td>
             <td :class="Number(p.upl) >= 0 ? 'up' : 'down'">{{ fmtNum(p.upl, 4) }}</td>
           </tr>
@@ -551,9 +551,9 @@ function fmtTs(iso) {
             <td><b>{{ t.inst }}</b></td>
             <td><span :class="['tag', t.direction === 'short' ? 't-sell' : 't-buy']">{{ t.direction === "short" ? "空" : "多" }}</span></td>
             <td><span :class="['tag', t.judge === 'llm' ? 't-info' : 't-hold']">{{ t.judge === "llm" ? "LLM" : "规则" }}</span></td>
-            <td>{{ t.entry }}</td>
-            <td>{{ t.sl }}</td>
-            <td>{{ t.tp }}</td>
+            <td>{{ t.entry == null ? "—" : fmtPrice(t.entry) }}</td>
+            <td>{{ t.sl == null ? "—" : fmtPrice(t.sl) }}</td>
+            <td>{{ t.tp == null ? "—" : fmtPrice(t.tp) }}</td>
             <td>{{ t.size }}</td>
             <td>{{ t.leverage }}x</td>
             <td>{{ fmtNum(t.notional, 2) }}</td>
@@ -561,7 +561,7 @@ function fmtTs(iso) {
             <td>{{ ((t.feeRate ?? 0) * 100).toFixed(3) }}%</td>
             <td>{{ fmtNum(t.fee ?? 0, 4) }}</td>
             <td><span :class="['tag', t.status === 'open' ? 't-on' : 't-off']">{{ t.status === "open" ? "持仓中" : "已平仓" }}</span></td>
-            <td>{{ t.closePrice ?? "—" }}</td>
+            <td>{{ t.closePrice == null ? "—" : fmtPrice(t.closePrice) }}</td>
             <td :class="t.pnl == null ? '' : t.pnl >= 0 ? 'up' : 'down'">{{ t.pnl == null ? "—" : fmtNum(t.pnl, 4) }}</td>
             <td :class="t.netPnl == null ? '' : t.netPnl >= 0 ? 'up' : 'down'">{{ t.netPnl == null ? "—" : fmtNum(t.netPnl, 4) }}</td>
           </tr>
@@ -586,7 +586,7 @@ function fmtTs(iso) {
               <span v-else>—</span>
             </td>
             <td>{{ t.strength || "—" }}</td>
-            <td>{{ t.entry_ref ?? "—" }}</td>
+            <td>{{ t.entry_ref == null ? "—" : fmtPrice(t.entry_ref) }}</td>
             <td>
               <span v-if="t.judge" :class="['tag', t.judge === 'llm' ? 't-info' : 't-hold']">{{ t.judge === "llm" ? "LLM" : "规则" }}</span>
               <span v-else>—</span>

@@ -4,7 +4,7 @@ import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } fro
 import { status } from "../store/index.js";
 import { api } from "../lib/api.js";
 import { goTab, openKlineWin } from "../lib/nav.js";
-import { fmtNum, signCls, STANCE_TEXT } from "../lib/format.js";
+import { fmtNum, fmtPrice, signCls, STANCE_TEXT } from "../lib/format.js";
 import {
   ACTION_TEXT,
   LEVEL_TEXT,
@@ -80,13 +80,7 @@ const top5 = computed(() =>
     .sort((a, b) => a.rank - b.rank || b.volUsd - a.volUsd) // 市值梯队优先，梯队内按成交额
     .slice(0, 5)
 );
-function fmtPrice(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 8;
-  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+// 价格格式化统一走 lib/format.js 的 fmtPrice（本文件与行情页/K线图此前各有一份逐字相同的副本）
 /** 点交易对 → 独立窗口看 K 线（不打断当前页） */
 function openKlineOf(t) {
   openKlineWin(t.instId);
@@ -193,8 +187,8 @@ onUnmounted(stopTick);
               <span :class="['tag', p.side === 'long' ? 't-buy' : 't-sell']">{{ p.side === "long" ? "多" : "空" }}</span>
             </td>
             <td>{{ p.size_contracts }}</td>
-            <td>{{ fmtNum(p.entry) }}</td>
-            <td>{{ fmtNum(p.mark) }}</td>
+            <td>{{ fmtPrice(p.entry) }}</td>
+            <td>{{ fmtPrice(p.mark) }}</td>
             <td>{{ p.leverage }}x</td>
             <td :class="signCls(p.upl)">{{ p.upl >= 0 ? "+" : "" }}{{ fmtNum(p.upl) }}</td>
           </tr>
