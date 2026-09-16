@@ -23,9 +23,22 @@ import type { AccountSnapshot, GuardResult, TradeIntent } from "./types.js";
  * 格式语义的归一化属于模型职责，不硬编码进脚本。
  */
 const USDT_RE = /USDT/i;
-const MAX_RISK_PCT = 0.025;      // L1-5 单笔风险 ≤2.5%
-const APPROVAL_RISK_PCT = 0.02;  // 超过 2% 需人工确认（L2 基准）
-const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
+export const MAX_RISK_PCT = 0.025;      // L1-5 单笔风险 ≤2.5%
+export const APPROVAL_RISK_PCT = 0.02;  // 超过 2% 需人工确认（L2 基准）
+export const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
+
+/**
+ * 由「风险比例 + 止损距离 + 现价」反推隐含杠杆（口径即 L1-2）：
+ *   名义仓位占权益 = 风险比例 ÷ (止损距离 ÷ 现价)
+ * 三个参数任一非正时返回 null —— 缺数据就不要猜。
+ *
+ * 单独抽出来是为了让每轮体检摘要（riskbrief.ts）与硬校验共用同一份口径：
+ * 同一个公式写两遍，早晚会漂。
+ */
+export function impliedLeverage(riskPct: number, slDist: number, refPrice: number): number | null {
+  if (!(refPrice > 0) || !(slDist > 0) || !(riskPct > 0)) return null;
+  return riskPct / (slDist / refPrice);
+}
 const DEVIATION_FIELDS = ["baseline", "actual", "rationale", "falsifier", "riskDelta"] as const;
 
 /**
@@ -79,12 +92,10 @@ export function guardIntent(
       warnings.push(`${it.inst} 风险 ${(rp * 100).toFixed(2)}% > 2%，需人工确认`);
     }
 
-    // L1-2 杠杆 ≤5（有现价时反推：lever = riskPct / (slDist / refPrice)）
-    if (refPrice > 0 && it.slDist && it.slDist > 0 && rp > 0) {
-      const lever = rp / (it.slDist / refPrice);
-      if (lever > MAX_LEVERAGE) {
-        violations.push(`L1-2 ${it.inst} 隐含杠杆 ${lever.toFixed(1)}x 超过 5x`);
-      }
+    // L1-2 杠杆 ≤5（有现价时反推，口径见 impliedLeverage）
+    const lever = impliedLeverage(rp, Number(it.slDist), refPrice);
+    if (lever !== null && lever > MAX_LEVERAGE) {
+      violations.push(`L1-2 ${it.inst} 隐含杠杆 ${lever.toFixed(1)}x 超过 5x`);
     }
 
     // L1-9 禁双向、L1-10 禁亏损加仓

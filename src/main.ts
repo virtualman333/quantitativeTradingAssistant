@@ -20,7 +20,7 @@ import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, conf
 import { AgentState, buildGraphWithMcp, makeStoreLlmProvider } from "./graph.js";
 import { reflectExperts } from "./experts.js";
 import { reloadStore, getSettings } from "./store.js";
-import { guardIntent } from "./guard.js";
+import { checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
 import { alert } from "./alert.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
@@ -367,19 +367,31 @@ async function runRound() {
 
   // ⑤ 执行（副作用在图外）——先过 Guard（L1 硬约束），违规则硬拦截
   const execResults: string[] = [];
+  // 逐笔体检结果留到循环外汇总（归档与告警都要用）
+  const riskChecks: IntentCheck[] = [];
   let seq = 0;
   for (const it of decision.intents ?? []) {
     if (it.action === "hold") {
       execResults.push(`持有 ${it.inst}: ${it.reason}`);
       continue;
     }
-    const g = guardIntent(it, snap, refPriceOf(mkt.data, it.inst), knownInsts);
-    if (!g.ok) {
-      const msg = `⛔ 风控拦截 ${it.inst}/${it.action}: ${g.violations.join("；")}`;
+    const c = checkIntent(it, snap, refPriceOf(mkt.data, it.inst), knownInsts);
+    riskChecks.push(c);
+    if (!c.ok) {
+      const msg = `⛔ 风控拦截 ${it.inst}/${it.action}: ${c.violations.join("；")}`;
       execResults.push(msg);
       log(msg);
-      await alert("风控拦截告警", `本轮决策被 Guard 拦截：\n${g.violations.join("\n")}\n说明 LLM 输出了违规意图，请关注模型决策质量。`);
+      await alert("风控拦截告警", `本轮决策被 Guard 拦截：\n${c.violations.join("\n")}\n说明 LLM 输出了违规意图，请关注模型决策质量。`);
       continue;
+    }
+    // L2 基准：单笔风险 >2% 需人工确认。guard 早就算出了这个信号，
+    // 但此前这里只判了 ok，warnings 被直接丢掉 —— 那条约束等于没落地。
+    // 这里补上留痕（日志 + 邮件 + 归档），暂不改动执行本身：
+    // 是否要真的挂起等人工确认，是策略层的决定，不该由一次重构顺手改掉。
+    if (c.warnings.length) {
+      const msg = `⚠ 风控提示 ${it.inst}/${it.action}: ${c.warnings.join("；")}`;
+      execResults.push(msg);
+      log(msg);
     }
     seq++;
     const r = it.action === "close"
@@ -388,6 +400,16 @@ async function runRound() {
     execResults.push(`${it.inst}/${it.action}: ${r.ok ? "✅" : "❌"} ${r.msg}`);
   }
   for (const r of execResults) log(`执行 ${r}`);
+
+  // 本轮风控体检：一行摘要进日志，需要人工确认时留一条告警（同标题 24h 去重）
+  const riskBrief = summarizeRiskBrief(riskChecks);
+  log(riskBrief.summary);
+  if (riskBrief.needsApproval) {
+    await alert(
+      "风控人工确认提示（L2）",
+      `${riskBrief.summary}\n\n${riskBrief.approvalReasons.join("\n")}\n\n章程 L2：单笔风险超过 2% 需人工确认。本轮按原计划执行，此处仅留痕提示。`
+    );
+  }
 
   // ⑤ 归档（只追加）
   try {
@@ -412,6 +434,9 @@ async function runRound() {
       experts: (final.opinions ?? []).map((o: { expert: string; stance: string; summary: string }) => ({ expert: o.expert, stance: o.stance, summary: o.summary })),
       conflicts: final.conflicts ?? [],
       exec_results: execResults,
+      // 本轮风控体检（逐笔隐含杠杆 / 风险预算用量 / 是否有 L2 人工确认项），
+      // 归档后复盘与界面都能直接读，不必再去日志里翻
+      risk_brief: riskBrief,
     };
     fs.mkdirSync(STATE, { recursive: true });
     fs.writeFileSync(path.join(STATE, `round_input_${roundId}.json`), JSON.stringify(payload, null, 2), "utf8");
