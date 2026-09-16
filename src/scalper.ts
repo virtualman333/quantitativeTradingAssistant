@@ -17,6 +17,7 @@ import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, con
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
 import { strategyDir } from "./strategies.js";
+import { computeStats, netPnlOf, type ScalperStats } from "./scalperstats.js";
 
 export interface ScalperSignal {
   inst: string;
@@ -75,6 +76,12 @@ export interface ScalperTrade {
   margin: number;    // 保证金（USDT）
   fee: number;       // 预估双边手续费（USDT）
   netPnl?: number;   // 净盈亏（已扣手续费）
+  /**
+   * 平仓结果是否已同步（是否真的算出了 pnl）。
+   * 取不到平仓价时必须显式写 `false` —— 否则这条记录与「刚好打平」在 JSON 里
+   * 长得一模一样，汇总处一律按 0 兜底就把结果算错了（见 scalperstats.ts）。
+   */
+  pnlSynced?: boolean;
 }
 
 export interface ScalperTick {
@@ -97,6 +104,10 @@ export interface ScalperOverview {
   realizedNetPnl: number;
   totalFee: number;
   unrealizedPnl: number;
+  /** 已平仓但未同步到平仓价的笔数（净盈亏未知，**未计入以上任何金额**） */
+  unsettledCount: number;
+  /** 战绩统计（胜率 / 盈亏比 / 期望 / 回撤 / 规则-LLM 对比 / 跳过原因） */
+  stats: ScalperStats;
 }
 
 const SCALPER_LOG = path.join(AGENT_ROOT, "data", "scalper_trades.jsonl");
@@ -236,6 +247,33 @@ async function fetchLastPrice(inst: string): Promise<number | null> {
 }
 
 /** 平仓检测：同一标的只保留「最新且方向匹配当前持仓」的 open 记录，其余用当前价近似平仓 */
+/**
+ * 结算一笔平仓记录：定平仓价 + 算净盈亏。
+ *
+ * 【为什么必须显式写 pnlSynced】取不到平仓价时这里只能留下 `closePrice: undefined`。
+ * 若不加标记，这条记录在 JSON 里与「刚好打平」无法区分，汇总处一律 `?? 0` 兜底
+ * 就会把真实结果算错（不报错、不提示）。标 `false` 后，统计层与界面能把它剔出
+ * 样本并如实告知用户。
+ *
+ * 本函数是「单笔结算」（syncTrades）与「开新单前平旧仓」（closeOpenRecords）
+ * 的**唯一实现** —— 此前两处各写了一遍同样的算式，是典型的「同一事实两处写法
+ * 必然漂移」陷阱。
+ *
+ * （导出仅供测试直接验证「取不到平仓价时必须留痕」这一行为。）
+ */
+export function settleTrade(t: ScalperTrade, close: number | null): void {
+  t.status = "closed";
+  t.closePrice = close ?? undefined;
+  if (close == null) {
+    t.pnlSynced = false;
+    return;
+  }
+  const dir = t.direction === "long" ? 1 : -1;
+  t.pnl = Number(((close - t.entry) * t.size * t.ctVal * dir).toFixed(4));
+  t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
+  t.pnlSynced = true;
+}
+
 async function syncTrades(): Promise<ScalperTrade[]> {
   const trades = readTrades();
   const open = trades.filter((t) => t.status === "open");
@@ -266,14 +304,7 @@ async function syncTrades(): Promise<ScalperTrade[]> {
 
   let changed = false;
   const closeRecord = async (t: ScalperTrade): Promise<void> => {
-    t.status = "closed";
-    const close = await fetchLastPrice(t.inst);
-    t.closePrice = close ?? undefined;
-    if (close != null) {
-      const dir = t.direction === "long" ? 1 : -1;
-      t.pnl = Number(((close - t.entry) * t.size * t.ctVal * dir).toFixed(4));
-      t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
-    }
+    settleTrade(t, await fetchLastPrice(t.inst));
     changed = true;
   };
 
@@ -299,15 +330,7 @@ async function closeOpenRecords(inst: string): Promise<void> {
   const open = trades.filter((t) => t.status === "open" && t.inst === inst);
   if (!open.length) return;
   const close = await fetchLastPrice(inst);
-  for (const t of open) {
-    t.status = "closed";
-    t.closePrice = close ?? undefined;
-    if (close != null) {
-      const dir = t.direction === "long" ? 1 : -1;
-      t.pnl = Number(((close - t.entry) * t.size * t.ctVal * dir).toFixed(4));
-      t.netPnl = Number(((t.pnl ?? 0) - (t.fee ?? 0)).toFixed(4));
-    }
-  }
+  for (const t of open) settleTrade(t, close);
   writeTrades(trades);
 }
 
@@ -478,13 +501,26 @@ export async function getScalperOverview(): Promise<ScalperOverview> {
     /* ignore */
   }
   const closed = trades.filter((t) => t.status === "closed");
+  // 净盈亏口径唯一来源 = netPnlOf()。未同步到平仓价的单返回 null：既不计入金额，
+  // 也不冒充 0，只单独计数 —— 这样界面才能如实说「有几个数没算进来」。
+  // （对既有台账而言总和数值不变：缺结果的单原本贡献的就是 0。）
+  const realizedNetPnl = closed.reduce((s, t) => s + (netPnlOf(t) ?? 0), 0);
+  const unsettledCount = closed.filter((t) => netPnlOf(t) === null).length;
+  // 毛盈亏与手续费沿用台账原值：手续费在开单时就估好了，不是结算产物
   const realizedPnl = closed.reduce((s, t) => s + Number(t.pnl ?? 0), 0);
   const totalFee = closed.reduce((s, t) => s + Number(t.fee ?? 0), 0);
-  const realizedNetPnl = closed.reduce(
-    (s, t) => s + Number(t.netPnl ?? (Number(t.pnl ?? 0) - Number(t.fee ?? 0))),
-    0
-  );
-  return { trades, ticks, positions, realizedPnl, realizedNetPnl, totalFee, unrealizedPnl };
+  const stats = computeStats(trades, ticks);
+  return {
+    trades,
+    ticks,
+    positions,
+    realizedPnl,
+    realizedNetPnl,
+    totalFee,
+    unrealizedPnl,
+    unsettledCount,
+    stats,
+  };
 }
 
 /**

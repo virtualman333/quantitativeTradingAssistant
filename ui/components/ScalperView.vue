@@ -6,6 +6,7 @@ import { api } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
 import { fmtNum } from "../lib/format.js";
 import { goTab } from "../lib/nav.js";
+import { sparkline } from "../lib/sparkline.js";
 
 const form = ref({});
 const saving = ref(false);
@@ -48,6 +49,24 @@ const filteredTrades = computed(() => {
     return true;
   });
 });
+
+// ── 战绩统计 ───────────────────────────────────────────────
+// 数字全部来自主进程算好的 `overview.stats`（口径唯一来源 `src/scalperstats.ts`），
+// 界面只负责格式化与画曲线。若成交表与统计表各算一套净盈亏，两边必然漂移。
+const stats = computed(() => overview.value?.stats || null);
+const spark = computed(() => sparkline(stats.value?.equity || []));
+// 只列出真正出现过的来源；某来源若全是「未同步」的单也要列出（否则用户以为没开过）
+const judgeRows = computed(() =>
+  (stats.value?.byJudge || []).filter((r) => r.samples > 0 || r.unsettled > 0)
+);
+const skipRows = computed(() => (stats.value?.reasonStats || []).filter((r) => r.count > 0));
+const skipMax = computed(() => skipRows.value.reduce((m, r) => Math.max(m, r.count), 1));
+// 曲线颜色跟「这轮赚没赚」走（零轴以上绿、以下红）
+const eqCls = computed(() => ((stats.value?.netPnl ?? 0) >= 0 ? "up" : "down"));
+/** null = 算不出来（样本不足 / 无亏损样本），必须显示「—」而不是 0 */
+const pct1 = (v) => (v == null ? "—" : `${(v * 100).toFixed(1)}%`);
+const JUDGE_TEXT = { rule: "规则", llm: "LLM" };
+const judgeText = (j) => JUDGE_TEXT[j] || String(j ?? "未标注");
 
 async function save() {
   fieldErr.value = "";
@@ -316,6 +335,88 @@ function fmtTs(iso) {
   </div>
 
   <div class="panel">
+    <h2>超短线战绩<span class="spacer"></span>
+      <span class="hint" style="font-weight:400">样本 = 全部已平仓 {{ stats?.samples ?? 0 }} 笔（不随上方日期筛选变化）</span>
+    </h2>
+    <div class="body">
+      <template v-if="!stats">
+        <div class="empty">统计数据不可用。请执行 npm run build 重新构建后用 npm run ui 启动界面。</div>
+      </template>
+      <template v-else>
+        <div v-if="stats.samples" class="st-tiles">
+          <div class="st-tile">
+            <div class="st-k">胜率</div>
+            <div class="st-v">{{ pct1(stats.winRate) }}</div>
+            <div class="st-s">赢 {{ stats.wins }} · 亏 {{ stats.losses }}<template v-if="stats.flats"> · 平 {{ stats.flats }}</template></div>
+          </div>
+          <div class="st-tile">
+            <div class="st-k">盈亏比（盈利合计 ÷ 亏损合计）</div>
+            <div class="st-v">{{ stats.profitFactor == null ? "—" : fmtNum(stats.profitFactor, 2) }}</div>
+            <div class="st-s">盈合计 {{ fmtNum(stats.grossProfit, 4) }} · 亏合计 {{ fmtNum(stats.grossLoss, 4) }}</div>
+          </div>
+          <div class="st-tile">
+            <div class="st-k">每笔期望（USDT）</div>
+            <div :class="['st-v', (stats.expectancy ?? 0) >= 0 ? 'up' : 'down']">{{ fmtNum(stats.expectancy, 4) }}</div>
+            <div class="st-s">均盈 {{ fmtNum(stats.avgWin, 4) }} · 均亏 {{ fmtNum(stats.avgLoss, 4) }}</div>
+          </div>
+          <div class="st-tile">
+            <div class="st-k">最大回撤（USDT）</div>
+            <div class="st-v">{{ fmtNum(stats.maxDrawdown, 4) }}</div>
+            <div class="st-s">累计曲线自高点回落的最大幅度（起点按 0 计）</div>
+          </div>
+        </div>
+        <div v-else class="empty">暂无可统计的已平仓样本</div>
+
+        <div v-if="stats.samples" class="st-eq">
+          <svg viewBox="0 0 600 120" preserveAspectRatio="none" :class="eqCls">
+            <polygon v-if="spark.points" :points="spark.area" class="eq-area" />
+            <line v-if="spark.zeroY != null" x1="8" :y1="spark.zeroY" x2="592" :y2="spark.zeroY" class="eq-zero" />
+            <polyline v-if="spark.points" :points="spark.points" class="eq-line" vector-effect="non-scaling-stroke" />
+          </svg>
+          <div class="hint">累计净收益曲线（只含已同步的平仓单）· 虚线为零轴 · 当前合计 {{ fmtNum(stats.netPnl, 4) }} USDT</div>
+        </div>
+
+        <div v-if="stats.unsettled" class="alert" style="margin-top:12px">
+          另有 <b>{{ stats.unsettled }}</b> 笔已平仓但未取到平仓价，净盈亏未知 —— <b>未计入以上任何统计</b>。
+          这几笔被排除而非按 0 计入：若按 0 算，它们会同时把总收益算歪、把胜率稀释。
+        </div>
+
+        <div class="st-cols">
+          <div>
+            <div class="st-h">判断来源对比</div>
+            <table v-if="judgeRows.length">
+              <thead><tr><th>来源</th><th>已同步</th><th>胜率</th><th>净盈亏</th></tr></thead>
+              <tbody>
+                <tr v-for="r in judgeRows" :key="r.judge">
+                  <td><span :class="['tag', r.judge === 'llm' ? 't-info' : 't-hold']">{{ judgeText(r.judge) }}</span></td>
+                  <td>
+                    {{ r.samples }}
+                    <span v-if="r.unsettled" class="hint" style="font-weight:400">（另有 {{ r.unsettled }} 笔未同步）</span>
+                  </td>
+                  <td>{{ pct1(r.winRate) }}</td>
+                  <td :class="r.netPnl >= 0 ? 'up' : 'down'">{{ r.samples ? fmtNum(r.netPnl, 4) : "—" }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="empty">暂无样本</div>
+            <div class="hint" style="margin-top:6px">「LLM 介入」值不值得开，就看这两行的胜率与净盈亏差</div>
+          </div>
+          <div>
+            <div class="st-h">循环为什么没开单（近 {{ stats.tickTotal }} 轮）</div>
+            <div v-for="r in skipRows" :key="r.key" class="st-bar">
+              <span class="st-bar-k" :title="r.label">{{ r.label }}</span>
+              <span class="st-track"><i :style="{ width: (r.count / skipMax) * 100 + '%' }"></i></span>
+              <span class="st-bar-v">{{ r.count }}</span>
+            </div>
+            <div v-if="!skipRows.length" class="empty">暂无循环监测记录</div>
+            <div class="hint" style="margin-top:6px">其中成功开单 {{ stats.tickOpened }} 轮</div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>当前持仓<span class="spacer"></span>
       <button class="danger" :disabled="closing || !overview?.positions?.length" @click="closeAll">
         {{ closing ? "平仓中…" : "一键平仓" }}
@@ -421,3 +522,27 @@ function fmtTs(iso) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 战绩面板：四个指标块 + 累计曲线 + 两张并排小表 */
+.st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px }
+.st-tile { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px }
+.st-k { color: var(--dim); font-size: 11px; letter-spacing: .3px }
+.st-v { margin-top: 2px; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums }
+.st-s { margin-top: 4px; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums }
+
+/* 曲线：preserveAspectRatio=none 让宽度自适应，stroke 用 non-scaling-stroke 保住线宽 */
+.st-eq { margin-top: 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px 10px 4px }
+.st-eq svg { display: block; width: 100%; height: 120px }
+.eq-line { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round }
+.eq-area { fill: currentColor; opacity: .12; stroke: none }
+.eq-zero { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke }
+
+.st-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 16px }
+.st-h { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 8px }
+.st-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11.5px }
+.st-bar-k { flex: 0 0 44%; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.st-track { flex: 1; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden }
+.st-track i { display: block; height: 100%; border-radius: 3px; background: var(--blue); transition: width var(--ease) }
+.st-bar-v { flex: 0 0 34px; text-align: right; font-variant-numeric: tabular-nums; color: var(--dim) }
+</style>
