@@ -8,15 +8,17 @@
  *   L1-2 杠杆 ≤5x
  *   L1-4 止损必挂
  *   L1-5 单笔风险 ≤2.5%
+ *   L1-6 月度回撤 ≥12% 熔断（停止开新仓）
  *   L1-7 偏离留痕五项齐全
  *   L1-9 禁双向
  *   L1-10 禁亏损加仓
- * 其余 L1 在别处兜底：L1-3（live 只读）在 okx.ts，L1-8（clOrdId 幂等）在 genClOrdId，
- * L1-6（月度回撤熔断）在 main.ts 执行前。
+ * 其余 L1 在别处兜底：L1-3（live 只读）在 okx.ts，L1-8（clOrdId 幂等）在 genClOrdId。
  *
  * 两条下单路径都要过闸门：
  *   - 主 Agent 路径：main.ts → riskbrief.checkIntent() → guardIntent()（按订单意图校验）
+ *                      + guardMonthlyDrawdown()（按运行态熔断）
  *   - 超短线路径：scalper.ts → guardScalperConfig()（按用户配置的参数校验，无订单意图）
+ *                      + guardMonthlyDrawdown()（同一份运行态熔断）
  */
 import type { AccountSnapshot, GuardResult, TradeIntent } from "./types.js";
 
@@ -30,6 +32,8 @@ const USDT_RE = /USDT/i;
 export const MAX_RISK_PCT = 0.025;      // L1-5 单笔风险 ≤2.5%
 export const APPROVAL_RISK_PCT = 0.02;  // 超过 2% 需人工确认（L2 基准）
 export const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
+/** L1-6 月度回撤熔断线（%）。负数=回撤；达到或低于即熔断。 */
+export const MAX_MONTH_DD_PCT = -12;
 
 /**
  * 由「风险比例 + 止损距离 + 现价」反推隐含杠杆（口径即 L1-2）：
@@ -88,6 +92,42 @@ export function guardScalperConfig(cfg: { leverage?: unknown; riskPct?: unknown 
 }
 
 const DEVIATION_FIELDS = ["baseline", "actual", "rationale", "falsifier", "riskDelta"] as const;
+
+/**
+ * 章程 L1-6：月度回撤达到熔断线 → 「强制停止开新仓」（仅允许管理既有持仓）。
+ *
+ * 为什么放在这里、而不是各条路径各判一次：
+ * 这条此前**主路径写了、超短线路径一条都没有**，而且主路径读的判据字段
+ * （`state/runtime.json` 的 `month_dd_pct`）**全仓没有任何脚本写过** ——
+ * `j.month_dd_pct ?? 0` 恒为 0，`0 <= -12` 永假，于是这条 L1 自建立起从未触发。
+ * 现在：month_risk.py 算 → archive_round.py 每轮落盘 → 两条路径都调本函数。
+ *
+ * 判据是**回撤本身**（相对当月权益峰值），与「本月是否盈利」无关。
+ *
+ * @param monthDdPct 月度回撤（%，负数），来自 runtime.json；缺字段时传 null/undefined。
+ */
+export function guardMonthlyDrawdown(monthDdPct: unknown): GuardResult {
+  const violations: string[] = [];
+  const warnings: string[] = [];
+
+  const raw = monthDdPct === null || monthDdPct === undefined || monthDdPct === "" ? Number.NaN : Number(monthDdPct);
+  if (!Number.isFinite(raw)) {
+    // 拿不到数不等于「没有回撤」，但也不该凭一个缺失字段停掉交易（L1-4 止损、L1-5 硬顶
+    // 仍各自独立生效）。处理方式是**点名**而不是静默当 0 —— 每轮日志与风控体检都会看到。
+    warnings.push(
+      `L1-6 月度回撤未知（state/runtime.json 无 month_dd_pct），本轮无法确认熔断状态`
+    );
+  } else if (raw <= MAX_MONTH_DD_PCT) {
+    violations.push(`L1-6 月度回撤 ${raw.toFixed(2)}% 达到 ${MAX_MONTH_DD_PCT}% 熔断线，强制停止开新仓`);
+  }
+
+  return {
+    ok: violations.length === 0,
+    violations,
+    warnings,
+    needsApproval: false,
+  };
+}
 
 /**
  * 校验单个交易意图。

@@ -221,26 +221,25 @@ def build(args):
                      p.get("upl"), "✅" if p.get("has_oco") else "🔴 **裸仓**"))
             A("")
 
-    # ── 月度目标进度（复用 mail_report 的档位算法，避免两处漂移）─────
+    # ── 月度目标进度（月度收益率/回撤/进度一律取自 month_risk.py，档位算法取自 mail_report）──
     demo_eq = _f((acct or {}).get("demo", {}).get("equity"), 0.0)
     if demo_eq > 0:
         try:
             import mail_report as _mr
-            mst = _mr.ensure_month_state(demo_eq)
-            ym = _mr._now().strftime("%Y-%m")
-            realized, realized_n, fee = _mr.month_realized_pnl(ym)
-            m0 = float(mst.get("month_start_equity") or demo_eq)
-            peak = max(float(mst.get("month_peak_equity") or m0), m0, demo_eq)
-            pnl_pct = ((demo_eq - m0) / m0 * 100) if m0 else 0.0
-            dd_pct = ((demo_eq - peak) / peak * 100) if peak else 0.0
-            n = _mr._now()
-            import calendar as _cal
-            dim = _cal.monthrange(n.year, n.month)[1]
-            tp = n.day / dim
-            ach = (pnl_pct / _mr.MONTHLY_TARGET_PCT * 100) if _mr.MONTHLY_TARGET_PCT else 0
+            import month_risk as _mrk
+            mst = _mrk.ensure_month_state(demo_eq)
+            m = _mrk.month_metrics(demo_eq, state=mst)
+            n = _mrk._now()
+            dim = m["days_in_month"]
+            pnl_pct = m["month_pnl_pct"]
+            dd_pct = m["month_dd_pct"]
+            tp = m["time_progress"]
+            ach = m["achieved_pct_of_target"]
+            m0 = m["month_start_equity"]
+            realized, realized_n, fee = _mr.month_realized_pnl(m["month"])
             tk, tier = _mr.pick_risk_tier(pnl_pct, tp, dd_pct)
 
-            A("## 1b. 月度目标进度（目标 +%.0f%%）" % _mr.MONTHLY_TARGET_PCT)
+            A("## 1b. 月度目标进度（目标 +%.0f%%）" % _mrk.MONTHLY_TARGET_PCT)
             A("")
             done = int(round(ach / 10.0))
             bar = "█" * min(done, 10) + "░" * max(0, 10 - min(done, 10))

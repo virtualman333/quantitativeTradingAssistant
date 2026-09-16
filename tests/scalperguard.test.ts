@@ -20,7 +20,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   APPROVAL_RISK_PCT,
@@ -32,55 +31,7 @@ import {
 } from "../src/guard.ts";
 import { DEFAULT_SCALPER } from "../src/store.ts";
 import type { TradeIntent } from "../src/types.ts";
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (p: string) => fs.readFileSync(path.join(ROOT, p), "utf8");
-
-/**
- * 剥掉注释后再做源码断言。
- * 教训（已连续两轮踩到）：在被测文件里写「旧实现长这样」的注释，会让
- * `source.includes("旧代码片段")` 这类断言命中注释而不是真代码 —— 该红的红不了、
- * 不该红的红。所以凡是对源码形态的断言，先剥注释。
- */
-function stripComments(src: string): string {
-  let out = "";
-  let i = 0;
-  let quote: string | null = null;
-  while (i < src.length) {
-    const c = src[i];
-    const n = src[i + 1];
-    if (quote) {
-      if (c === "\\") {
-        out += c + (n ?? "");
-        i += 2;
-        continue;
-      }
-      if (c === quote) quote = null;
-      out += c;
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      out += c;
-      i++;
-      continue;
-    }
-    if (c === "/" && n === "/") {
-      while (i < src.length && src[i] !== "\n") i++;
-      continue;
-    }
-    if (c === "/" && n === "*") {
-      i += 2;
-      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
-      i += 2;
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
+import { ROOT, read, stripComments } from "./_src.ts";
 
 const SCALPER_SRC = stripComments(read("src/scalper.ts"));
 

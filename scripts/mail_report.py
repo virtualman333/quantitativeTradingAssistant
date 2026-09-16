@@ -27,15 +27,19 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 
+import month_risk as _month_risk
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CST = timezone(timedelta(hours=8))
 
 ROUNDS = os.path.join(ROOT, "logs", "rounds.jsonl")
 RUNTIME = os.path.join(ROOT, "state", "runtime.json")
 LEDGER = os.path.join(ROOT, "ledger", "trades.csv")
-MONTH_STATE = os.path.join(ROOT, "state", "month_state.json")
+# 月度基准文件归 month_risk.py 所有（它同时被 archive_round.py 调用）
+MONTH_STATE = _month_risk.MONTH_STATE
 
-MONTHLY_TARGET_PCT = 10.0          # 月度目标收益率（%）
+# 月度目标收益率（%）：章程 §0.1，唯一来源在 month_risk.py
+MONTHLY_TARGET_PCT = _month_risk.MONTHLY_TARGET_PCT
 RECIPIENT = "virtualman@vip.qq.com"
 
 # 目标进度自适应风险档位（章程 §5.3）
@@ -103,41 +107,10 @@ def month_realized_pnl(year_month):
     return pnl, n, fee
 
 
-def days_in_month(y, m):
-    if m == 12:
-        return 31
-    import calendar
-    return calendar.monthrange(y, m)[1]
-
-
-def ensure_month_state(equity):
-    """维护月度基准：跨月自动重置；同月持续跟踪权益峰值（用于真实回撤计算）。"""
-    now = _now()
-    ym = now.strftime("%Y-%m")
-    st = {}
-    if os.path.exists(MONTH_STATE):
-        try:
-            with open(MONTH_STATE, encoding="utf-8") as f:
-                st = json.load(f)
-        except Exception:
-            st = {}
-    if st.get("month") != ym:
-        st = {
-            "month": ym,
-            "month_start_equity": equity,
-            "month_peak_equity": equity,
-            "month_start_cst": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "reset_note": "跨月自动重置（或首次初始化）",
-        }
-    else:
-        # 峰值只增不减；真实回撤 = (当前权益 - 峰值) / 峰值
-        if equity > float(st.get("month_peak_equity") or 0):
-            st["month_peak_equity"] = equity
-    st["last_update_cst"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    # 注意：json.dump 的 fp 必须传位置参数，不能写成 fp=f（会 TypeError）
-    with open(MONTH_STATE, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=2)
-    return st
+# 月度基准 / 峰值 / 回撤 / 目标进度一律取自 month_risk.py（唯一口径）。
+# 此前本文件自己算一遍、dashboard.py 再算一遍、src/main.ts 又读一个从没人写过的
+# runtime.json 字段 —— 同一件事三处写法。这里只保留名字，算法不再有第二份。
+days_in_month = _month_risk.days_in_month
 
 
 def pick_risk_tier(month_pnl_pct, time_progress, month_dd_pct):
@@ -412,36 +385,28 @@ def main():
     equity = float(rnd.get("equity_usdt") or 0)
 
     now = _now()
-    ym = now.strftime("%Y-%m")
-    mst = ensure_month_state(equity)
+    mst = _month_risk.ensure_month_state(equity)
+    # 月度收益率 / 真实回撤 / 时间进度一律取自 month_risk.py —— 本文件不再自己算
+    m = _month_risk.month_metrics(equity, now=now, state=mst)
+    ym = m["month"]
     realized, realized_n, fee = month_realized_pnl(ym)
-
-    m0 = float(mst.get("month_start_equity") or equity)
-    peak = max(float(mst.get("month_peak_equity") or m0), m0, equity)
-    month_pnl_pct = ((equity - m0) / m0 * 100) if m0 else 0.0
-    # 真实回撤：从月度权益峰值回落的比例（不是月末对月初，峰值已被 ensure_month_state 更新）
-    month_dd_pct = ((equity - peak) / peak * 100) if peak else 0.0
-
-    dim = days_in_month(now.year, now.month)
-    time_progress = now.day / dim
-    achieved_pct_of_target = (month_pnl_pct / MONTHLY_TARGET_PCT * 100) if MONTHLY_TARGET_PCT else 0
 
     mp = {
         "month": ym,
-        "month_start_equity": m0,
+        "month_start_equity": m["month_start_equity"],
         "equity": equity,
-        "month_pnl_pct": month_pnl_pct,
-        "month_dd_pct": month_dd_pct,
+        "month_pnl_pct": m["month_pnl_pct"],
+        "month_dd_pct": m["month_dd_pct"],
         "realized_pnl": realized,
         "realized_n": realized_n,
         "fee": fee,
-        "day": now.day,
-        "days_in_month": dim,
-        "time_progress": time_progress,
-        "achieved_pct_of_target": achieved_pct_of_target,
+        "day": m["day"],
+        "days_in_month": m["days_in_month"],
+        "time_progress": m["time_progress"],
+        "achieved_pct_of_target": m["achieved_pct_of_target"],
     }
 
-    tier_key, tier = pick_risk_tier(month_pnl_pct, time_progress, month_dd_pct)
+    tier_key, tier = pick_risk_tier(m["month_pnl_pct"], m["time_progress"], m["month_dd_pct"])
     subject, body, alerts = render(rnd, runtime, mst, tier_key, tier, mp)
 
     payload = {

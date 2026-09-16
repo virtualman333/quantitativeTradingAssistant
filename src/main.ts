@@ -21,6 +21,8 @@ import { AgentState, buildGraphWithMcp, makeStoreLlmProvider } from "./graph.js"
 import { reflectExperts } from "./experts.js";
 import { reloadStore, getSettings } from "./store.js";
 import { checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
+import { guardMonthlyDrawdown } from "./guard.js";
+import { loadRunState } from "./runstate.js";
 import { alert } from "./alert.js";
 import { snappedSlTp } from "./price.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
@@ -187,25 +189,6 @@ function buildMarketDigest(mkt: unknown): string {
   }
 }
 
-function loadRuntime() {
-  const p = path.join(STATE, "runtime.json");
-  const def = { daySlCount: 0, dayPnlPct: 0, monthDdPct: 0, roundNo: 0 };
-  if (!fs.existsSync(p)) return def;
-  try {
-    const j = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, number>;
-    return {
-      daySlCount: j.day_sl_count ?? 0,
-      dayPnlPct: j.day_pnl_pct ?? 0,
-      monthDdPct: j.month_dd_pct ?? 0,
-      // 注意：archive_round.py 写的字段是 round_count（不是 round_no），
-      // 之前读错字段导致 round_id 永远停在 R000001（实测踩过，rounds.jsonl 里重复了 11 次 R000001）。
-      roundNo: j.round_no ?? j.round_count ?? 0,
-    };
-  } catch {
-    return def;
-  }
-}
-
 // ── 副作用：执行与归档（图外） ─────────────────────────────
 async function executeOpen(
   it: TradeIntent,
@@ -274,7 +257,7 @@ async function executeClose(it: TradeIntent, snap: AccountSnapshot) {
 async function runRound() {
   // 每轮重读配置（界面改模型/角色/MCP 即时生效，无需重启 agent）
   reloadStore();
-  const rt = loadRuntime();
+  const rt = loadRunState();
   const roundId = `R${String(rt.roundNo + 1).padStart(6, "0")}`;
   log(`===== 轮次 ${roundId} 开始 =====`);
 
@@ -310,7 +293,9 @@ async function runRound() {
     `[Account] equity ${snap.equityUsdt} USDT, available ${snap.availableUsdt}`,
     `[Positions] ${snap.positions.length ? JSON.stringify(snap.positions) : "none"}`,
     `[Algo Orders] ${snap.algoOrders.length ? JSON.stringify(snap.algoOrders) : "none"}`,
-    `[Run State] day stop-loss ${rt.daySlCount}, day PnL ${rt.dayPnlPct}%, month drawdown ${rt.monthDdPct}%`,
+    // monthDdPct 为 null = 运行态里没有这个字段（不是「0 回撤」），如实写「未知」，
+    // 免得模型把「不知道」读成「本月还没回撤」。
+    `[Run State] day stop-loss ${rt.daySlCount}, day PnL ${rt.dayPnlPct}%, month drawdown ${rt.monthDdPct === null ? "未知" : `${rt.monthDdPct}%`}`,
     ``,
     `[Candidate instruments & market digest] You may trade any USDT perpetual below, long or short; prefer liquid, well-specified instruments.${focusLine}`,
     marketDigest,
@@ -356,13 +341,20 @@ async function runRound() {
     return;
   }
 
-  // ④ L1-6 月度回撤熔断（-12%）：整轮观望，不执行任何动作
-  if ((rt.monthDdPct ?? 0) <= -12) {
-    log(`⛔ L1-6 月度回撤 ${rt.monthDdPct}% 触及 -12% 熔断，本轮全部观望`);
-    await alert("月度回撤熔断告警", `月度回撤 ${rt.monthDdPct}% 触及 -12% 熔断线，已暂停交易。请人工评估策略是否继续。`);
+  // ④ L1-6 月度回撤熔断：整轮观望，不执行任何动作。
+  // 口径与超短线路径共用 guard.guardMonthlyDrawdown（此前这里写死 -12、且判据字段从没人写）。
+  const ddGuard = guardMonthlyDrawdown(rt.monthDdPct);
+  if (!ddGuard.ok) {
+    log(`⛔ ${ddGuard.violations.join("；")}，本轮全部观望`);
+    await alert(
+      "月度回撤熔断告警",
+      `${ddGuard.violations.join("\n")}\n已暂停开新仓，仅管理既有持仓。请人工评估策略是否继续。`
+    );
     decision.decision = "STANDBY";
     decision.intents = [];
     decision.summary = `月度回撤熔断(${rt.monthDdPct}%)`;
+  } else if (ddGuard.warnings.length) {
+    log(`⚠ ${ddGuard.warnings.join("；")}`);
   }
 
   // ⑤ 执行（副作用在图外）——先过 Guard（L1 硬约束），违规则硬拦截

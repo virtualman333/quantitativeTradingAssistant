@@ -17,7 +17,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
-import { guardScalperConfig } from "./guard.js";
+import { guardScalperConfig, guardMonthlyDrawdown } from "./guard.js";
+import { loadRunState } from "./runstate.js";
 import { snappedSlTp } from "./price.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
@@ -365,6 +366,16 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const cfgGuard = guardScalperConfig(cfg);
   if (!cfgGuard.ok) {
     return finish("error", `触碰 L1 硬约束，拒绝开单：${cfgGuard.violations.join("；")}`);
+  }
+
+  // L1-6 月度回撤熔断。这是**运行态**约束，不是配置错误：章程写的是「月度回撤 ≥12%
+  // → 强制停止开新仓（仅允许管理既有持仓至月末或回撤修复）」。超短线是一个无人值守的
+  // 独立循环，此前这条路径上连一次判断都没有 —— 熔断期间它会照常每 60 秒开新单，
+  // 而主 Agent 那边（main.ts 第 ④ 步）已经停了。两条路径必须同一结论。
+  // 已有持仓不动：它的止损止盈在 OCO 里，本来就由交易所管。
+  const ddGuard = guardMonthlyDrawdown(loadRunState().monthDdPct);
+  if (!ddGuard.ok) {
+    return finish("skipped", `L1-6 熔断，本轮不开新仓：${ddGuard.violations.join("；")}`);
   }
 
   // 演练模式（--dry-run）与主轮次一致：不下单

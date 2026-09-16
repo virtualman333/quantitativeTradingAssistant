@@ -22,6 +22,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import month_risk
+
 CST = timezone(timedelta(hours=8))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -178,6 +180,18 @@ def update_runtime(r: dict) -> dict:
     st["day_pnl_pct"] = round((r["equity_usdt"] / dse - 1) * 100, 4) if dse else 0.0
     st["circuit_breaker"] = bool(st["day_sl_count"] >= 2 or st["day_pnl_pct"] <= -3.0)
     st["open_positions"] = len(r.get("positions") or [])
+    # ── 月度回撤：章程 L1-6「月度回撤 ≥12% → 强制停止开新仓」的判据 ──────────
+    # 这个字段 src/main.ts 一直在读（`j.month_dd_pct ?? 0`），但**从来没有任何脚本写过**，
+    # 于是那条 L1 熔断恒不触发。口径归 month_risk.py，本文件只负责落盘。
+    try:
+        mm = month_risk.month_metrics(r["equity_usdt"])
+        st["month_dd_pct"] = round(float(mm["month_dd_pct"]), 4)
+        st["month_pnl_pct"] = round(float(mm["month_pnl_pct"]), 4)
+        st["month_start_equity"] = round(float(mm["month_start_equity"]), 4)
+        st["month_peak_equity"] = round(float(mm["month_peak_equity"]), 4)
+        st["l1_6_tripped"] = month_risk.month_dd_circuit_tripped(mm["month_dd_pct"])
+    except Exception as e:  # noqa: BLE001 —— 月度状态算不出来不该让整轮归档失败
+        st["month_dd_error"] = f"{type(e).__name__}: {e}"
     os.makedirs(os.path.dirname(RUNTIME), exist_ok=True)
     with open(RUNTIME, "w", encoding="utf-8") as fh:
         json.dump(st, fh, ensure_ascii=False, indent=2)
