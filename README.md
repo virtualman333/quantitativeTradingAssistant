@@ -149,6 +149,17 @@ pnpm test
 
 用 Node 22 内置 test runner + `tsx` loader 运行（`tsx` 负责把源码里的 `.js` 后缀解析回 `.ts`，否则只能测那些「零运行时 import」的模块），无需 jest/vitest。**改动 `guard.ts` 或章程 §1 的 L1 条款后，必须同步更新 guard 测试；改回测参数后必须同步更新 scalper 测试。**
 
+`tests/riskbrief.test.ts` 与 `tests/riskbrief-ui.test.ts` 覆盖**每轮风控体检**（`src/riskbrief.ts` → 归档 payload 的 `risk_brief` → 总览页「本轮风控体检」面板）。其中 `riskbrief.test.ts` 用 100 组参数空间锁住「体检显示超限 ⟺ guard 判 L1-2 违规」，防的是体检口径与 guard 口径各算一套；`riskbrief-ui.test.ts` 则拿真的 `buildRiskBrief()` 输出喂给界面展示层（`ui/lib/riskbrief.js`），断言每个单元格零 NaN —— 界面读的是 payload 里的字段名，字段一改名界面**不会报错**、只会静默显示「—」，这条断言就是为它准备的。
+
+## 界面：本轮风控体检
+
+`ui/lib/riskbrief.js` 是纯函数展示层，`ui/components/DashboardView.vue` 的总览页把它渲染成两条预算用量条 + 逐笔明细（超限红 / 接近上限黄 / 充裕绿），并高亮章程 L2「单笔风险超 2% 需人工确认」的留痕提示。
+
+两条硬规则：
+
+- **界面不复制 guard 的 5x / 2.5% 常量**：界面上「/ 硬顶 5.0x」是从 payload 的「占上限百分比」反推出来的（`capOf`），章程改一次只需改 `guard.ts`。
+- **「没算」与「充裕」必须区分**：`Number("")` 是 `0`，若不显式挡住空串，缺数据的笔会显示成绿色的「0% 上限 · 充裕」——即把最该警惕的情况装成最安全的样子。所有取值统一走 `num()`。
+
 模型配置在界面「模型」页增删改（`data/store.json`）。`dry-run` 是**模式**不是单轮；只有 `--once` 才跑一轮就退出。
 
 ## 关键约定

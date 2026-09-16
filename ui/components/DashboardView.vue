@@ -5,6 +5,20 @@ import { status } from "../store/index.js";
 import { api } from "../lib/api.js";
 import { goTab, openKlineWin } from "../lib/nav.js";
 import { fmtNum, signCls, STANCE_TEXT } from "../lib/format.js";
+import {
+  ACTION_TEXT,
+  LEVEL_TEXT,
+  STATE_TEXT,
+  barWidth,
+  capOf,
+  leverageText,
+  maxUsage,
+  pctText,
+  riskBudgetText,
+  rowState,
+  usageLevel,
+  usageText,
+} from "../lib/riskbrief.js";
 
 const rd = computed(() => status.latestRound || {});
 const positions = computed(() => rd.value.positions || []);
@@ -15,6 +29,31 @@ const riskTier = computed(() => rd.value.risk_tier || "");
 const conflicts = computed(() => rd.value.conflicts || []);
 const actions = computed(() => rd.value.actions || []);
 const execResults = computed(() => rd.value.exec_results || []);
+
+// ── 本轮风控体检（risk_brief）──────────────────────────────
+// src/riskbrief.ts 每轮都会算一遍隐含杠杆与风险预算用量并写进归档 payload，
+// 但界面此前从不读它 —— 「这轮离 5x / 2.5% 两道硬顶还有多远」一直只活在 JSON 里。
+// 这里把它变成两条用量条 + 逐笔明细：超限红、接近上限黄、充裕绿。
+// 注意：上限值一律从 payload 的「占上限百分比」反推（capOf），界面不复制
+// guard 的 5x / 2.5% 常量 —— 否则改章程时必有一处漏改。
+const brief = computed(() => rd.value.risk_brief || null);
+const briefIntents = computed(() => brief.value?.intents || []);
+const hasBrief = computed(() => !!brief.value && Number(brief.value.total) > 0);
+const maxLeverUsage = computed(() => maxUsage(briefIntents.value, "leverageUsagePct"));
+const maxRiskUsage = computed(() => maxUsage(briefIntents.value, "riskUsagePct"));
+const levCap = computed(() => capOf(brief.value?.maxImpliedLeverage, maxLeverUsage.value));
+const riskCap = computed(() => capOf(brief.value?.maxRiskPct, maxRiskUsage.value));
+// 归档里没有 risk_brief = 旧版本 agent 归档的轮次，要说清「为什么看不到」而不是空白
+const briefHint = computed(() =>
+  rd.value.round_id
+    ? "本轮归档不含体检数据（该字段由新版本 agent 在归档时写入，重跑一轮即可看到）"
+    : "暂无轮次记录（跑一轮后产生）"
+);
+const capLeverText = computed(() => (levCap.value === null ? "—" : `${levCap.value.toFixed(1)}x`));
+const capRiskText = computed(() => (riskCap.value === null ? "—" : pctText(riskCap.value, 2)));
+const leverLevel = computed(() => usageLevel(maxLeverUsage.value));
+const riskLevel = computed(() => usageLevel(maxRiskUsage.value));
+const approvalReasons = computed(() => brief.value?.approval_reasons || brief.value?.approvalReasons || []);
 const DECISION_TEXT = { OPEN: "开仓", HOLD: "持有", CLOSE: "平仓", STANDBY: "观望" };
 const RISK_TEXT = { BASE: "基准", AGG: "激进", DEF: "防守" };
 const syncedAt = computed(() => {
@@ -201,6 +240,84 @@ onUnmounted(stopTick);
   </div>
 
   <div class="panel">
+    <h2>
+      本轮风控体检
+      <span class="hint" style="font-weight:400">L1 硬顶：杠杆 ≤ {{ capLeverText }} · 单笔风险 ≤ {{ capRiskText }}</span>
+      <span class="spacer"></span>
+      <span v-if="brief && brief.needsApproval" class="tag t-warn">需人工确认（L2）</span>
+    </h2>
+    <div class="body">
+      <template v-if="hasBrief">
+        <div class="rb-bars">
+          <div class="rb-item">
+            <div class="rb-k">最大隐含杠杆</div>
+            <div class="rb-v">
+              <b>{{ fmtNum(brief.maxImpliedLeverage, 1) }}x</b>
+              <span class="rb-sub">/ 硬顶 {{ capLeverText }}</span>
+            </div>
+            <div class="rb-track">
+              <i :class="['rb-fill', 'lv-' + leverLevel]" :style="{ width: barWidth(maxLeverUsage) + '%' }"></i>
+            </div>
+            <div :class="['rb-tip', 'lv-' + leverLevel]">
+              {{ usageText(maxLeverUsage) }} · {{ LEVEL_TEXT[leverLevel] }}
+            </div>
+          </div>
+          <div class="rb-item">
+            <div class="rb-k">单笔最大风险</div>
+            <div class="rb-v">
+              <b>{{ pctText(brief.maxRiskPct) }}</b>
+              <span class="rb-sub">/ 硬顶 {{ capRiskText }}</span>
+            </div>
+            <div class="rb-track">
+              <i :class="['rb-fill', 'lv-' + riskLevel]" :style="{ width: barWidth(maxRiskUsage) + '%' }"></i>
+            </div>
+            <div :class="['rb-tip', 'lv-' + riskLevel]">
+              {{ usageText(maxRiskUsage) }} · {{ LEVEL_TEXT[riskLevel] }}
+            </div>
+          </div>
+        </div>
+
+        <div class="rb-sum">{{ brief.summary }}</div>
+
+        <div v-if="brief.needsApproval && approvalReasons.length" class="alert" style="margin:10px 0 0">
+          <div>
+            <b>章程 L2 · 单笔风险超过 2% 需人工确认</b>
+            <div v-for="(r, i) in approvalReasons" :key="i">{{ r }}</div>
+            <div class="hint">本轮按原计划执行，此处仅留痕提示（是否改成真闸门属策略层决定）。</div>
+          </div>
+        </div>
+
+        <table v-if="briefIntents.length" style="margin-top:12px">
+          <thead>
+            <tr>
+              <th>标的</th><th>动作</th><th>单笔风险</th><th>隐含杠杆</th>
+              <th>风险占用</th><th>杠杆占用</th><th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(c, i) in briefIntents" :key="i">
+              <td><b>{{ c.inst }}</b></td>
+              <td class="nowrap">{{ ACTION_TEXT[c.action] || c.action }}</td>
+              <td class="nowrap">{{ riskBudgetText(c) }}</td>
+              <td class="nowrap">{{ leverageText(c) }}</td>
+              <td class="nowrap" :class="'lv-' + usageLevel(c.riskUsagePct)">{{ usageText(c.riskUsagePct) }}</td>
+              <td class="nowrap" :class="'lv-' + usageLevel(c.leverageUsagePct)">{{ usageText(c.leverageUsagePct) }}</td>
+              <td class="nowrap">
+                <span
+                  :class="['tag', rowState(c) === 'blocked' ? 't-sell' : rowState(c) === 'warned' ? 't-warn' : 't-on']"
+                  :title="[...(c.violations || []), ...(c.warnings || [])].join('\n') || '无告警'"
+                >{{ STATE_TEXT[rowState(c)] }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="hint" style="margin-top:10px">{{ brief.summary }}</div>
+      </template>
+      <div v-else class="empty">{{ briefHint }}</div>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>专家观点</h2>
     <div class="body">
       <table v-if="experts.length">
@@ -238,4 +355,23 @@ onUnmounted(stopTick);
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
 .row-click { cursor: pointer; }
 .row-click:hover { background: var(--hover-2); }
+
+/* 风控体检：两条预算用量条。色阶只表「离硬顶还有多远」，与涨跌色无关 */
+.rb-bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px }
+.rb-item { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px }
+.rb-k { color: var(--dim); font-size: 11px; letter-spacing: .3px }
+.rb-v { margin-top: 2px; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums }
+.rb-sub { font-size: 11px; font-weight: 400; color: var(--dim); margin-left: 4px }
+.rb-track { margin-top: 8px; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden }
+.rb-fill { display: block; height: 100%; border-radius: 3px; transition: width var(--ease), background var(--ease) }
+.rb-tip { margin-top: 6px; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums }
+.rb-sum { margin-top: 12px; font-size: 12px; line-height: 1.7; color: var(--text-2) }
+.lv-ok { color: var(--green) }
+.lv-ok.rb-fill { background: var(--green) }
+.lv-near { color: var(--yellow) }
+.lv-near.rb-fill { background: var(--yellow) }
+.lv-over { color: var(--red); font-weight: 600 }
+.lv-over.rb-fill { background: var(--red) }
+.lv-none { color: var(--dim) }
+.lv-none.rb-fill { background: var(--border-strong) }
 </style>
