@@ -22,6 +22,7 @@ import { reflectExperts } from "./experts.js";
 import { reloadStore, getSettings } from "./store.js";
 import { checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
 import { alert } from "./alert.js";
+import { snappedSlTp } from "./price.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
 
@@ -186,13 +187,6 @@ function buildMarketDigest(mkt: unknown): string {
   }
 }
 
-/** 价格按 tickSz 取整并转字符串（避免科学计数法，OKX 下单价格须为 tickSz 整数倍） */
-function fmtTick(px: number, tickSz: number): string {
-  const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
-  const snapped = Math.round(px / tickSz) * tickSz;
-  return snapped.toFixed(decimals);
-}
-
 function loadRuntime() {
   const p = path.join(STATE, "runtime.json");
   const def = { daySlCount: 0, dayPnlPct: 0, monthDdPct: 0, roundNo: 0 };
@@ -239,8 +233,14 @@ async function executeOpen(
   const side = it.action === "long" ? "buy" : "sell";
   const slPx = it.action === "long" ? refPx - it.slDist : refPx + it.slDist;
   const tpPx = it.action === "long" ? refPx + it.slDist * (it.tpRR ?? 2) : refPx - it.slDist * (it.tpRR ?? 2);
-  const slPxStr = fmtTick(slPx, spec.tickSz);
-  const tpPxStr = fmtTick(tpPx, spec.tickSz);
+  const ticks = snappedSlTp(refPx, slPx, tpPx, spec.tickSz);
+  if (!ticks) {
+    // 挂不出「严格在入场价亏损侧」的止损时一律不开单：OCO 触发价落在入场价上
+    // 等于没有止损，而 L1-4 要求每笔持仓必须存在止损。
+    return { ok: false, msg: `${inst}: 止损/止盈无法落在 tick 网格上（ref=${refPx} tickSz=${spec.tickSz}）` };
+  }
+  const slPxStr = ticks.slStr;
+  const tpPxStr = ticks.tpStr;
 
   const g = await genClOrdId(roundId, seq, { instId: inst, sz: size });
   if (!g.clOrdId) {

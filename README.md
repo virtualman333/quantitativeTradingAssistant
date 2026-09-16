@@ -191,6 +191,28 @@ pnpm test
 
 `tests/scalperguard.test.ts` 覆盖**超短线路径的 L1 闸门**（`guardScalperConfig()` → `scalpOnce()`）。它锁三件事：① 拒与放行的分界**就是** `MAX_LEVERAGE` / `MAX_RISK_PCT` 这两个常量（所以断言里也不写死 5 / 2.5%）；② 主 Agent 路径与超短线路径对同一个 `riskPct` 必须给出同样的 L1-5 结论 —— 防两条路径各改各的；③ **源码形态**：开单入口是否还在调闸门、有没有人又自造一份杠杆上限、上限常量是否只在 `guard.ts` 定义一次、界面是否又写死选项表与上限数字。第三类断言是必要的：**被删掉的闸门不会让任何行为断言变红**。另有两条把常量钉回 `AGENT_TRADING_RULES.md` 原文（改常量而不改章程会红灯）。
 
+`tests/price.test.ts` 覆盖**下单价格格式化**（`src/price.ts`），拿 OKX 全部 468 个 USDT 永续里真实存在的 11 种 tick 小数位（`0.1` 到 `1e-12`）当输入。除数值断言外还有一组**结构锁**：两个下单入口必须从 `price.ts` 取、不许各自再写一份 `fmtTick`、触发价必须经 `snappedSlTp` 产出。见「下单价格格式化」一节。
+
+## 下单价格格式化（tickSz 网格）
+
+OKX 的 OCO 触发价**必须是 tickSz 的整数倍**，否则直接拒单；拒单 = 止损失效 = 触碰章程 L1-4「每笔持仓必须存在止损」。这条逻辑此前在 `main.ts` 与 `scalper.ts` 里各写了一份、逐字相同，而且两份都是错的：
+
+```ts
+const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
+```
+
+两个缺陷：
+
+- **小数位被硬夹到 8 位**，而 OKX 的 tickSz 最小到 `1e-12`。用真实行情算（入口价取接口现价、止损距离 0.5%）：`PEPE` / `BONK` / `SHIB`（tickSz `1e-9`）的触发价被截成 8 位，落在网格外 → 拒单；`SATS`（tickSz `1e-12`）更糟，`toFixed(8)` 把价格写成 `0.00000001`，而入场价是 `9.949e-9` —— **止损止盈双双跑到入场价上方**，`SL < entry < TP` 这个基本语义被彻底破坏。小数位只能从 tickSz 的十进制写法里取，不能用 `log10` 反推再去夹。
+- **就近取整会把止损吸回入场价**。止损距离不足半个 tick 时，`Math.round(sl / tickSz) * tickSz` 会落回入场价上 —— 那等于「挂了止损但其实没有止损」。真实场景 `GPRO-USDT-SWAP`：entry `1.31`、tickSz `0.01`、止损距离 0.2%，最近取整把 `1.30738` 吸回 `1.31`。
+
+修法是收敛到 `src/price.ts` 这**唯一一份实现**（`toPlainDecimal` / `tickDecimals` / `roundToTick` / `fmtTick` / `snappedSlTp`），两个下单入口各自删掉本地那份并改为 import。三条不能破的约定：
+
+- **小数位从 tickSz 自己的十进制写法里数**：既不是 `-log10(tickSz)`（对 `0.5` 这种非 10 的整数次幂会算出 0 位，把 `6.5` 写成 `7`），也不是「乘 `10^d` 之后是否近似整数」（对 `1e-12` 会在 `d=0` 就被判成整数）。
+- **止损必须在入场价的亏损侧，宁可多推一个 tick**：`snappedSlTp()` 负责这一点，并在「止损被推到 0 以下」这类走不通的情况下返回 `null`。
+- **走不通就拒绝下单，不退兜底价**：两个入口拿到 `null` 一律不开这一单并说明原因。挂一个「等于入场价」的止损比不挂更危险 —— 它看起来像有保护。
+- 源码形态由 `tests/price.test.ts` 的**结构锁**盯着：被删掉的闸门不会让任何行为断言变红，所以「有没有人又自造一份 `fmtTick`」必须用文本断言锁住。
+
 ## 超短线路径的 L1 闸门
 
 系统有**两条会下真单的路径**，章程 §L1 两条都得守：
@@ -212,6 +234,7 @@ pnpm test
 
 - 时间格式必须 `YYYY-MM-DD HH:MM:SS`（`archive_round.py` 严格解析，`toLocaleString` 会报 ValueError）。
 - 章程 §L1 的数值（杠杆 5x / 单笔风险 2.5%）**只在 `src/guard.ts` 定义一次**；要改上限必须先改 `AGENT_TRADING_RULES.md`，`tests/scalperguard.test.ts` 会比对两者。
+- 下单价格格式化（tickSz 网格）**只在 `src/price.ts` 定义一次**，两个下单入口共用一个 `snappedSlTp()`；`tests/price.test.ts` 会检查有没有人又自造一份。
 - 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。
 - 界面文案一律中文。
 - `data/store.json` 必须存在（多模块依赖）；`.codebuddy/` 为项目数据目录，勿删。

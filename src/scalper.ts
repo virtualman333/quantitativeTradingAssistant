@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
 import { guardScalperConfig } from "./guard.js";
+import { snappedSlTp } from "./price.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
 import { strategyDir } from "./strategies.js";
@@ -127,13 +128,6 @@ export async function fetchSignal(cfg: ScalperConfig): Promise<ScalperSignal> {
   } catch {
     return { error: `scalper.py 输出非 JSON: ${out.slice(0, 200)}` } as ScalperSignal;
   }
-}
-
-/** 价格按 tickSz 取整（避免科学计数法） */
-function fmtTick(px: number, tickSz: number): string {
-  const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
-  const snapped = Math.round(px / tickSz) * tickSz;
-  return snapped.toFixed(decimals);
 }
 
 /** 持仓方向：兼容 posSide=long/short 与 net 模式（pos 正负） */
@@ -447,8 +441,14 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   // 等于在代码里又开了一个「可以到 20x」的口子。
   const lever = Number(cfg.leverage);
   const side = direction === "long" ? "buy" : "sell";
-  const slPx = fmtTick(sl, spec.tickSz);
-  const tpPx = fmtTick(tp, spec.tickSz);
+  const ticks = snappedSlTp(price, sl, tp, spec.tickSz);
+  if (!ticks) {
+    // L1-4：每单必挂止损止盈。挂不出「严格在入场价亏损侧」的止损就不开这一单，
+    // 宁可错过一次机会，也不留下一个等于入场价的止损。
+    return finish("error", `止损/止盈无法落在 tick 网格上（ref=${price} tickSz=${spec.tickSz}）`, sig, judge);
+  }
+  const slPx = ticks.slStr;
+  const tpPx = ticks.tpStr;
 
   const roundId = `S${Date.now()}`;
   const g = await genClOrdId(roundId, 1, { instId: cfg.inst, sz: size });
