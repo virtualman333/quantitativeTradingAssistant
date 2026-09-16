@@ -2,7 +2,7 @@
 /** 超短线（超高频）板块：配置 + 开单 + 开仓记录/持仓/收益展示。策略库与回测已拆到「策略回测」独立 tab。 */
 import { ref, computed, watch, onMounted, onActivated, onBeforeUnmount } from "vue";
 import { store, reload } from "../store/index.js";
-import { api } from "../lib/api.js";
+import { api, errText } from "../lib/api.js";
 import { toastOk, toastErr, ask } from "../lib/feedback.js";
 import { fmtNum } from "../lib/format.js";
 import { goTab } from "../lib/nav.js";
@@ -36,24 +36,59 @@ const totalNetPnl = computed(() => {
   return (overview.value.realizedNetPnl || 0) + (overview.value.unrealizedPnl || 0);
 });
 
-// 开仓记录按时间日期筛选
-const filteredTrades = computed(() => {
-  const list = overview.value?.trades ?? [];
-  const from = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`).getTime() : null;
-  const to = dateTo.value ? new Date(`${dateTo.value}T23:59:59.999`).getTime() : null;
-  if (from == null && to == null) return list;
-  return list.filter((t) => {
-    const ts = new Date(t.ts).getTime();
-    if (from != null && ts < from) return false;
-    if (to != null && ts > to) return false;
-    return true;
-  });
+// ── 日期区间（筛选的是「哪一段时间」） ─────────────────────
+// 判定与统计**都在主进程**（`src/scalperstats.ts` 是区间口径的唯一来源）。
+// 这里以前有一份本地过滤，只作用于下方成交明细表，而战绩面板始终是全量：
+// 同一个「日期筛选」在同一个页面上有两种含义，用户看不出差别，只会觉得
+// 战绩数字与表里的笔数对不上。现在表与统计共用主进程下发的同一份结果。
+const hasRange = computed(() => !!(dateFrom.value || dateTo.value));
+const rangeText = computed(() => `${dateFrom.value || "最早"} ~ ${dateTo.value || "最新"}`);
+const rangeData = ref(null);
+const rangeLoading = ref(false);
+const rangeErr = ref("");
+/** 连改日期时先发的请求可能后到 —— 只认最后一次，否则数字会跳回上一段区间 */
+let rangeSeq = 0;
+
+async function loadRange() {
+  const seq = ++rangeSeq;
+  rangeLoading.value = true;
+  try {
+    const r = await api.scalperRange(dateFrom.value, dateTo.value);
+    if (seq !== rangeSeq) return;
+    if (r?.ok) {
+      rangeData.value = r;
+      rangeErr.value = "";
+    } else {
+      rangeData.value = null;
+      rangeErr.value = String(r?.error || "未知错误");
+    }
+  } catch (e) {
+    if (seq !== rangeSeq) return;
+    rangeData.value = null;
+    rangeErr.value = errText(e);
+  } finally {
+    if (seq === rangeSeq) rangeLoading.value = false;
+  }
+}
+
+watch([dateFrom, dateTo], () => {
+  if (hasRange.value) loadRange();
+  // 清空筛选 → 回到全量 overview，不必再取一次（同一份台账、同一套口径）
+  else rangeData.value = null;
 });
 
+/** 成交明细表：区间生效时用主进程筛好的那份，否则用全量 */
+const filteredTrades = computed(
+  () => (hasRange.value ? rangeData.value?.trades : overview.value?.trades) || []
+);
+
 // ── 战绩统计 ───────────────────────────────────────────────
-// 数字全部来自主进程算好的 `overview.stats`（口径唯一来源 `src/scalperstats.ts`），
-// 界面只负责格式化与画曲线。若成交表与统计表各算一套净盈亏，两边必然漂移。
-const stats = computed(() => overview.value?.stats || null);
+// 数字全部来自主进程算好的 `overview.stats` / 区间值（口径唯一来源
+// `src/scalperstats.ts`），界面只负责格式化与画曲线。若成交表与统计表各算
+// 一套净盈亏，两边必然漂移。
+const stats = computed(
+  () => (hasRange.value ? rangeData.value?.stats : overview.value?.stats) || null
+);
 const spark = computed(() => sparkline(stats.value?.equity || []));
 // 只列出真正出现过的来源；某来源若全是「未同步」的单也要列出（否则用户以为没开过）
 const judgeRows = computed(() =>
@@ -131,6 +166,8 @@ async function loadOverview() {
   } catch {
     /* ignore */
   }
+  // 区间生效时一并刷新：区间统计是从本地台账现算的（不联网），会随开单/平仓变
+  if (hasRange.value) await loadRange();
 }
 
 async function refreshLoopStatus() {
@@ -336,11 +373,16 @@ function fmtTs(iso) {
 
   <div class="panel">
     <h2>超短线战绩<span class="spacer"></span>
-      <span class="hint" style="font-weight:400">样本 = 全部已平仓 {{ stats?.samples ?? 0 }} 笔（不随上方日期筛选变化）</span>
+      <span class="hint" style="font-weight:400">
+        <template v-if="hasRange">区间内（{{ rangeText }}）已平仓 {{ stats?.samples ?? 0 }} 笔 · 按开单时间判定，与下方开仓记录同一区间</template>
+        <template v-else>样本 = 全部已平仓 {{ stats?.samples ?? 0 }} 笔 · 在下方填入日期可按区间查看</template>
+      </span>
     </h2>
     <div class="body">
       <template v-if="!stats">
-        <div class="empty">统计数据不可用。请执行 npm run build 重新构建后用 npm run ui 启动界面。</div>
+        <div v-if="hasRange && rangeLoading" class="empty">正在统计 {{ rangeText }} 的战绩…</div>
+        <div v-else-if="hasRange && rangeErr" class="empty">区间统计加载失败：{{ rangeErr }}</div>
+        <div v-else class="empty">统计数据不可用。请执行 npm run build 重新构建后用 npm run ui 启动界面。</div>
       </template>
       <template v-else>
         <div v-if="stats.samples" class="st-tiles">
@@ -365,7 +407,7 @@ function fmtTs(iso) {
             <div class="st-s">累计曲线自高点回落的最大幅度（起点按 0 计）</div>
           </div>
         </div>
-        <div v-else class="empty">暂无可统计的已平仓样本</div>
+        <div v-else class="empty">暂无可统计的已平仓样本{{ hasRange ? "（当前区间内）" : "" }}</div>
 
         <div v-if="stats.samples" class="st-eq">
           <svg viewBox="0 0 600 120" preserveAspectRatio="none" :class="eqCls">
@@ -402,7 +444,7 @@ function fmtTs(iso) {
             <div class="hint" style="margin-top:6px">「LLM 介入」值不值得开，就看这两行的胜率与净盈亏差</div>
           </div>
           <div>
-            <div class="st-h">循环为什么没开单（近 {{ stats.tickTotal }} 轮）</div>
+            <div class="st-h">循环为什么没开单（{{ hasRange ? "区间内" : "近" }} {{ stats.tickTotal }} 轮）</div>
             <div v-for="r in skipRows" :key="r.key" class="st-bar">
               <span class="st-bar-k" :title="r.label">{{ r.label }}</span>
               <span class="st-track"><i :style="{ width: (r.count / skipMax) * 100 + '%' }"></i></span>

@@ -17,7 +17,7 @@ import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, con
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
 import { createProvider } from "./llm.js";
 import { strategyDir } from "./strategies.js";
-import { computeStats, netPnlOf, type ScalperStats } from "./scalperstats.js";
+import { computeStats, netPnlOf, rangeBounds, filterByRange, type RangeBounds, type ScalperStats } from "./scalperstats.js";
 
 export interface ScalperSignal {
   inst: string;
@@ -520,6 +520,34 @@ export async function getScalperOverview(): Promise<ScalperOverview> {
     unrealizedPnl,
     unsettledCount,
     stats,
+  };
+}
+
+/**
+ * 按日期区间看战绩（**不联网**，只读本地台账）。
+ *
+ * 为什么不复用 `getScalperOverview()`：那个每次都要 `syncTrades()` 并拉一次账户
+ * （联网、几百毫秒起），而界面上动一次日期就要重取一次 —— 不能为看个统计再打
+ * 一次交易所。台账是只追加的本地文件，读它足够回答「这段时间战绩如何」。
+ *
+ * 区间判定与统计口径全部来自 `scalperstats.ts`（本函数只负责读文件），
+ * 因此界面成交表里的笔数与统计表的分母必然是同一个区间。
+ *
+ * ⚠ 区间模式下监测轮次读**全量**：默认只取最近 200 条，日期若选到上周，
+ * 那 200 条可能全是今天的，界面就会拿「今天的轮次」冒充「上周的轮次」。
+ */
+export function getScalperRange(from?: string, to?: string): {
+  trades: ScalperTrade[];
+  stats: ScalperStats;
+  bounds: RangeBounds;
+} {
+  const bounds = rangeBounds(from, to);
+  const trades = readTrades();
+  const ticks = readTicks(Number.MAX_SAFE_INTEGER);
+  return {
+    trades: filterByRange(trades, bounds),
+    stats: computeStats(trades, ticks, bounds),
+    bounds,
   };
 }
 

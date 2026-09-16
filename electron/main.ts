@@ -547,6 +547,15 @@ ipcMain.handle("scalper:overview", async () => {
     return { ok: false, error: String(e).slice(0, 300) };
   }
 });
+ipcMain.handle("scalper:range", async (_e, from?: string, to?: string) => {
+  try {
+    const mod = await loadDist<any>("scalper.js");
+    // 只读本地台账、不联网 —— 界面每改一次日期都会走这里
+    return { ok: true, ...mod.getScalperRange(from, to) };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 300) };
+  }
+});
 ipcMain.handle("scalper:backtest", async (_e, args) => {
   try {
     const mod = await loadDist<any>("scalper.js");

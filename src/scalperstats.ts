@@ -115,6 +115,58 @@ function fin(v: unknown): number | null {
 }
 
 /**
+ * 日期区间：闭区间，按**开单时间** `ts` 判定，含首尾整天。
+ *
+ * 为什么判定写在主进程而不是界面里：
+ * 区间一旦有两份实现就会漂移 —— 界面成交表按本地时区取 `T00:00:00` /
+ * `T23:59:59.999`，统计若另写一套（少个 `.999`、或按 UTC 解析），
+ * 用户在区间末日晚间开的那单会**出现在表里却不进统计，而且不报错**。
+ * 本模块是区间判定的唯一来源，表与统计共用 `filterByRange()`。
+ */
+export interface RangeBounds {
+  /** 起点（含），`null` = 不设下限 */
+  fromMs: number | null;
+  /** 终点（含），`null` = 不设上限 */
+  toMs: number | null;
+}
+
+/** 单端解析：空串 / 非字符串 / 无法解析的日期 → `null`（该端不设限，与旧界面行为一致） */
+function dayEdge(v: unknown, endOfDay: boolean): number | null {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s) return null;
+  // 不带 Z 的日期时间按**本地时区**解析，和界面 `<input type="date">` 的语义一致
+  const ms = new Date(`${s}T${endOfDay ? "23:59:59.999" : "00:00:00"}`).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** 把两个 `YYYY-MM-DD` 变成毫秒边界（只解析一次，表与统计共用同一份边界） */
+export function rangeBounds(from?: unknown, to?: unknown): RangeBounds {
+  return { fromMs: dayEdge(from, false), toMs: dayEdge(to, true) };
+}
+
+/** 一条记录是否落在区间内；无边界（或两端都空）= 全部通过 */
+export function inRange(ts: unknown, b: RangeBounds | null | undefined): boolean {
+  if (!b || (b.fromMs === null && b.toMs === null)) return true;
+  const ms = new Date(String(ts ?? "")).getTime();
+  // 区间生效时，**时间读不出来的记录不进区间**：放不回时间轴，就不能声称它在区间里。
+  // （与「未同步 ≠ 0 盈亏」同一条原则：算不出来的，不要装成算得出来的样子。）
+  if (!Number.isFinite(ms)) return false;
+  if (b.fromMs !== null && ms < b.fromMs) return false;
+  if (b.toMs !== null && ms > b.toMs) return false;
+  return true;
+}
+
+/** 按区间筛选任意带 `ts` 的台账记录（成交 / 监测轮次共用同一条判定） */
+export function filterByRange<T extends { ts?: string }>(
+  list: T[] | null | undefined,
+  b: RangeBounds | null | undefined
+): T[] {
+  const all = (list ?? []).filter((x): x is T => !!x);
+  if (!b || (b.fromMs === null && b.toMs === null)) return all;
+  return all.filter((x) => inRange(x.ts, b));
+}
+
+/**
  * 单笔净盈亏（已扣手续费）。**口径唯一来源**，别在别处重写这条公式。
  *
  * 平仓结果未同步时返回 `null` 而不是 0 —— 这是本模块存在的首要理由。
@@ -214,12 +266,18 @@ export function reasonStats(ticks: StatTick[] | null | undefined): {
   return { total: all.length, opened: hit.get("opened") ?? 0, list };
 }
 
-/** 汇总整轮战绩 */
+/**
+ * 汇总整轮战绩。
+ *
+ * `bounds` 非空时，成交与监测轮次**都**先过区间再统计 —— 用同一份边界、
+ * 同一个 `filterByRange()`，所以界面上表格里的笔数与这里的分母永远一致。
+ */
 export function computeStats(
   trades: StatTrade[] | null | undefined,
-  ticks: StatTick[] | null | undefined
+  ticks: StatTick[] | null | undefined,
+  bounds?: RangeBounds | null
 ): ScalperStats {
-  const { settled, unsettled, open } = splitTrades(trades);
+  const { settled, unsettled, open } = splitTrades(filterByRange(trades, bounds));
   const vals = settled.map((s) => s.v);
   const samples = vals.length;
 
@@ -254,7 +312,7 @@ export function computeStats(
       };
     });
 
-  const rs = reasonStats(ticks);
+  const rs = reasonStats(filterByRange(ticks, bounds));
 
   return {
     samples,

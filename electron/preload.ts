@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld("api", {
   scalperUpdate: (p: unknown) => safeInvoke("scalper:update", p),
   scalperOnce: () => safeInvoke("scalper:once"),
   scalperOverview: () => safeInvoke("scalper:overview"),
+  scalperRange: (from: string, to: string) => safeInvoke("scalper:range", from, to),
   scalperStart: () => safeInvoke("scalper:start"),
   scalperStop: () => safeInvoke("scalper:stop"),
   scalperStatus: () => safeInvoke("scalper:status"),
