@@ -12,7 +12,7 @@ mail_report.py — 每轮交易循环的邮件报告渲染器
   logs/rounds.jsonl        本轮结构化快照
   state/runtime.json       运行态（熔断、当日止损计数）
   ledger/trades.csv        交易台账（月度已实现盈亏）
-  state/month_state.json   月度目标基准（本脚本自动初始化/跨月重置）
+  state/month_state.json   月度目标基准（由 archive_round.py 每轮写入；本脚本只读）
 
 输出：JSON {subject, body, risk_tier, alerts[]}
 
@@ -385,7 +385,10 @@ def main():
     equity = float(rnd.get("equity_usdt") or 0)
 
     now = _now()
-    mst = _month_risk.ensure_month_state(equity)
+    # ★ 邮件是**报表**，不是基准的维护者：只读视图（不落盘），且 now 必须与下一行的
+    #   month_metrics 一致 —— 此前 ensure_month_state(equity) 漏传 now，用真实当前月写盘，
+    #   而 month_metrics 用注入的 now 计算，跨月时就是「这个月的权益 ÷ 上个月的基准」。
+    mst = _month_risk.read_month_state(equity, now=now)
     # 月度收益率 / 真实回撤 / 时间进度一律取自 month_risk.py —— 本文件不再自己算
     m = _month_risk.month_metrics(equity, now=now, state=mst)
     ym = m["month"]

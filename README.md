@@ -236,6 +236,7 @@ const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
 
 - 时间格式必须 `YYYY-MM-DD HH:MM:SS`（`archive_round.py` 严格解析，`toLocaleString` 会报 ValueError）。
 - 章程 §L1 的数值（杠杆 5x / 单笔风险 2.5%）**只在 `src/guard.ts` 定义一次**；要改上限必须先改 `AGENT_TRADING_RULES.md`，`tests/scalperguard.test.ts` 会比对两者。
+- `state/month_state.json` 是 **L1-6 的分母**（`month_peak_equity` 只增不减，**抬高一次不可逆**）：**只有 `scripts/archive_round.py` 会写它**（全仓唯一调用 `month_risk.update_month_state()` 的地方）。看板 / 邮件走 `month_risk.month_metrics()` 的**只读**口径 —— 展示路径一律不得改动基准与峰值，否则一份手填的账户快照就能把真实回撤算成熔断。`tests/monthguard.test.ts` 用真跑 + 哈希比对钉住这一点。
 - 下单价格格式化（tickSz 网格）**只在 `src/price.ts` 定义一次**，两个下单入口共用一个 `snappedSlTp()`；`tests/price.test.ts` 会检查有没有人又自造一份。
 - 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。
 - 界面文案一律中文。

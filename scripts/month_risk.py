@@ -26,6 +26,29 @@ month_risk.py — 月度风险口径的唯一来源（月度基准 / 峰值 / �
 `month_start_equity` 跨月重置为当月首次见到的权益，`month_peak_equity` 只增不减。
 **真实回撤 = (当前权益 − 月度峰值) / 月度峰值**（不是月末对月初）。负数=回撤。
 **L1-6 的判据是回撤本身**，与「本月是否盈利」无关。
+
+为什么读写必须分开
+------------------
+`state/month_state.json` 不是一份普通缓存，它是 **L1-6 的分母**：
+`month_peak_equity` 每次被抬高都会让「真实回撤」变大，而 `month_peak_equity` 只增不减
+（除了跨月重置），所以一次错误的写入是**不可逆**的 —— 轻则整月档位被压到 DEFEND，
+重则 `guard.ts` 误判熔断、**停止一切开新仓**。
+
+而原来的 `ensure_month_state()` 是个「名字看不出会写盘」的写入口，被三条路径调用，
+其中两条是**纯展示**路径：
+  - `scripts/dashboard.py` —— 账户权益来自 AI 手填的 `--account` 快照 JSON（可能过期）；
+  - `scripts/mail_report.py` —— 报表，而且调用时**没传 now**，与下一行的
+    `month_metrics(..., now=now)` 可能落在不同月份。
+
+后果有两条，都不报错：
+  ① 跨月首日先打开一次看板，整月的 `month_start_equity` 就被**冻结成那份快照里的数字**；
+  ② 快照权益若高于当月峰值，`month_peak_equity` 被**永久抬高** →
+     此后真实权益看起来一直是深度回撤 → **误触发 L1-6**。
+
+所以现在：
+  - `update_month_state()` = **唯一写入口**，只允许交易主循环（`archive_round.py`）调用；
+  - `read_month_state()` = 只读视图，跨月时**虚拟重置**（不落盘）；
+  - `month_metrics()` = **纯计算**，`state` 缺省时走只读视图，**绝不写盘**。
 """
 
 import calendar
@@ -65,19 +88,43 @@ def _load_state():
         return {}
 
 
-def ensure_month_state(equity, now=None):
-    """维护月度基准：跨月自动重置；同月持续跟踪权益峰值（用于真实回撤计算）。"""
+def _reset_state(equity, now, note):
+    """当月状态的初始形态（跨月重置 / 首次初始化 / 只读虚拟重置共用一份）。"""
+    return {
+        "month": now.strftime("%Y-%m"),
+        "month_start_equity": equity,
+        "month_peak_equity": equity,
+        "month_start_cst": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "reset_note": note,
+    }
+
+
+def read_month_state(equity, now=None):
+    """**只读**视图：返回「按这份权益与这个时刻应当使用的月度状态」，绝不落盘。
+
+    跨月时不返回上一月的状态，而是给出一个虚拟重置的当月状态 —— 否则月初打开看板
+    会拿上个月的基准去算这个月的收益率。虚拟重置只活在返回值里，写盘是
+    `update_month_state()` 的事（它拿的才是当轮真实权益）。
+    """
+    now = _now(now)
+    st = _load_state()
+    if st.get("month") != now.strftime("%Y-%m"):
+        return _reset_state(float(equity or 0), now, "只读视图：跨月虚拟重置（未落盘）")
+    return st
+
+
+def update_month_state(equity, now=None):
+    """**唯一写入口**：维护月度基准（跨月重置）与权益峰值（只增不减）。
+
+    只有交易主循环（`archive_round.py`，每轮拿的是真账户权益）该调它。
+    展示 / 报表路径一律走 `month_metrics()`（纯计算）—— 见模块头部「为什么读写必须分开」。
+    """
     now = _now(now)
     ym = now.strftime("%Y-%m")
+    equity = float(equity or 0)
     st = _load_state()
     if st.get("month") != ym:
-        st = {
-            "month": ym,
-            "month_start_equity": equity,
-            "month_peak_equity": equity,
-            "month_start_cst": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "reset_note": "跨月自动重置（或首次初始化）",
-        }
+        st = _reset_state(equity, now, "跨月自动重置（或首次初始化）")
     else:
         # 峰值只增不减；真实回撤 = (当前权益 - 峰值) / 峰值
         if equity > float(st.get("month_peak_equity") or 0):
@@ -91,7 +138,7 @@ def ensure_month_state(equity, now=None):
 
 
 def month_metrics(equity, now=None, state=None):
-    """当月风险指标（唯一口径）。
+    """当月风险指标（唯一口径）。**纯计算，绝不落盘。**
 
     返回 dict：
       month / month_start_equity / month_peak_equity
@@ -99,11 +146,12 @@ def month_metrics(equity, now=None, state=None):
       month_dd_pct    **真实回撤**（%，相对当月峰值；负数=回撤）
       time_progress / day / days_in_month / achieved_pct_of_target / monthly_target_pct
 
-    `state` 可传入已经 `ensure_month_state()` 过的状态，避免同一轮重复读文件。
+    `state` 可传入已经 `update_month_state()` 或 `read_month_state()` 得到的状态，
+    避免同一轮重复读文件；不传则走只读视图（不落盘）。
     """
     now = _now(now)
-    st = state if state is not None else ensure_month_state(equity, now)
     equity = float(equity or 0)
+    st = state if state is not None else read_month_state(equity, now)
 
     m0 = float(st.get("month_start_equity") or equity)
     peak = max(float(st.get("month_peak_equity") or m0), m0, equity)
@@ -142,12 +190,17 @@ def month_dd_circuit_tripped(month_dd_pct):
         return False
 
 
-if __name__ == "__main__":  # 手动排查用：打印当月指标
+if __name__ == "__main__":  # 手动排查用：打印当月指标（**只读**，不会改动基准与峰值）
     import argparse
 
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="打印当月风险指标。只读 —— 排查动作不该改动 L1-6 的分母。"
+    )
     ap.add_argument("--equity", type=float, required=True, help="当前账户权益（USDT）")
     a = ap.parse_args()
-    m = month_metrics(a.equity)
+    state = read_month_state(a.equity)
+    m = month_metrics(a.equity, state=state)
     m["l1_6_tripped"] = month_dd_circuit_tripped(m["month_dd_pct"])
+    m["state_source"] = MONTH_STATE
+    m["state_month"] = state.get("month")
     print(json.dumps(m, ensure_ascii=False, indent=2))

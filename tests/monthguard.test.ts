@@ -409,3 +409,213 @@ describe("源码形态 · 两条下单路径都过 L1-6，且只有一份读数�
     }
   });
 });
+
+// ── F. 月度状态是「L1-6 的分母」：读路径不许写盘，写入口只有一个 ─────────────
+
+describe("月度状态读写分离 · 展示路径绝不许改动 L1-6 的分母", () => {
+  /**
+   * 这一条锁的是一个**不可逆**的危害。
+   *
+   * `state/month_state.json` 不是普通缓存，它是 L1-6「月度回撤 ≥12% → 强制停止开新仓」的分母：
+   * `month_peak_equity` 只增不减（除跨月重置），**每次被抬高都让真实回撤看起来更大**。
+   * 而原来的 `ensure_month_state()`（名字看不出会写盘）被两条**纯展示**路径调用：
+   *   - `dashboard.py`：权益来自 AI 手填的 `--account` 快照 JSON，可能过期；
+   *   - `mail_report.py`：报表。
+   * 于是「打开一次看板」就能把当月的峰值永久抬到一个手填的数字上，此后真实权益一直被算成
+   * 深度回撤 → `guard.ts` 误判熔断 → **停止一切开新仓**；跨月首日打开看板还会把整月的
+   * `month_start_equity` 冻结成那份快照里的数。
+   * 全程不报错、不留痕，纯 TS 单测也抓不到（它读一个不存在的文件同样能过），所以这里真跑。
+   */
+  const driver = `
+import hashlib, json, os, sys, tempfile, tokenize
+from datetime import datetime, timezone, timedelta
+
+sys.path.insert(0, sys.argv[1])
+import month_risk
+
+CST = timezone(timedelta(hours=8))
+tmp = tempfile.mkdtemp(prefix="qta_month_rw_")
+month_risk.MONTH_STATE = os.path.join(tmp, "month_state.json")
+
+
+def exists():
+    return os.path.exists(month_risk.MONTH_STATE)
+
+
+def digest():
+    if not exists():
+        return None
+    with open(month_risk.MONTH_STATE, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def peak():
+    with open(month_risk.MONTH_STATE, encoding="utf-8") as f:
+        return json.load(f)["month_peak_equity"]
+
+
+def trip(pct):
+    return month_risk.month_dd_circuit_tripped(pct)
+
+# ① 空目录下的只读调用：连文件都不该被创建
+tmp_fresh = tempfile.mkdtemp(prefix="qta_month_fresh_")
+month_risk.MONTH_STATE = os.path.join(tmp_fresh, "month_state.json")
+fresh_metrics = month_risk.month_metrics(5000.0)
+fresh_created = exists()
+
+# ② 交易主循环（唯一写入口）跑两轮：基准 10000，峰值抬到 11000
+month_risk.MONTH_STATE = os.path.join(tmp, "month_state.json")
+month_risk.update_month_state(10000.0)
+month_risk.update_month_state(11000.0)
+peak_after_loop = peak()
+digest_after_loop = digest()
+
+# ③ 展示路径 A：看板拿一份「手填的、比当月峰值更高的」过期快照
+board = month_risk.month_metrics(15000.0)
+digest_after_board = digest()
+
+# ④ 展示路径 B：跨月首日打开看板（now 注入到下月 1 日）
+next_month = datetime(2026, 10, 1, 9, 0, 0, tzinfo=CST)
+cross = month_risk.read_month_state(15000.0, now=next_month)
+digest_after_cross = digest()
+
+# ⑤ 之后交易主循环按**真实权益**跑一轮：回撤只能相对真实峰值 11000
+real = month_risk.month_metrics(10200.0)
+
+# ⑥ 反向对照：只有写入口才该抬高峰值（证明上面那几条断言真的抓得住写盘）
+month_risk.update_month_state(15000.0)
+peak_after_forced_write = peak()
+real_forced = month_risk.month_metrics(10200.0)
+
+# ⑦ 全仓谁在调 update_month_state —— 用 tokenize 去掉注释与字符串后再按文件判定
+#    （注释里写「旧实现会写盘」不能算数，这正是本仓踩过的假锁形态）
+calls = {}
+for name in sorted(os.listdir(sys.argv[1])):
+    if not name.endswith(".py"):
+        continue
+    try:
+        with open(os.path.join(sys.argv[1], name), "rb") as f:
+            toks = list(tokenize.tokenize(f.readline))
+    except Exception:
+        continue
+    code = "".join(
+        t.string + (" " if t.type in (tokenize.NEWLINE, tokenize.NL) else "")
+        for t in toks
+        if t.type not in (tokenize.COMMENT, tokenize.STRING, tokenize.ENCODING, tokenize.ENDMARKER)
+    )
+    if "update_month_state" in code:
+        calls[name] = code.count("update_month_state")
+
+print(json.dumps({
+    "fresh_created": fresh_created,
+    "fresh_dd": fresh_metrics["month_dd_pct"],
+    "peak_after_loop": peak_after_loop,
+    "digest_after_loop": digest_after_loop,
+    "digest_after_board": digest_after_board,
+    "digest_after_cross": digest_after_cross,
+    "board_dd": board["month_dd_pct"],
+    "cross_month": cross.get("month"),
+    "cross_start": cross.get("month_start_equity"),
+    "cross_note": cross.get("reset_note"),
+    "real_dd": real["month_dd_pct"],
+    "real_tripped": trip(real["month_dd_pct"]),
+    "peak_after_forced_write": peak_after_forced_write,
+    "real_dd_after_forced_write": real_forced["month_dd_pct"],
+    "real_tripped_after_forced_write": trip(real_forced["month_dd_pct"]),
+    "writer_files": calls,
+}, ensure_ascii=False))
+`;
+
+  const py = process.env.PYTHON || "python";
+  const hasPython = spawnSync(py, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
+
+  type Out = {
+    fresh_created: boolean;
+    fresh_dd: number;
+    peak_after_loop: number;
+    digest_after_loop: string;
+    digest_after_board: string;
+    digest_after_cross: string;
+    board_dd: number;
+    cross_month: string;
+    cross_start: number;
+    cross_note: string;
+    real_dd: number;
+    real_tripped: boolean;
+    peak_after_forced_write: number;
+    real_dd_after_forced_write: number;
+    real_tripped_after_forced_write: boolean;
+    writer_files: Record<string, number>;
+  };
+
+  function runDriver(name: string, t: { skip: (m: string) => void }): Out | null {
+    if (!hasPython) {
+      t.skip(`本机没有可用的 ${py} —— 这条锁没生效，CI 上必须能跑`);
+      return null;
+    }
+    const f = tmpFile(name);
+    fs.writeFileSync(f, driver, "utf8");
+    const r = spawnSync(py, [f, path.join(ROOT, "scripts")], { encoding: "utf8" });
+    assert.equal(r.status, 0, `Python 驱动失败：${r.stderr?.slice(0, 400)}`);
+    return JSON.parse(r.stdout.trim()) as Out;
+  }
+
+  it("只读口径不写盘：看板/邮件跑过之后状态文件逐字节不变（含跨月只读）", (t) => {
+    const out = runDriver("driver_rw.py", t);
+    if (!out) return;
+
+    // 空目录下只读调用连文件都不该创建
+    assert.equal(out.fresh_created, false, "只读调用创建了 month_state.json —— 展示路径不该有写副作用");
+    assert.equal(out.fresh_dd, 0, "无基准时回撤应为 0（当前权益即峰值）");
+
+    assert.equal(out.peak_after_loop, 11000, "写入口没有把峰值抬到 11000");
+    assert.equal(
+      out.digest_after_board,
+      out.digest_after_loop,
+      "看板口径改动了 month_state.json —— 一份手填的账户快照就能永久抬高 L1-6 的峰值（不可逆）"
+    );
+    assert.equal(
+      out.digest_after_cross,
+      out.digest_after_loop,
+      "跨月只读改动了 month_state.json —— 月初打开一次看板就会把整月基准冻结成快照里的数字"
+    );
+
+    // 跨月只读给出的是「虚拟重置」的当月状态，而不是上个月那份
+    assert.equal(out.cross_month, "2026-10", `跨月只读返回了 ${out.cross_month} 的状态`);
+    assert.equal(out.cross_start, 15000, "跨月虚拟重置应以当次权益为月初基准");
+    assert.ok(out.cross_note.includes("未落盘"), `虚拟重置要写明未落盘：${out.cross_note}`);
+
+    // 看板自己看到的结果（临时视图）不影响真实口径
+    assert.ok(Math.abs(out.board_dd) < 1e-9, `拿高于峰值的快照看板应显示无回撤：${out.board_dd}`);
+  });
+
+  it("真实口径仍按真实峰值：10200 / 峰值 11000 = -7.27%，不熔断", (t) => {
+    const out = runDriver("driver_rw2.py", t);
+    if (!out) return;
+    assert.ok(Math.abs(out.real_dd - -7.2727) < 0.01, `真实回撤算错：${out.real_dd}`);
+    assert.equal(out.real_tripped, false, "-7.27% 被误判为熔断");
+  });
+
+  it("反向对照：走写入口就一定会被上面的断言抓住", (t) => {
+    const out = runDriver("driver_rw3.py", t);
+    if (!out) return;
+    // 这条对照存在的意义：证明「只读不写盘」那几条断言真的会红，而不是恒真。
+    assert.equal(out.peak_after_forced_write, 15000, "写入口没抬高峰值 —— 上面的只读断言就失去了对照");
+    assert.ok(
+      Math.abs(out.real_dd_after_forced_write - -32.0) < 0.01,
+      `峰值被抬到 15000 后真实回撤应变 -32%：${out.real_dd_after_forced_write}`
+    );
+    assert.equal(out.real_tripped_after_forced_write, true, "峰值被污染后应误判熔断 —— 这正是要防的后果");
+  });
+
+  it("写入口全仓只有一个：archive_round.py 调一次（定义处不算）", (t) => {
+    const out = runDriver("driver_writer.py", t);
+    if (!out) return;
+    assert.deepEqual(
+      Object.keys(out.writer_files).sort(),
+      ["archive_round.py", "month_risk.py"],
+      `update_month_state 出现在意外的地方：${JSON.stringify(out.writer_files)} —— 展示路径不得写月度状态`
+    );
+    assert.equal(out.writer_files["archive_round.py"], 1, "archive_round.py 里写入口的调用次数不是 1");
+  });
+});

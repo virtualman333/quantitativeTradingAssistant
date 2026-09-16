@@ -186,8 +186,12 @@ def update_runtime(r: dict) -> dict:
     # 顺带把阈值也落盘：总览页要显示「回撤 -3.5% / 熔断线 -12%」，但界面**不许**
     # 自己抄一份章程常量（本仓「同一事实两处写法必然漂移」已连续多轮命中）。
     # 两个数都取自 month_risk.py，与 l1_6_tripped 的判据同源。
+    # ★ `update_month_state()` 是全仓**唯一**会改动月度基准/峰值的调用点（本脚本每轮拿的是
+    #   真账户权益）。看板与邮件走 `month_metrics()` 的只读口径 —— 否则一份手填的账户快照
+    #   就能把 `month_peak_equity` 永久抬高，让真实权益一直显示成深度回撤、误触发 L1-6。
     try:
-        mm = month_risk.month_metrics(r["equity_usdt"])
+        mst = month_risk.update_month_state(r["equity_usdt"])
+        mm = month_risk.month_metrics(r["equity_usdt"], state=mst)
         st["month_dd_pct"] = round(float(mm["month_dd_pct"]), 4)
         st["month_pnl_pct"] = round(float(mm["month_pnl_pct"]), 4)
         st["month_start_equity"] = round(float(mm["month_start_equity"]), 4)

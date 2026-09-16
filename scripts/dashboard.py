@@ -227,8 +227,13 @@ def build(args):
         try:
             import mail_report as _mr
             import month_risk as _mrk
-            mst = _mrk.ensure_month_state(demo_eq)
-            m = _mrk.month_metrics(demo_eq, state=mst)
+            # ★ 看板是**只读展示**：month_metrics() 是纯计算，绝不改动 state/month_state.json。
+            #   此前这里调的是 ensure_month_state()（会写盘），而 demo_eq 来自 AI 手填的
+            #   `--account` 快照 —— 一份过期的、或比当月峰值更高的快照，会把
+            #   `month_peak_equity` 永久抬高（只增不减、不可逆），于是真实权益此后一直被算成
+            #   深度回撤，`guard.ts` 误触发 L1-6 停止一切开新仓；跨月首日打开一次看板还会把
+            #   整月的 `month_start_equity` 冻结成快照里的数字。基准与峰值只由 archive_round.py 写。
+            m = _mrk.month_metrics(demo_eq)
             n = _mrk._now()
             dim = m["days_in_month"]
             pnl_pct = m["month_pnl_pct"]
