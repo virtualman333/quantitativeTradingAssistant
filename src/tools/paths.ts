@@ -4,8 +4,9 @@
  * 工具能读写文件、能跑 bash，必须有边界：
  *   · 一切文件操作限制在仓库根目录内（PROJECT_ROOT，即 agent 的上一级）
  *   · 禁止触碰 .git 内部与密钥类文件
- *   · **写操作**另外禁止进入 `state/` 与 `ledger/`（风控判据与账本的载体，
- *     各有带风控语义的写入口，见 `DENY_WRITE_DIRS`）
+ *   · **写操作**另外禁止进入「风控判据与账本的载体」目录（各有带风控语义的写入口，
+ *     见 `DENY_WRITE_DIRS`；禁区与仓库实际的载体目录是否对得上，由
+ *     `tests/pathguard.test.ts` **现算**核对，不靠这张表自己说了算）
  * 越界一律拒绝，不静默放行。
  */
 import path from "node:path";
@@ -34,31 +35,49 @@ const DENY_DIRS = [".git", "node_modules", ".venv", "__pycache__", "release", "d
 const DENY_FILES = [".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", ".htpasswd"];
 
 /**
- * **写操作**额外禁入的目录：`state/` 与 `ledger/`。
+ * **写操作**额外禁入的目录 —— 「风控判据与账本的载体」。
  *
- * 为什么只挡写、不挡读：这两处是**风控判据与账本的载体**，读它没有代价（LLM 要看本轮
- * 运行态），改它有。
+ * 为什么只挡写、不挡读：这些目录是**判据与账本的载体**，读它没有代价（LLM 要看本轮
+ * 运行态、要复盘历史），改它有。
  *
- * - `state/month_state.json` 的 `month_peak_equity` 只增不减、抬高一次不可逆
- *   （抬高峰值 = 回撤虚高 → 误熔断；清零 = 回撤虚低 → 该熔断不熔断），而它是章程 L1-6 的**分母**；
- * - `state/runtime.json` 的当日计数与 `l1_6_tripped`、`state/order_idem_<轮次>.json` 的幂等登记
- *   （章程 §6.1）、`state/reviewed_trades.json` 的复盘账本；
- * - `ledger/trades.csv` 是交易流水，只追加。
+ * - `state/`（L1-6 的分母 `month_state.json`：`month_peak_equity` 只增不减、抬高一次
+ *   不可逆；`runtime.json` 的当日计数与 `l1_6_tripped`；`order_idem_<轮次>.json` 的
+ *   幂等登记（章程 §6.1）；`reviewed_trades.json` 的复盘账本）；
+ * - `ledger/`（`trades.csv` 逐笔台账，只追加）；
+ * - `logs/`（`rounds.jsonl` 轮次结构化归档，**只追加、历史行永不改写**，章程 L1-7）；
+ * - `data/`（`scalper_trades.jsonl` 开单记录、`scalper_ticks.jsonl` 监测记录 ——
+ *   超短线战绩面板与「执行出错」桶的唯一来源；`store.json` 配置与轮次历史索引）；
+ * - `news/`（`news.jsonl` 只追加审计流水，**不可改写**，章程 L1-7）。
  *
- * README 的原话是「`state/month_state.json` … **只有 `scripts/archive_round.py` 会写它**」。
- * 这句话在**代码路径**上成立（扛它的是 `tests/monthguard.test.ts` 的源码调用点断言），
- * 但它看不见另一条路：LLM 手里的通用写工具。`DENY_DIRS` 里原本没有这两项，于是
- * `write_file`（以及任何拿到确认的写工具）可以直接把那几个文件覆盖成任意内容 ——
- * 唯一的拦阻是「危险工具要用户点一次确认」，而对话框里给的正是这条路径的预览。
- * **一条靠人肉确认扛着的风控边界不是边界**，所以边界划在工具层：
- * 要改这些文件，请走它们各自的写入口（`scripts/jsonstore.py` 的原子写 /
- * `scripts/archive_round.py` 的只追加），而不是让模型手写。
+ * ⚠ 这张表**不是**「我说了算」的清单：`tests/pathguard.test.ts` 会现算两遍
+ * ——「磁盘上哪些一级目录里有 json/jsonl/csv」与「源码里以 `<目录>/x.json|jsonl|csv`
+ * 引用过哪些一级目录」—— 然后要求**每一个都被这张表覆盖**，或者进那张**声明式例外表**
+ * 并写明理由。少一个就红。
+ *
+ * 这一条是补出来的：原先表里只有 `state` 与 `ledger`（手抄的两个名字），而
+ * `logs/rounds.jsonl`、`data/scalper_trades.jsonl`、`news/news.jsonl` 同样是
+ * 「只追加、不可改写」的账本，**通用写工具当时可以直接覆盖它们**（实测复现过）。
+ * 文档里那句「写操作禁止进入风控判据与账本的载体」当时只对了一半 —— 而这半句假话
+ * 比没有这句话更坏：它让人以为账本已经有人管了。
  *
  * 残余缺口（刻意保留、已写进 README）：`bash` 工具无法从命令文本上封死
  * （`echo > state/...`、`python -c ...` 都在它能力范围内）—— 它同样是危险工具、
  * 逐次人工确认，属于用户明确授权后的最后手段，不在这里假装堵上。
  */
-const DENY_WRITE_DIRS = ["state", "ledger"];
+export const DENY_WRITE_DIRS = ["state", "ledger", "logs", "data", "news"];
+
+/**
+ * 写禁区里每个目录的「该走哪个入口」—— 报错里必须点名。
+ * 只说「不行」的话模型会反复重试同一个被拒的写入（这条是本仓库踩出来的）。
+ * `tests/pathguard.test.ts` 会核对这张表覆盖了 `DENY_WRITE_DIRS` 的每一项。
+ */
+export const DENY_WRITE_HINT: Record<string, string> = {
+  state: "state/ 下的 JSON 请走 scripts/jsonstore.py 的原子写（读用 read_json_state）",
+  ledger: "ledger/ 的逐笔台账请走 scripts/archive_round.py 的只追加入口",
+  logs: "logs/rounds.jsonl 是只追加归档，请走 scripts/archive_round.py 的只追加入口",
+  data: "data/ 下的流水请走写它们的脚本（src/scalper.ts 的只追加 / store.ts 的配置写入）",
+  news: "news/news.jsonl 是只追加审计流水，请走 scripts/news_db.py 的只追加入口",
+};
 
 /** 解析为绝对路径并确认落在仓库内；越界抛错 */
 export function resolveSafe(
@@ -88,8 +107,7 @@ export function resolveSafe(
     if (wd) {
       throw new Error(
         `${wd}/ 是风控判据与账本的载体，不接受通用写工具改写（${rel}）。` +
-          `state/ 下的 JSON 请走 scripts/jsonstore.py 的原子写、轮次账本请走 ` +
-          `scripts/archive_round.py 的只追加入口；确实要改请用户手工改，不要用本工具覆盖。`
+          `${DENY_WRITE_HINT[wd] ?? ""}；确实要改请用户手工改，不要用本工具覆盖。`
       );
     }
   }

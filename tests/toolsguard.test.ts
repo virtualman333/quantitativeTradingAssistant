@@ -29,10 +29,14 @@
  * **保护逻辑必须是共用的，不能靠每个用例各自记得。**
  *
  * 本文件锁四件事（真调工具函数，不看源码形状）：
- *   A. `state/**` 与 `ledger/**` 的写入被**拒绝**（覆盖与 append 都算），错误里给出该走哪个入口；
+ *   A. 写禁区（`DENY_WRITE_DIRS`）的写入被**拒绝**（覆盖与 append 都算），错误里给出该走哪个入口；
  *   B. 拒绝之后**磁盘逐字节没变**、也没有凭空多出文件；
  *   C. 其它路径照常可写（覆盖 + 追加）—— **守卫不许把功能堵死**；
  *   D. 判据本身：`forWrite` 与只读的分野、大小写变体、`..` 穿行、仓库外、以及「别误伤子串同名的路径」。
+ *
+ * 禁区**有哪些目录**不在这里判 —— 那由 `tests/pathguard.test.ts` 现算核对
+ * （磁盘上有状态文件的目录 ∪ 源码引用过的目录）。本文件只判「禁区拦不拦得住」，
+ * 覆盖面对不对是另一条锁的事。两份分工写在两个文件头里，别互相抄。
  *
  * 运行：pnpm test
  */
@@ -42,7 +46,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ROOT } from "./_src.ts";
-import { resolveSafe, PROJECT_ROOT, relOf } from "../src/tools/paths.ts";
+import { resolveSafe, PROJECT_ROOT, relOf, DENY_WRITE_DIRS } from "../src/tools/paths.ts";
 import { writeFileTool } from "../src/tools/fs.ts";
 
 /** 允许写入的确认通道：把「用户点了确认」这一步固定为真，剩下的全靠路径守卫 */
@@ -59,15 +63,26 @@ const REAL_TARGETS = [
 /**
  * 探针路径：**全部不存在**。守卫正常时它们一个都不会被创建；
  * 守卫坏掉时它们会被建出来 —— `expectAllRefused()` 的 `finally` 负责清掉。
+ *
+ * ⚠ `logs/`、`data/`、`news/` 这三组是**本轮补的**：写禁区原先只有手抄的
+ * `["state","ledger"]`，而这三处同样是「只追加、不可改写」的账本
+ * （`logs/rounds.jsonl` 章程 L1-7、`data/scalper_*.jsonl` 战绩与监测记录、
+ * `news/news.jsonl` 审计流水），当时 `write_file` 能直接覆盖它们。
+ * 它们的**真实文件**只用 `resolveSafe()` 做纯判据（见 tests/pathguard.test.ts），
+ * 不在这里真去写 —— 拿用户的真实账本做写测试，进程被杀就还原不回去。
  */
 const PROBE_TARGETS = [
   "state/toolsguard_probe.json",
   "state/sub/dir/toolsguard_probe.json",
   "state/whatever_new.json",
   "ledger/toolsguard_probe.csv",
+  "logs/toolsguard_probe.jsonl",
+  "data/toolsguard_probe.jsonl",
+  "news/toolsguard_probe.jsonl",
   "State/TOOLSGUARD_PROBE.JSON",
   "STATE/toolsguard_probe2.json",
   "Ledger/toolsguard_probe2.csv",
+  "Data/toolsguard_probe2.jsonl",
   "scripts/../state/toolsguard_probe3.json",
   "state/../state/toolsguard_probe4.json",
 ];
@@ -104,7 +119,13 @@ async function expectAllRefused(
         () => writeFileTool.run({ path: rel, content: HACK, append: !!opts.append }, OK_CONFIRM),
         (e: Error) => {
           const m = String(e.message);
-          assert.match(m, /state|ledger/i, `${rel}：被拒了但没说清是哪个目录（${m}）`);
+          // 「哪个目录」按写禁区的**现算清单**核对，不抄一份字面量 ——
+          // 抄一份的话，新加一个禁区目录时这条断言会跟着一起漂。
+          assert.match(
+            m,
+            new RegExp(DENY_WRITE_DIRS.join("|"), "i"),
+            `${rel}：被拒了但没说清是哪个目录（${m}）`
+          );
           if (opts.msg) {
             assert.match(
               m,
@@ -160,9 +181,12 @@ async function expectAllRefused(
   }
 }
 
-describe("A/B. state/ 与 ledger/ 不接受通用写工具改写，且拒绝时磁盘零副作用", () => {
+describe("A/B. 写禁区不接受通用写工具改写，且拒绝时磁盘零副作用", () => {
   it("探针路径（全部不存在）：覆盖写被拒，错误里点出该走的写入口", async () => {
-    await expectAllRefused(PROBE_TARGETS, { msg: /jsonstore|archive_round/, label: "[探针] " });
+    // 「点了入口」的判据用 `请走` 这个共性词，不写死 `jsonstore|archive_round` ——
+    // 禁区扩到 `logs/data/news` 之后，各自的入口名并不相同（这正是我们想要的：
+    // 每个目录都有自己的写入口）。逐个目录的入口文案由 tests/pathguard.test.ts 兜住。
+    await expectAllRefused(PROBE_TARGETS, { msg: /请走/, label: "[探针] " });
   });
 
   it("真实判据文件（存在）：被拒，且逐字节没被动过", async () => {
