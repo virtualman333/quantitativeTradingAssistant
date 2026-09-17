@@ -43,14 +43,45 @@ jsonstore.py — `state/` 下 JSON 的读写底座：**原子写** + 把「还�
 
 所以「坏了就中止本次写」这条**唯一安全的选择**做成一个不会写歪的入口：
 调用方拿不到数据就只能中止，不存在「拿到一个默认值继续往下走」这条路。
+
+顶层形状只能声明一次（`STATE_SHAPES`）
+------------------------------------
+`read_json_state` 要拿顶层类型当白名单，而**形状是文件自己的属性、不是调用方的属性**。
+早先这件事靠调用方各传一份 `expect=`：`state/order_idem_<轮次>.json` 顶层是列表，
+所以那一处传了 `expect=list`，其余走默认 `dict`。于是每新增一本账，就有一个**没人提醒的
+必填参数**，而漏传的后果不是报错，是**把一份完好的文件判成「损坏」**：
+`read_json_state` 返回 `(None, "顶层不是对象…")` → `month_risk` / `archive_round` 那条路
+会顺手把它 `quarantine_broken()` 搬成 `.corrupt-*` → 峰值或幂等登记表被静默重置。
+「判据要与文件的实际形状一致」这句话当时只写在 docstring 里，没有任何东西扛着它。
+
+现在形状只在 `STATE_SHAPES` 里登记一次，`expected_shape()` 按路径查表：
+调用方**不再传** `expect`（传了就直接报错 —— 与表一致也算第二处判据）；
+查不到 = 未知路径 → 抛 `UnregisteredState`，**不猜**（猜成 `dict` 正是上面那条静默损坏）。
 """
 
+import fnmatch
 import json
 import os
 import tempfile
 
 # 坏文件留档后缀：`month_state.json.corrupt-20260917-060000`
 CORRUPT_SUFFIX = ".corrupt-"
+
+# ── 顶层形状注册表：`state/` 下每个 JSON 的顶层是什么，**只在这里声明一次** ──────
+#
+# 为什么是「按文件名登记」而不是让调用方各传 `expect`：形状是文件的属性。
+# 调用方各传一份的代价不是「多写一个参数」，而是**新增一本账时没人提醒**，
+# 而漏传的默认值（`dict`）会把一份完好的列表判成「损坏」→ 被留档搬走 → 数据静默重置。
+# 加新文件时**必须**来这里登记一行，否则 `UnregisteredState` 当场抛出来
+# （`tests/stateshapes.test.ts` 另有一条对账：源码里读过的 state 文件与这张表必须互为子集）。
+#
+# 匹配按 `os.path.basename`，支持 `*` 通配（轮次文件名带轮次号）。
+STATE_SHAPES = (
+    ("month_state.json", dict),
+    ("runtime.json", dict),
+    ("reviewed_trades.json", dict),
+    ("order_idem_*.json", list),
+)
 
 
 class StateUnreadable(Exception):
@@ -64,6 +95,29 @@ class StateUnreadable(Exception):
         super().__init__("%s: %s" % (path, error))
         self.path = path
         self.error = error
+
+
+class UnregisteredState(Exception):
+    """`state/` 下出现了一本**没有登记顶层形状**的账 —— 不知道形状就**不猜**。
+
+    猜成 `dict` 会让「顶层是列表」的账被读成「损坏」，再被 `quarantine_broken()` 搬走。
+    所以未知路径一律抛出来：调用方要么来 `STATE_SHAPES` 登记一行，要么显式说明它是什么。
+    """
+
+    def __init__(self, path):
+        super().__init__(
+            "%s 没有在 jsonstore.STATE_SHAPES 里登记顶层形状（不猜 —— 猜错会把完好文件判成损坏）"
+            % os.path.basename(path))
+        self.path = path
+
+
+def expected_shape(path):
+    """按文件名查出这本账的顶层形状。**唯一来源**，调用方不再各传一份。"""
+    name = os.path.basename(path)
+    for pattern, shape in STATE_SHAPES:
+        if fnmatch.fnmatchcase(name, pattern):
+            return shape
+    raise UnregisteredState(path)
 
 
 def atomic_write_json(path, data, *, indent=2):
@@ -95,17 +149,23 @@ def atomic_write_json(path, data, *, indent=2):
     return path
 
 
-def read_json_state(path, expect=dict):
+def read_json_state(path, expect=None):
     """读一个「状态文件」。返回 `(data, error)`：
 
     - 文件不存在            → `(None, None)`   —— 首次运行，正常，调用方可以初始化
     - 存在但读不出来 / 顶层不是 `expect` → `(None, "原因")` —— **数据丢了**，必须让它可见
     - 正常                  → `(data, None)`
 
-    `expect` 是顶层类型的白名单（默认 `dict`）。为什么要可配：`state/order_idem_<轮次>.json`
-    顶层是**列表**（幂等 ID 的登记表），硬按 `dict` 判会把一份完好的登记表判成「损坏」——
-    **判据要与文件的实际形状一致，而不是与绝大多数文件一致**。
+    顶层形状由 `STATE_SHAPES` 按路径决定（`expected_shape()`）。调用方**不必也不该**
+    自己传：传了就当场抛 `ValueError`（形状只能有一处判据，与表一致也算第二处）；
+    未知路径抛 `UnregisteredState`（不猜 —— 猜成 `dict` 正是那类静默损坏的成因）。
     """
+    declared = expected_shape(path)
+    if expect is not None:
+        raise ValueError(
+            "%s 的顶层形状只在 jsonstore.STATE_SHAPES 里声明一次，调用方不该再传 expect（传的是 %s）"
+            % (os.path.basename(path), getattr(expect, "__name__", expect)))
+    expect = declared
     if not os.path.exists(path):
         return None, None
     try:
@@ -120,7 +180,7 @@ def read_json_state(path, expect=dict):
     return data, None
 
 
-def read_json_state_strict(path, expect=dict, allow_missing=True):
+def read_json_state_strict(path, expect=None, allow_missing=True):
     """`read_json_state` 的严格版：**读不出来就抛 `StateUnreadable`**。
 
     只有两个返回形态，调用方不需要判断 `error`：

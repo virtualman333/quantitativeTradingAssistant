@@ -88,8 +88,13 @@ def load_rows(path):
     正是本仓在 `runtime.json` 上反复踩的那个形状。
 
     文件不存在是另一回事（新轮次第一次发单），返回空表，允许初始化。
+
+    顶层形状（列表）不在这里声明 —— 它登记在 `jsonstore.STATE_SHAPES` 里。
+    这里原先写着 `expect=list`，而那份「形状」是**每本账各自的属性**：散在调用点就意味
+    新增一本账时谁也不会提醒下一个调用方该传什么，漏传默认 `dict` 的后果是把一份完好的
+    登记表判成「损坏」。现在形状只有一处来源，调用点不再参与这件事。
     """
-    return jsonstore.read_json_state_strict(path, expect=list) or []
+    return jsonstore.read_json_state_strict(path) or []
 
 
 def save_rows(path, rows):
