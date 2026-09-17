@@ -360,9 +360,17 @@ export const EXPERTS: Expert[] = [
  * 可插拔：新增专家 = 在 experts/ 放一个 JSON；删除专家 = 删掉对应 JSON。
  * 无需改任何 TS 代码，重启即生效。
  */
-const EXPERTS_DIR = path.join(AGENT_ROOT, "experts");
+/**
+ * 专家目录根。默认 `<AGENT_ROOT>/experts`；环境变量 `QTA_EXPERTS_DIR` 可覆盖 ——
+ * 只给自测用（知识库那套自测要在临时目录里真写文件，不能往仓库的 experts/ 里丢垃圾）。
+ */
+export function expertsRootDir(): string {
+  const o = process.env.QTA_EXPERTS_DIR;
+  return o ? path.resolve(o) : path.join(AGENT_ROOT, "experts");
+}
 
 export function loadExpertDefs(): ExpertDef[] {
+  const EXPERTS_DIR = expertsRootDir();
   if (!fs.existsSync(EXPERTS_DIR)) return [];
   const out: ExpertDef[] = [];
   for (const entry of fs.readdirSync(EXPERTS_DIR).sort()) {
@@ -394,33 +402,270 @@ export function loadExpertDefs(): ExpertDef[] {
 
 // ── 专家知识库（可插拔 + 自动进化） ─────────────────────────
 /**
- * 每个专家可有一个独立知识库目录 experts/<id>/knowledge/，里面放若干 .md：
- *   · 00-*.md 等 —— 领域最佳实践（我预置，来自公开资料/踩坑经验）
- *   · lessons.md —— 自动进化沉淀（evolveExpert 每轮追加，只增不删）
+ * 每个专家有一个独立知识库目录 `experts/<id>/knowledge/`，里面放若干 .md：
+ *   · 00-*.md 等 —— 领域最佳实践（预置，来自公开资料/踩坑经验）
+ *   · lessons.md —— 自动进化沉淀（reflectExperts 每轮追加）
  * 运行时把整个知识库注入该专家的 systemPrompt，作为「专家专属经验」。
+ *
+ * 这里补上的三件事，原先都是**静默**的：
+ *   ① **写哪儿不校验**：`evolveExpert(id)` 直接 `mkdir -p experts/<id>/knowledge`，
+ *      而 id 来自 LLM 的 JSON 输出 —— `../../x` 这种值能把文件写到仓库外面去。
+ *      现在 id 过白名单，且解析后必须仍在 experts 根之内。
+ *   ② **归属兜底没人接**：提示词让模型「无法归属时用 main」，而 `main` 不是任何专家 ——
+ *      那些教训被写进 `experts/main/knowledge/lessons.md`，**没有任何专家会读它**，
+ *      等于永久静默丢失。现在统一落进共享桶 `_shared`，且 `loadKnowledge` 会注入给所有专家。
+ *   ③ **裁剪不留痕**：超上限时裁掉最旧一半，文件里没有任何记录（文件头却写着「只增不删」）。
+ *      现在裁剪会在 lessons.md 顶部留一条记录，并由 `evolveExpert` 的返回值报给调用方。
  */
 
-/** 专家知识库目录 */
-export function knowledgeDir(id: string): string {
-  return path.join(EXPERTS_DIR, id, "knowledge");
+/** 共享教训桶：无法归属到具体专家的教训落在这里，**所有专家都会读到** */
+export const SHARED_KNOWLEDGE_ID = "_shared";
+/** lessons.md 体积上限：超出裁掉最旧一半（裁剪会在文件里留痕） */
+export const MAX_LESSONS_BYTES = 60 * 1024;
+/** 注入 systemPrompt 的知识库字节上限 */
+export const MAX_KNOWLEDGE_INJECT_BYTES = 12000;
+/** 单个知识库文件允许写入的字节上限（防在界面上误粘一个大文件） */
+export const MAX_KNOWLEDGE_FILE_BYTES = 512 * 1024;
+/** 知识库文件名字数上限（Windows 路径长度留余量） */
+const MAX_KNOWLEDGE_NAME_LEN = 120;
+
+/** bucket id 白名单：只允许字母、数字与 `_` `-`。杜绝 `..`、`/`、`\`、盘符、空串。 */
+const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
+/** 知识库文件名：必须以 .md 结尾，且不含控制字符与 Windows 保留字符 */
+const SAFE_KNOWLEDGE_FILE_RE = /^[^\u0000-\u001f\\/:*?"<>|]+\.md$/;
+
+function assertSafeBucketId(id: unknown): string {
+  const s = String(id ?? "").trim();
+  if (!SAFE_ID_RE.test(s)) {
+    throw new Error(`非法的知识库 id「${String(id)}」：只允许字母、数字与 _ -`);
+  }
+  return s;
 }
 
-/** 读取专家知识库全部 .md（按文件名排序），截断到 maxBytes，避免撑爆上下文 */
-export function loadKnowledge(id: string, maxBytes = 12000): string {
+/**
+ * 某个 bucket 的知识库目录。
+ * id 必须过白名单，且**解析后仍要落在 experts 根之内**才放行 ——
+ * `evolveExpert` 的 id 直接来自 LLM 的 JSON 输出，`../../x` 这类值原先会被
+ * `path.join` 老老实实拼出去、再由 `mkdirSync` 在仓库外面建目录。
+ */
+export function knowledgeDir(id: string): string {
+  const root = path.resolve(expertsRootDir());
+  const full = path.resolve(root, assertSafeBucketId(id), "knowledge");
+  if (path.dirname(path.dirname(full)) !== root) {
+    throw new Error(`知识库目录越界：${String(id)}`);
+  }
+  return full;
+}
+
+/** 知识库文件的安全绝对路径（文件名不准带路径，解析后必须就在该 bucket 目录里） */
+export function knowledgeFilePath(id: string, name: string): string {
   const dir = knowledgeDir(id);
-  if (!fs.existsSync(dir)) return "";
-  const chunks: string[] = [];
-  for (const f of fs.readdirSync(dir).sort()) {
-    if (!f.endsWith(".md")) continue;
+  const base = String(name ?? "").trim();
+  if (
+    !SAFE_KNOWLEDGE_FILE_RE.test(base) ||
+    base.startsWith(".") ||
+    base.length > MAX_KNOWLEDGE_NAME_LEN
+  ) {
+    throw new Error(`非法的知识库文件名「${String(name)}」：必须以 .md 结尾且不含路径分隔符`);
+  }
+  const full = path.resolve(dir, base);
+  if (path.dirname(full) !== path.resolve(dir)) {
+    throw new Error(`知识库文件路径越界：${String(name)}`);
+  }
+  return full;
+}
+
+export interface KnowledgeFile {
+  name: string;
+  bytes: number;
+  mtime: string;
+  /** 自动进化沉淀（reflectExperts 每轮追加），受 MAX_LESSONS_BYTES 约束 */
+  auto: boolean;
+  /** true = 在目录里但**不会被任何专家读到**（不是 .md / 文件名非法）—— 要显式报出来 */
+  ignored: boolean;
+}
+
+/** 列出某个 bucket 知识库目录里的全部普通文件（含「不会被读到」的那些，供界面告警） */
+export function listKnowledgeFiles(id: string): KnowledgeFile[] {
+  const dir = knowledgeDir(id);
+  if (!fs.existsSync(dir)) return [];
+  const out: KnowledgeFile[] = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    const full = path.join(dir, name);
+    let st: fs.Stats;
     try {
-      chunks.push(`## ${f}\n${fs.readFileSync(path.join(dir, f), "utf8")}`);
+      st = fs.statSync(full);
     } catch {
-      /* 忽略坏文件 */
+      continue;
+    }
+    if (!st.isFile()) continue;
+    const ok = SAFE_KNOWLEDGE_FILE_RE.test(name) && !name.startsWith(".");
+    out.push({
+      name,
+      bytes: st.size,
+      mtime: new Date(st.mtimeMs).toISOString(),
+      auto: name === "lessons.md",
+      ignored: !ok,
+    });
+  }
+  return out;
+}
+
+/** 读一个知识库文件的全文 */
+export function readKnowledgeFile(id: string, name: string): string {
+  return fs.readFileSync(knowledgeFilePath(id, name), "utf8");
+}
+
+/** 写一个知识库文件（新建或覆盖），返回写入字节数 */
+export function writeKnowledgeFile(id: string, name: string, text: string): number {
+  const p = knowledgeFilePath(id, name);
+  const body = String(text ?? "");
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_KNOWLEDGE_FILE_BYTES) {
+    throw new Error(`内容 ${bytes} 字节，超过单文件上限 ${MAX_KNOWLEDGE_FILE_BYTES} 字节`);
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, body, "utf8");
+  return bytes;
+}
+
+/** 删一个知识库文件（不存在的文件报错，不静默成功） */
+export function deleteKnowledgeFile(id: string, name: string): void {
+  const p = knowledgeFilePath(id, name);
+  if (!fs.existsSync(p)) throw new Error(`文件不存在：${name}`);
+  fs.unlinkSync(p);
+}
+
+/** 全部可注入知识库的 bucket：已注册专家 + 共享桶 + 磁盘上留着但已无主人的目录 */
+export interface KnowledgeBucket {
+  id: string;
+  name: string;
+  /** 共享桶（_shared）—— 所有专家都会读到 */
+  shared: boolean;
+  /** true = 目录存在但**没有对应专家**：写进去的教训没人读 */
+  orphan: boolean;
+  /** 启用状态（仅在能对上角色时给出） */
+  enabled: boolean | null;
+  files: KnowledgeFile[];
+}
+
+/** 已注册的专家 id（`experts/<id>/expert.json`）+ 内置兜底专家 */
+export function knownExpertIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const d of loadExpertDefs()) if (d?.id) ids.add(d.id);
+  for (const e of EXPERTS) ids.add(e.id);
+  return ids;
+}
+
+/**
+ * 把任意来源的 id 归一成一个**真实可读**的 bucket。
+ * 无法归属时一律进共享桶 —— 原先提示词让模型「无法归属时用 main」，而 `main`
+ * 不是任何专家，那些教训被写进 `experts/main/knowledge/lessons.md` 后**没有任何专家会读**。
+ */
+export function resolveKnowledgeBucket(id: unknown): { target: string; reassigned: boolean } {
+  const raw = String(id ?? "").trim();
+  if (raw === SHARED_KNOWLEDGE_ID) return { target: SHARED_KNOWLEDGE_ID, reassigned: false };
+  if (!SAFE_ID_RE.test(raw)) return { target: SHARED_KNOWLEDGE_ID, reassigned: true };
+  return knownExpertIds().has(raw)
+    ? { target: raw, reassigned: false }
+    : { target: SHARED_KNOWLEDGE_ID, reassigned: true };
+}
+
+/** 知识库 bucket 清单（界面「经验库」页的数据源） */
+export function listKnowledgeBuckets(): KnowledgeBucket[] {
+  let roles: RoleConfig[] = [];
+  try {
+    roles = listRoles();
+  } catch {
+    roles = [];
+  }
+  const defs = loadExpertDefs();
+  const out: KnowledgeBucket[] = [];
+  const seen = new Set<string>();
+
+  for (const d of defs) {
+    const ov = roles.find((r) => r.id === d.id);
+    seen.add(d.id);
+    out.push({
+      id: d.id,
+      name: ov?.name ?? d.name,
+      shared: false,
+      orphan: false,
+      enabled: ov?.enabled ?? (d.enabled !== false),
+      files: listKnowledgeFiles(d.id),
+    });
+  }
+  // 磁盘上还有目录、但已经找不到对应专家定义（例如历史遗留的 main/）：教训写了没人读，必须报出来
+  const root = expertsRootDir();
+  if (fs.existsSync(root)) {
+    for (const entry of fs.readdirSync(root).sort()) {
+      if (seen.has(entry) || entry === SHARED_KNOWLEDGE_ID) continue;
+      let isDir = false;
+      try {
+        isDir = fs.statSync(path.join(root, entry)).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir || !SAFE_ID_RE.test(entry)) continue;
+      const files = listKnowledgeFiles(entry);
+      if (!files.length) continue; // 空目录不列，避免噪声
+      out.push({ id: entry, name: entry, shared: false, orphan: true, enabled: null, files });
+    }
+  }
+
+  out.push({
+    id: SHARED_KNOWLEDGE_ID,
+    name: "共享教训（所有专家都会读到）",
+    shared: true,
+    orphan: false,
+    enabled: null,
+    files: listKnowledgeFiles(SHARED_KNOWLEDGE_ID),
+  });
+  return out;
+}
+
+/**
+ * 读取专家知识库全部 .md（按文件名排序），拼成一段注入 systemPrompt 的文本。
+ *
+ * 两点与旧实现的区别，都是「不再静默」：
+ *   · 归属兜底的教训落在共享桶，这里一并注入 —— 否则那些教训永远没人读；
+ *   · 超上限时按**文件**为单位跳过并列出文件名，而不是把正文从中间砍断
+ *     （旧实现 `text.slice(0, maxBytes)` 会把最后一句话切成半句，且不说少了什么）。
+ */
+export function loadKnowledge(id: string, maxBytes = MAX_KNOWLEDGE_INJECT_BYTES): string {
+  const buckets =
+    String(id).trim() === SHARED_KNOWLEDGE_ID ? [SHARED_KNOWLEDGE_ID] : [String(id).trim(), SHARED_KNOWLEDGE_ID];
+  const chunks: string[] = [];
+  const skipped: string[] = [];
+  let used = 0;
+  for (const b of buckets) {
+    let files: KnowledgeFile[] = [];
+    try {
+      files = listKnowledgeFiles(b);
+    } catch {
+      continue; // 非法 id：当作没有知识库，不要让专家调用整个失败
+    }
+    for (const f of files) {
+      if (f.ignored) continue;
+      let body: string;
+      try {
+        body = fs.readFileSync(knowledgeFilePath(b, f.name), "utf8");
+      } catch {
+        continue;
+      }
+      const chunk = `${b === SHARED_KNOWLEDGE_ID ? "## 共享教训/" : "## "}${f.name}\n${body}`;
+      const size = Buffer.byteLength(chunk, "utf8");
+      if (used + size > maxBytes) {
+        skipped.push(`${b === SHARED_KNOWLEDGE_ID ? `${SHARED_KNOWLEDGE_ID}/` : ""}${f.name}`);
+        continue;
+      }
+      used += size;
+      chunks.push(chunk);
     }
   }
   let text = chunks.join("\n\n");
-  if (Buffer.byteLength(text, "utf8") > maxBytes) {
-    text = text.slice(0, maxBytes) + "\n…（知识库过长已截断）";
+  if (skipped.length) {
+    text += `\n\n> ⚠ 知识库超出本轮注入上限 ${maxBytes} 字节，以下文件本轮未注入：${skipped.join("、")}`;
   }
   return text;
 }
@@ -435,25 +680,72 @@ export interface EvolutionEntry {
   decision?: string;
 }
 
-/** 把一条提炼过的教训追加到某专家 knowledge/lessons.md（只追加，不覆盖） */
-const MAX_LESSONS_BYTES = 60 * 1024; // lessons.md 上限，超出裁掉最旧一半，防无限膨胀
+/** lessons.md 的文件头（「只增不删」与「超限裁剪」两件事都写在这里，别只写一半） */
+const LESSONS_HEADER =
+  "# 教训与进化记录（复盘提炼）\n\n" +
+  `> 由 reflectExperts 每轮自动追加。只追加、不手工删；超过 ${MAX_LESSONS_BYTES} 字节时裁掉最旧一半，裁剪会在这里留下记录。\n\n`;
 
-export function evolveExpert(id: string, entry: EvolutionEntry): void {
+/** 一条裁剪记录（写进 lessons.md 顶部，用户看得见「东西被丢过」） */
+function trimNotice(): string {
+  return `> ⚠ ${new Date().toISOString().slice(0, 19).replace("T", " ")} 已超过 ${MAX_LESSONS_BYTES} 字节上限，裁掉最旧一半。\n\n`;
+}
+
+export interface EvolveResult {
+  ok: boolean;
+  /** 实际落盘的 bucket（无法归属时是 _shared） */
+  target: string;
+  /** 本次是否发生了归属兜底（原 id 不是已注册专家） */
+  reassigned: boolean;
+  /** 本次是否触发了体积裁剪 */
+  trimmed: boolean;
+  bytes: number;
+  error?: string;
+}
+
+/**
+ * 把一条提炼过的教训追加到 knowledge/lessons.md。
+ * 写入的 bucket 一定是一个**真实可读**的位置（已注册专家或共享桶），
+ * 且 id 与文件名都过白名单 —— 不再有「写到仓库外面」和「写了没人读」两种静默。
+ */
+export function evolveExpert(id: string, entry: EvolutionEntry): EvolveResult {
+  let target = SHARED_KNOWLEDGE_ID;
+  let reassigned = false;
   try {
-    const dir = knowledgeDir(id);
+    const r = resolveKnowledgeBucket(id);
+    target = r.target;
+    reassigned = r.reassigned;
+    const dir = knowledgeDir(target);
     fs.mkdirSync(dir, { recursive: true });
-    const f = path.join(dir, "lessons.md");
+    const f = knowledgeFilePath(target, "lessons.md");
     if (!fs.existsSync(f)) {
-      fs.writeFileSync(f, "# 教训与进化记录（复盘提炼，只增不删）\n\n", "utf8");
-    } else if (fs.statSync(f).size > MAX_LESSONS_BYTES) {
-      // 超限：只保留较新的后半段，避免文件无限增长
-      const buf = fs.readFileSync(f, "utf8");
-      fs.writeFileSync(f, buf.slice(-(MAX_LESSONS_BYTES >> 1)), "utf8");
+      fs.writeFileSync(f, LESSONS_HEADER, "utf8");
+    }
+    let trimmed = false;
+    if (fs.statSync(f).size > MAX_LESSONS_BYTES) {
+      trimmed = true;
+      const tail = fs.readFileSync(f, "utf8").slice(-(MAX_LESSONS_BYTES >> 1));
+      const nl = tail.indexOf("\n");
+      const body = nl >= 0 ? tail.slice(nl + 1) : tail; // 丢掉被切半的首行
+      fs.writeFileSync(f, LESSONS_HEADER + trimNotice() + body, "utf8");
+      trace({
+        source: "agent",
+        kind: "error",
+        message: `专家知识库 ${target}/lessons.md 超过 ${MAX_LESSONS_BYTES} 字节，已裁掉最旧一半`,
+      });
     }
     const line = `- ${entry.time} [${entry.roundId}] ${entry.text}`;
     fs.appendFileSync(f, line + "\n\n", "utf8");
+    if (reassigned) {
+      trace({
+        source: "agent",
+        kind: "error",
+        message: `教训归属兜底：专家「${String(id)}」不存在，已写入共享桶 ${SHARED_KNOWLEDGE_ID}`,
+      });
+    }
+    return { ok: true, target, reassigned, trimmed, bytes: fs.statSync(f).size };
   } catch (e) {
-    trace({ source: "agent", kind: "error", message: `专家进化写入失败 ${id}: ${String(e).slice(0, 120)}` });
+    trace({ source: "agent", kind: "error", message: `专家进化写入失败 ${target}: ${String(e).slice(0, 120)}` });
+    return { ok: false, target, reassigned, trimmed: false, bytes: 0, error: String(e).slice(0, 200) };
   }
 }
 
@@ -462,6 +754,15 @@ export function evolveExpert(id: string, entry: EvolutionEntry): void {
  * 可证伪的教训，归属到相关专家后写入各自 lessons.md。
  * 与旧的机械追加不同：只记「可执行的教训」，观望/无实质判断时宁缺毋滥，避免污染上下文。
  */
+/** 一轮复盘的写入结果（让「有几条没归属」「有没有文件被裁」在日志里看得见） */
+export interface ReflectResult {
+  written: number;
+  /** 归属兜底到共享桶的条数（原 id 不是已注册专家） */
+  reassigned: number;
+  /** 触发体积裁剪的文件数 */
+  trimmed: number;
+}
+
 export async function reflectExperts(opts: {
   llm: LlmProvider;
   roundId: string;
@@ -469,15 +770,19 @@ export async function reflectExperts(opts: {
   opinions: ExpertOpinion[];
   decision: string;
   outcome: string;
-}): Promise<number> {
+}): Promise<ReflectResult> {
   const { llm, roundId, time, opinions, decision, outcome } = opts;
-  if (!opinions.length) return 0;
+  const none: ReflectResult = { written: 0, reassigned: 0, trimmed: 0 };
+  if (!opinions.length) return none;
 
+  // 专家 id 清单**现算**（别在提示词里手抄一份：目录里增删专家时它不会跟着变）。
+  // 兜底去处是共享桶 `_shared` —— 不是 `main`：`main` 不是任何专家，写进去没人读。
+  const ids = [...knownExpertIds()].sort().join("/");
   const sys = `You are a trade review assistant. Review this round's decision and distill lessons worth persisting into the expert knowledge base.
 
 Strict rules:
 - Only distill "actionable, falsifiable" lessons (e.g. "when 4H and 1H trends conflict, trust 4H"); never write a play-by-play log or repeat common knowledge.
-- Tag each lesson with the expert id it mainly targets (id: trading/news/factor/risk/sentiment/funding/onchain/execution; use main if none fits).
+- Tag each lesson with the expert id it mainly targets. Known ids: ${ids}. If none of them fits, use "${SHARED_KNOWLEDGE_ID}" (the shared bucket, injected into every expert). Do not invent other ids — an unknown id is dropped into the shared bucket anyway.
 - If this round was just stand-by, had no substantive judgment, or nothing worth recording, output an empty array (better to under-record).
 - At most 3 lessons.
 
@@ -500,13 +805,17 @@ Output JSON only: {"lessons":[{"expert":"trading","text":"when ..., do ..., beca
       .filter((l) => l?.expert && l?.text && String(l.text).trim())
       .map((l) => ({ expert: String(l.expert), text: String(l.text).trim() }));
   } catch {
-    return 0; // 复盘失败静默，不阻塞交易
+    return none; // 复盘失败静默，不阻塞交易
   }
 
-  for (const l of lessons) {
-    evolveExpert(String(l.expert), { roundId, time, text: String(l.text).trim(), decision });
-  }
-  return lessons.length;
+  const results = lessons.map((l) =>
+    evolveExpert(l.expert, { roundId, time, text: l.text, decision })
+  );
+  return {
+    written: results.filter((r) => r.ok).length,
+    reassigned: results.filter((r) => r.reassigned).length,
+    trimmed: results.filter((r) => r.trimmed).length,
+  };
 }
 
 /**

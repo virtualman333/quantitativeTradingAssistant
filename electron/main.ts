@@ -397,6 +397,50 @@ ipcMain.handle("roles:delete", async (_e, id) => {
   return withStore((s) => s.deleteRole(id));
 });
 
+// 专家经验库（experts/<id>/knowledge/）
+// 全部走 experts.js 里的受控函数：id 与文件名在模块内过白名单、解析后必须落在 experts 根之内。
+// IPC 层**不接受任意路径** —— 界面只能按 (bucket id, 文件名) 访问，越界一律是模块抛错。
+function knowledgeErr(e: unknown) {
+  return String((e as Error)?.message ?? e).slice(0, 300);
+}
+ipcMain.handle("knowledge:list", async () => {
+  try {
+    const mod: any = await loadDist("experts.js");
+    return { ok: true, buckets: mod.listKnowledgeBuckets(), maxLessonsBytes: mod.MAX_LESSONS_BYTES };
+  } catch (e) {
+    return { ok: false, buckets: [], error: knowledgeErr(e) };
+  }
+});
+ipcMain.handle("knowledge:read", async (_e, id: string, name: string) => {
+  try {
+    const mod: any = await loadDist("experts.js");
+    const files: any[] = mod.listKnowledgeFiles(id);
+    const hit = files.find((f) => f.name === name);
+    if (!hit) return { ok: false, error: `文件不存在：${name}` };
+    if (hit.ignored) return { ok: false, error: `「${name}」不是 .md，任何专家都不会读到它` };
+    return { ok: true, text: mod.readKnowledgeFile(id, name) as string };
+  } catch (e) {
+    return { ok: false, error: knowledgeErr(e) };
+  }
+});
+ipcMain.handle("knowledge:write", async (_e, id: string, name: string, text: string) => {
+  try {
+    const mod: any = await loadDist("experts.js");
+    return { ok: true, bytes: mod.writeKnowledgeFile(id, name, text) as number };
+  } catch (e) {
+    return { ok: false, error: knowledgeErr(e) };
+  }
+});
+ipcMain.handle("knowledge:delete", async (_e, id: string, name: string) => {
+  try {
+    const mod: any = await loadDist("experts.js");
+    mod.deleteKnowledgeFile(id, name);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: knowledgeErr(e) };
+  }
+});
+
 // MCP
 ipcMain.handle("mcp:list", () => withStore((s) => s.listMcpServers()));
 ipcMain.handle("mcp:upsert", (_e, c) => withStore((s) => s.upsertMcpServer(c)));

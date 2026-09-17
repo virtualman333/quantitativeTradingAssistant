@@ -21,6 +21,7 @@ import ModelsView from "./components/ModelsView.vue";
 import RolesView from "./components/RolesView.vue";
 import McpView from "./components/McpView.vue";
 import SkillsView from "./components/SkillsView.vue";
+import KnowledgeView from "./components/KnowledgeView.vue";
 import LogView from "./components/LogView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import PositionsView from "./components/PositionsView.vue";
@@ -42,6 +43,7 @@ const ICONS = {
   roles: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>'),
   mcp: svg('<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/>'),
   skills: svg('<polygon points="13 2 3 14 11 14 10 22 21 10 13 10 13 2"/>'),
+  kn: svg('<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/>'),
   log: svg('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'),
   obs: svg('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>'),
   cfg: svg('<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'),
@@ -95,6 +97,7 @@ const NAV = [
     items: [
       { k: "models", t: "模型" },
       { k: "roles", t: "角色" },
+      { k: "kn", t: "经验库" },
       { k: "mcp", t: "MCP" },
       { k: "skills", t: "Skill" },
       { k: "cfg", t: "设置" },
@@ -104,7 +107,7 @@ const NAV = [
 const views = {
   dash: DashboardView, chat: ChatView, obs: TraceView, models: ModelsView, roles: RolesView,
   mcp: McpView, skills: SkillsView, log: LogView, rep: ReportsView, cfg: SettingsView, pos: PositionsView,
-  mkt: MarketView, scalp: ScalperView, bt: BacktestView,
+  mkt: MarketView, scalp: ScalperView, bt: BacktestView, kn: KnowledgeView,
 };
 const currentView = computed(() => views[tab.value] || DashboardView);
 

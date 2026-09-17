@@ -30,6 +30,12 @@ contextBridge.exposeInMainWorld("api", {
   // Skill
   skillsList: () => safeInvoke("skills:list"),
   skillsSetEnabled: (id: string, on: boolean) => safeInvoke("skills:setEnabled", id, on),
+
+  // 专家经验库（只认 bucket id + 文件名，不接受路径）
+  knowledgeList: () => safeInvoke("knowledge:list"),
+  knowledgeRead: (id: string, name: string) => safeInvoke("knowledge:read", id, name),
+  knowledgeWrite: (id: string, name: string, text: string) => safeInvoke("knowledge:write", id, name, text),
+  knowledgeDelete: (id: string, name: string) => safeInvoke("knowledge:delete", id, name),
   // 设置
   settingsGet: () => safeInvoke("settings:get"),
   settingsUpdate: (p: unknown) => safeInvoke("settings:update", p),

@@ -97,8 +97,19 @@ quantitativeTradingAssistant/
 ### 专家知识库 + 自动进化
 
 - 每个专家 `knowledge/*.md` 是其专属经验库，运行时整体注入该专家的 system prompt。
-- 每轮结束后，`evolveExpert()` 把该专家本轮的 `stance/confidence/summary` + 主 Agent 决策 + 执行结果**只追加**到 `knowledge/lessons.md`（超限自动裁剪最旧一半）。
+- 每轮结束后，`reflectExperts()` 用 LLM 把本轮观点 / 主 Agent 决策 / 执行结果提炼成**可证伪的教训**，追加到 `knowledge/lessons.md`。
 - 预置的 `00-领域经验.md` 来自公开资料整理的领域最佳实践，可据实际数据反驳。
+- **界面上有「系统 → 经验库」页**：按专家看每个文件、直接改、直接删、新建自己的 .md。见「界面：经验库」。
+
+这条链上原先有三处**静默**（现在都补上了落点，`tests/knowledge.test.ts` 逐条钉住）：
+
+| 静默 | 后果 | 现在 |
+|---|---|---|
+| `evolveExpert(id)` 直接 `mkdir -p experts/<id>/knowledge`，而 `id` 来自 LLM 的 JSON 输出 | `../../x` 这种值能把文件写到仓库外面 | id 过白名单（`^[A-Za-z0-9_-]+$`）且解析后必须仍在 `experts/` 根之内 |
+| 提示词让模型「无法归属时用 `main`」，而 `main` **不是任何专家** | 那些教训写进 `experts/main/knowledge/lessons.md`，**没有任何专家会读它** —— 自动进化的产出直接蒸发，日志却只说「提炼了 N 条教训」 | 统一落进共享桶 `_shared`，且 `loadKnowledge()` 会把共享桶注入给**每一个**专家 |
+| 超上限裁掉最旧一半 / 注入超上限从中间砍断 | 文件头写着「只增不删」却删了；最后一句话被切成半句 | 裁剪在 `lessons.md` 顶部留一条记录并由 `evolveExpert()` 的返回值报出；注入改为**按文件**跳过并点名「以下文件本轮未注入」 |
+
+`evolveExpert()` / `reflectExperts()` 的返回值现在会说明「有几条没归属、有没有文件被裁」，`main.ts` 把这两件事写进轮次日志 —— 复盘「提炼了几条」不再是唯一信息。
 
 ## 提示词混淆
 
@@ -157,6 +168,8 @@ pnpm test
 
 `tests/priceformat.test.ts` 覆盖**界面价格展示口径**（`ui/lib/format.js::fmtPrice`）。价格和金额在界面上是两种东西，却长期共用 `fmtNum(v, 2)`：金额（权益 / 浮盈 / 手续费 / 名义价值）固定 2 位是对的，价格不行 —— 实测 OKX 当日 483 个 USDT 永续里，BTC 是 75815、SATS 是 `9.949e-9`，相差 12 个数量级。固定 2 位会让**价格 < 0.005 的 30 个标的**在持仓页与总览页的「开仓价 / 标记价 / 强平价 / 止损触发价」全部显示成 `0.00`；前一版局部实现的「≥0.01 给 5 位、否则给 8 位」又把 SATS 写成 `0.00000001`（只剩 1 位有效数字，同一页面里入场价与标记价看起来是同一个数）。这份测试锁四件事：**非零价格不得显示成 `0.00`**（含极端小值的兜底）、**不得出现科学计数法**（直接打印原始 number 就会有）、**有效数字 ≥ 4**、以及结构上 **`fmtPrice` 的定义只允许有一处**（此前 DashboardView / MarketView / KlineChart / KlineWindow 各写一份逐字相同的副本）+ **ui/ 下每个价格字段的渲染都必须走它**（扫描所有 `{{ }}` 插值）。金额字段仍走 `fmtNum`，两种口径不要互相复用。
 
+`tests/knowledge.test.ts` 覆盖**专家知识库**（`src/experts.ts` 的 `knowledgeDir` / `knowledgeFilePath` / `evolveExpert` / `loadKnowledge` / `listKnowledgeBuckets`）。它把 experts 根指到临时目录（`QTA_EXPERTS_DIR`）后再真写文件，锁四件事：**路径边界**（id 与文件名都过白名单、解析后必须落在根之内）、**归属兜底**（未知 id 落进共享桶且真能被专家读到、也不在根外留目录）、**体积上限**（裁剪必须让文件变小且**在文件里留痕**、新教训不能被裁掉、注入超限按文件跳过并点名而不是半句截断）、**清单不变量**（非 `.md` 文件被标 `ignored`、没有 `expert.json` 的目录被标 `orphan`、空目录不入列）。每条都配了反向对照 —— 「全都抛错」的实现在负向断言下也能全绿，所以正向用例是这份测试的一半。
+
 ## 界面：本轮风控体检
 
 `ui/lib/riskbrief.js` 是纯函数展示层，`ui/components/DashboardView.vue` 的总览页把它渲染成两条预算用量条 + 逐笔明细（超限红 / 接近上限黄 / 充裕绿），并高亮章程 L2「单笔风险超 2% 需人工确认」的留痕提示。
@@ -194,6 +207,20 @@ pnpm test
 `tests/scalperguard.test.ts` 覆盖**超短线路径的 L1 闸门**（`guardScalperConfig()` → `scalpOnce()`）。它锁三件事：① 拒与放行的分界**就是** `MAX_LEVERAGE` / `MAX_RISK_PCT` 这两个常量（所以断言里也不写死 5 / 2.5%）；② 主 Agent 路径与超短线路径对同一个 `riskPct` 必须给出同样的 L1-5 结论 —— 防两条路径各改各的；③ **源码形态**：开单入口是否还在调闸门、有没有人又自造一份杠杆上限、上限常量是否只在 `guard.ts` 定义一次、界面是否又写死选项表与上限数字。第三类断言是必要的：**被删掉的闸门不会让任何行为断言变红**。另有两条把常量钉回 `AGENT_TRADING_RULES.md` 原文（改常量而不改章程会红灯）。
 
 `tests/price.test.ts` 覆盖**下单价格格式化**（`src/price.ts`），拿 OKX 全部 468 个 USDT 永续里真实存在的 11 种 tick 小数位（`0.1` 到 `1e-12`）当输入。除数值断言外还有一组**结构锁**：两个下单入口必须从 `price.ts` 取、不许各自再写一份 `fmtTick`、触发价必须经 `snappedSlTp` 产出。见「下单价格格式化」一节。
+
+## 界面：经验库
+
+「系统 → 经验库」页把 `experts/<id>/knowledge/` 整个暴露出来：左侧每个专家一个条目（另有共享桶与遗留目录），右侧列出该目录下的 `.md`，选中即可编辑、保存、删除、新建。
+
+三处刻意显式化（原先都要么没有、要么静默）：
+
+- **`lessons.md` 的体积条**：每到上限会**裁掉最旧一半**。页面上直接显示「当前 12.3 KB / 60 KB（20.5%）」，超过 75% 变黄 —— 想保住重要教训，趁早把它挪进自己新建的 `.md`。
+- **不会被读到的文件**：目录里不是 `.md` 的文件（或文件名非法）**不会被注入**。这一页把它们列出来并标红，否则「拷进去就不管了」是个纯静默的失效。
+- **没有对应专家的遗留目录**：例如旧提示词让模型兜底写入的 `main/` —— 目录在、`expert.json` 不在，写进去的教训没有任何专家会读。这类条目带红色「无专家」标签。
+
+界面只按 `(bucket id, 文件名)` 访问，不收路径：主进程把两者交给 `src/experts.ts` 里的白名单校验与目录围栏，越界一律拒绝。
+
+写操作与文件读写走 IPC：`knowledge:list` / `knowledge:read` / `knowledge:write` / `knowledge:delete`。知识库在**组装 system prompt 时**读取，所以改动**下一轮**或**下一次对话**才生效。
 
 ## 下单价格格式化（tickSz 网格）
 
@@ -248,4 +275,5 @@ const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
 - 下单价格格式化（tickSz 网格）**只在 `src/price.ts` 定义一次**，两个下单入口共用一个 `snappedSlTp()`；`tests/price.test.ts` 会检查有没有人又自造一份。
 - 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。
 - 界面文案一律中文。
+- 专家经验库（`experts/<id>/knowledge/`）的**写入去向是校验过的**：`knowledgeDir()` / `knowledgeFilePath()` 只收白名单内的 id 与 `.md` 文件名，且解析后必须仍在 `experts/` 根之内。归属不明的教训进共享桶 `_shared`（所有专家都读），**不许造出没有对应专家的目录** —— 那等于把教训写进没人读的地方。
 - `data/store.json` 必须存在（多模块依赖）；`.codebuddy/` 为项目数据目录，勿删。

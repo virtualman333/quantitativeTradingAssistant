@@ -462,7 +462,14 @@ async function runRound() {
       decision: decisionText,
       outcome: outcome || "无执行动作",
     });
-    if (n > 0) log(`专家知识库已进化（提炼 ${n} 条教训）`);
+    if (n.written > 0) {
+      // 归属兜底与体积裁剪都要报出来：两种情况原先都只会让人以为「记下了」
+      const notes = [
+        n.reassigned ? `其中 ${n.reassigned} 条无对应专家、已进共享教训桶` : "",
+        n.trimmed ? "有文件触发体积裁剪" : "",
+      ].filter(Boolean);
+      log(`专家知识库已进化（提炼 ${n.written} 条教训${notes.length ? "，" + notes.join("，") : ""}）`);
+    }
   } catch (e) {
     log(`专家进化失败: ${String(e).slice(0, 150)}`);
   }
