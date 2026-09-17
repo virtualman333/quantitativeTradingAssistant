@@ -31,6 +31,8 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
+import jsonstore
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASH = os.path.join(ROOT, "DASHBOARD.md")
 STATE = os.path.join(ROOT, "state")
@@ -81,6 +83,18 @@ def load_json(p, default=None):
         return default
 
 
+def read_runtime():
+    """读运行态，返回 `(dict, error)`：**「没有文件」与「文件坏了」必须分得开**。
+
+    这里原来写的是 `load_json(RUNTIME, {}) or {}` —— 两条路都得到 `{}`，于是下面那段
+    熔断告警**静默消失**：坏文件的净效果不是「状态读不出来」，而是看板告诉用户
+    「今日未熔断」（实际可能已经熔断过两次）。`month_state` 那条同类教训已经吃过一次，
+    处置办法一样：分得开，然后**说出来**。
+    """
+    data, err = jsonstore.read_json_state(RUNTIME)
+    return (data or {}), err
+
+
 def _f(v, d=0.0):
     try:
         return float(v)
@@ -120,7 +134,7 @@ def load_trades_today(day):
 def build(args):
     t = now()
     day = t.strftime("%Y-%m-%d")
-    runtime = load_json(RUNTIME, {}) or {}
+    runtime, runtime_err = read_runtime()
     rv = load_json(REVIEWED, {"reviews": [], "proposals": []}) or {"reviews": [], "proposals": []}
     acct = load_json(args.account, None) if args.account else (load_json(ACCOUNT, None))
     news = load_news_today(day)
@@ -145,7 +159,20 @@ def build(args):
 
     # ── 熔断 / 待办告警（最重要，放最前）────────────────
     alerts = []
-    if runtime.get("circuit_breaker"):
+    # 「计数不可信」必须排在「熔断中」前面：此时 `circuit_breaker` 是 null（未知），
+    # 下面那条 `if` 天然不成立，沉默就等于报了一句「今日未熔断」—— 那是最危险的一种谎。
+    if runtime_err:
+        alerts.append("🔴 **运行态文件损坏** — 本日熔断状态读不出来（%s）。下一轮归档会把坏文件"
+                      "留档为 `state/runtime.json.corrupt-*` 并按本轮权益重建；**在此之前以及重建后"
+                      "的本日剩余时间里，止损计数与当日盈亏都是「重置后的 0」而不是结论**，"
+                      "不能据此断定未熔断" % runtime_err)
+    elif runtime.get("day_counters_compromised"):
+        alerts.append("🔴 **本日计数不可信** — 运行态文件曾在 %s 损坏并被重建（%s）。"
+                      "本日止损计数与当日盈亏已经从 0 重新开始累计，看板上的数字**不是本日实况**，"
+                      "熔断与否需要人工核对交易所账单"
+                      % (runtime.get("day_counters_compromised_at") or "某轮",
+                         runtime.get("day_counters_compromised_error") or "原因未记录"))
+    elif runtime.get("circuit_breaker"):
         alerts.append("🔴 **熔断中** — 当日止损 %s 次 或 日亏损 %.2f%%，本日停止开新仓"
                       % (runtime.get("day_sl_count", 0), _f(runtime.get("day_pnl_pct"))))
 

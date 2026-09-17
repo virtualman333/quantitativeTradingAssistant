@@ -11,6 +11,7 @@ import {
   STATE_TEXT,
   barWidth,
   capOf,
+  dayCountersView,
   leverageText,
   maxUsage,
   monthRiskView,
@@ -63,6 +64,11 @@ const approvalReasons = computed(() => brief.value?.approval_reasons || brief.va
 // 却仍然只活在日志与邮件里。这里把它摆到用户面前。
 // 展示层不重算判据，只读 l1_6_tripped（口径见 ui/lib/riskbrief.js 的 monthRiskView）。
 const month = computed(() => monthRiskView(status.runtime));
+// 本日止损 / 当日盈亏是否因为 `state/runtime.json` 曾损坏被重置过。
+// 置真时卡片显示「—」而不是 0：重置出来的 0 与「今天没止损过」长得一模一样，
+// 而它恰好是判断「本日是否已熔断」的分子（月度回撤那条教训的同一个形状）。
+// 决定「显示什么」的是纯函数（可在测试里直接断言行为），组件只负责摆放。
+const counters = computed(() => dayCountersView(status.runtime));
 const DECISION_TEXT = { OPEN: "开仓", HOLD: "持有", CLOSE: "平仓", STANDBY: "观望" };
 const RISK_TEXT = { BASE: "基准", AGG: "激进", DEF: "防守" };
 const syncedAt = computed(() => {
@@ -149,8 +155,12 @@ onUnmounted(stopTick);
       <div class="k">上一轮时间</div>
       <div class="v">{{ roundTime }}</div>
     </div>
-    <div class="card"><div class="k">本日止损</div><div class="v">{{ status.runtime?.day_sl_count || 0 }}</div></div>
+    <div class="card">
+      <div class="k">本日止损</div>
+      <div class="v">{{ counters.slText }}</div>
+    </div>
   </div>
+  <div v-if="counters.compromised" class="alert err" style="margin:-6px 0 14px">{{ counters.note }}</div>
   <div class="hint" style="margin:-6px 0 14px">每 8 秒自动刷新 · 上次同步 {{ syncedAt }}</div>
 
   <div class="panel">

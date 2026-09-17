@@ -29,11 +29,16 @@ jsonstore.py — `state/` 下 JSON 的读写底座：**原子写** + 把「还�
 - `read_json_state()` —— 返回 `(data, error)`：**文件不存在返回 `(None, None)`**，
   存在但读不出来返回 `(None, "原因")`。调用方必须显式处理 `error`，
   不许再用 `except: pass` 把它抹平。
+- `quarantine_broken()` —— 把读不出来的状态文件**原样留档**到 `.corrupt-<时间戳>`。
+  这一步是给「数据丢了」留证据：坏文件本身是唯一的排查线索，被下一次写覆盖掉就找不回来了。
 """
 
 import json
 import os
 import tempfile
+
+# 坏文件留档后缀：`month_state.json.corrupt-20260917-060000`
+CORRUPT_SUFFIX = ".corrupt-"
 
 
 def atomic_write_json(path, data, *, indent=2):
@@ -82,3 +87,25 @@ def read_json_state(path):
     if not isinstance(data, dict):
         return None, "顶层不是对象（%s）" % type(data).__name__
     return data, None
+
+
+def quarantine_broken(path, stamp):
+    """把读不出来的状态文件**原样留档**到 `<path>.corrupt-<stamp>`，返回目标路径。
+
+    用 `os.replace()`（同目录同分区，原子）而不是「复制 + 删除」：坏文件本身是排查线索，
+    必须完整留档；复制再删的中间态下被杀，会同时留下半份副本和原文件。
+
+    `stamp` 由调用方给（形如 `20260917-060000`），为了留档名一眼能看出是什么时候出的事。
+    **同一 (path, stamp) 已存在时往后加序号，绝不覆盖** —— 留档是证据，
+    第二份挤掉第一份就等于把最早那条线索毁掉。原子写都会坏，留档更不能。
+    """
+    dest = path + CORRUPT_SUFFIX + stamp
+    n = 2
+    while os.path.exists(dest):
+        dest = "%s%s%s-%d" % (path, CORRUPT_SUFFIX, stamp, n)
+        n += 1
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    os.replace(path, dest)
+    return dest

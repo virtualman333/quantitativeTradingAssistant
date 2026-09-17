@@ -295,7 +295,11 @@ async function runRound() {
     `[Algo Orders] ${snap.algoOrders.length ? JSON.stringify(snap.algoOrders) : "none"}`,
     // monthDdPct 为 null = 运行态里没有这个字段（不是「0 回撤」），如实写「未知」，
     // 免得模型把「不知道」读成「本月还没回撤」。
-    `[Run State] day stop-loss ${rt.daySlCount}, day PnL ${rt.dayPnlPct}%, month drawdown ${rt.monthDdPct === null ? "未知" : `${rt.monthDdPct}%`}`,
+    // 本日止损 / 当日盈亏同理：状态文件坏过一次之后那两个数是从 0 重新开始的，
+    // 照旧写「0 次」等于告诉模型「今天一次都没止损」—— 那种谎和 `?? 0` 是同一个。
+    `[Run State] day stop-loss ${rt.dayCountersCompromised ? "未知（本日计数曾因状态文件损坏被重置）" : rt.daySlCount}, ` +
+      `day PnL ${rt.dayCountersCompromised ? "未知" : `${rt.dayPnlPct}%`}, ` +
+      `month drawdown ${rt.monthDdPct === null ? "未知" : `${rt.monthDdPct}%`}`,
     ``,
     `[Candidate instruments & market digest] You may trade any USDT perpetual below, long or short; prefer liquid, well-specified instruments.${focusLine}`,
     marketDigest,

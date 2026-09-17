@@ -21,9 +21,10 @@ import path from "node:path";
 import { AGENT_ROOT } from "./store.js";
 
 export interface RunState {
-  /** 当日止损触发次数（缺失视为 0 —— 「没发生过」） */
+  /** 当日止损触发次数（缺失视为 0 —— 「没发生过」）。
+   *  ⚠ `dayCountersCompromised` 为真时这个 0 是**重置出来的**，不是「今天没止损过」。 */
   daySlCount: number;
-  /** 当日盈亏（%，缺失视为 0） */
+  /** 当日盈亏（%，缺失视为 0）。同样受 `dayCountersCompromised` 影响。 */
   dayPnlPct: number;
   /** 月度回撤（%，负数）；**缺失为 null**，调用方须自行决定如何对待「未知」 */
   monthDdPct: number | null;
@@ -31,6 +32,14 @@ export interface RunState {
   monthPnlPct: number | null;
   /** 轮次序号（archive_round.py 写的是 round_count） */
   roundNo: number;
+  /**
+   * 本日累计计数是否**已经不可信** —— `state/runtime.json` 曾被写坏、坏文件已留档、
+   * 计数从 0 重新开始。三态同源：`null` = 不知道熔没熔断，`false` = 未熔断。
+   * 这是本文件里唯一「写 null 而不是 false」的字段，别用 `?? false` 把它洗成「一切正常」。
+   */
+  circuitBreaker: boolean | null;
+  /** 本日止损计数 / 当日盈亏是否因为状态文件损坏被重置过（重置后的 0 ≠ 今天没止损） */
+  dayCountersCompromised: boolean;
 }
 
 export const RUNTIME_FILE = path.join(AGENT_ROOT, "state", "runtime.json");
@@ -42,8 +51,21 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** 读一个「可能是 null 的三态布尔」：只有明确的 true / false 才算数，其它一律 null（未知） */
+function triBool(v: unknown): boolean | null {
+  return v === true ? true : v === false ? false : null;
+}
+
 export function loadRunState(file: string = RUNTIME_FILE): RunState {
-  const def: RunState = { daySlCount: 0, dayPnlPct: 0, monthDdPct: null, monthPnlPct: null, roundNo: 0 };
+  const def: RunState = {
+    daySlCount: 0,
+    dayPnlPct: 0,
+    monthDdPct: null,
+    monthPnlPct: null,
+    roundNo: 0,
+    circuitBreaker: null,
+    dayCountersCompromised: false,
+  };
   if (!fs.existsSync(file)) return def;
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
@@ -55,6 +77,10 @@ export function loadRunState(file: string = RUNTIME_FILE): RunState {
       // 注意：archive_round.py 写的字段是 round_count（不是 round_no），
       // 之前读错字段导致 round_id 永远停在 R000001（实测踩过，rounds.jsonl 里重复了 11 次 R000001）。
       roundNo: num(j.round_no) ?? num(j.round_count) ?? 0,
+      circuitBreaker: triBool(j.circuit_breaker),
+      // 文件读不出来时 `false` 也是假的 —— 但那条路已经在 archive_round 侧挡下了：
+      // 它写盘前必先把坏文件留档并置上本标记，所以这里读到的一定是它写下来的结论。
+      dayCountersCompromised: j.day_counters_compromised === true,
     };
   } catch {
     return def;

@@ -6,6 +6,16 @@ archive_round.py — 交易轮次归档器（唯一写入口）
 保证每轮日志格式一致、台账严格只追加、运行态正确演进。
 所有写操作均为 append（除 state/runtime.json 为覆盖），历史行永不改写。
 
+`state/runtime.json` 的读写有两条硬要求（与 `state/month_state.json` 同一套，两者都是
+安全判据的载体，不是缓存）：
+
+- **写**走 `jsonstore.atomic_write_json()` —— 半截文件会让 `loadRunState()` 退回「字段未知」，
+  而更早的版本会让本文件把「读不出来」当成「首次运行」。
+- **读**走 `jsonstore.read_json_state()` —— 「文件不存在」（首次运行，正常）与
+  「文件存在但读不出来」（**数据丢了**）必须分开。后者要留档坏文件（`.corrupt-<时间戳>`）、
+  在状态里留下 `day_counters_compromised` 标记，并让 `circuit_breaker` 写 `null`（未知）
+  而不是 `false`（未熔断）—— 否则看板与邮件会一起告诉用户「今日未熔断」。
+
 用法:
     python scripts/archive_round.py --in round.json
     cat round.json | python scripts/archive_round.py
@@ -38,6 +48,58 @@ LEDGER_FIELDS = [
     "tp_price", "sl_price", "pnl_usdt", "fee_usdt", "risk_budget_usdt",
     "order_id", "algo_id", "decision_summary",
 ]
+
+# ── 运行态被写坏时的标记键 ────────────────────────────────────────────────
+# `state/runtime.json` 一坏，本日累计计数（止损次数 / 当日盈亏 / 成交笔数）就没了来源。
+# 这几个键记下「哪一天的本日计数已经不可信」：重置出来的 0 不是「今天没止损过」，
+# 只是「数字丢了」。跨日自动清除（新的一天本来就要清零，昨天那场损坏不再影响本日）。
+COMPROMISED_KEY = "day_counters_compromised"
+COMPROMISED_KEYS = (
+    COMPROMISED_KEY,
+    "day_counters_compromised_at",
+    "day_counters_compromised_error",
+)
+
+
+class RuntimeStateCorrupt(RuntimeError):
+    """`state/runtime.json` 读不出来，**且坏文件也挪不动**。
+
+    只在保不住证据时抛：这时宁可不写新状态（下一轮读还会发现它坏了、还会再试一次留档），
+    也不能覆盖掉唯一的排查线索再假装什么都没发生。
+    """
+
+
+def _stamp(r: dict) -> str:
+    """留档时间戳。优先用本轮归档时间（与留档里其它时间是同一个时钟），解析不了就退回当前时刻。"""
+    try:
+        return datetime.strptime(r["time_cst"], "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d-%H%M%S")
+    except (KeyError, ValueError, TypeError):
+        return datetime.now(CST).strftime("%Y%m%d-%H%M%S")
+
+
+def _load_runtime(r: dict):
+    """读运行态，返回 `(state, corrupt)`。
+
+    - `({}  , None)`      —— 文件还不存在：**首次运行**，正常，可以初始化
+    - `({}  , {...})`     —— 存在但读不出来 / 顶层不是对象：**数据丢了**。坏文件已原样留档。
+
+    为什么要分成两件事：`runtime.json` 不是缓存，它是「本日熔断 / 成交笔数 / 轮次号」的载体。
+    此前这里是 `except Exception: st = {}`，于是「文件坏了」与「新机器首次运行」在代码里
+    长得一模一样 —— 而接下来的逻辑是「新的一天/首次 → 计数清零 + 基准取当前权益」，
+    再原子写回去。一次损坏的净效果是：**当日止损计数归零 → `circuit_breaker` 变成 False →
+    看板与邮件都会明确告诉用户「今日未熔断」**（实际可能已经熔断两次），
+    而那份坏文件作为唯一线索，被紧接着的原子写**覆盖销毁**。
+    与 `month_risk` 挡的是同一件事（L1-6 的分母被静默清零），只是这边连证据都不留。
+    """
+    st, err = jsonstore.read_json_state(RUNTIME)
+    if err is None:
+        return (st or {}), None
+    try:
+        dest = jsonstore.quarantine_broken(RUNTIME, _stamp(r))
+    except OSError as e:
+        raise RuntimeStateCorrupt("%s（且坏文件也挪不动，本轮未改动运行态：%s）" % (err, e))
+    return {}, {"error": err, "archive": os.path.basename(dest)}
+
 
 
 def _fmt(v, dash="—"):
@@ -155,19 +217,29 @@ def append_trades(r: dict) -> int:
 
 
 def update_runtime(r: dict) -> dict:
-    st = {}
-    if os.path.exists(RUNTIME):
-        try:
-            with open(RUNTIME, encoding="utf-8") as fh:
-                st = json.load(fh)
-        except Exception:  # noqa: BLE001
-            st = {}
+    # ★ 「文件不存在」与「文件读不出来」是两件事（见 `_load_runtime`）。
+    st, corrupt = _load_runtime(r)
     today = r["time_cst"][:10]
     if st.get("current_day") != today:
         st["current_day"] = today
         st["day_sl_count"] = 0
         st["day_start_equity"] = r["equity_usdt"]
         st["day_trade_count"] = 0
+        # 跨日：昨天的本日计数本来就要清零，昨天那场损坏不再影响本日的可信度。
+        for k in COMPROMISED_KEYS:
+            st.pop(k, None)
+    if corrupt:
+        # 坏文件 → 既不知道它属于哪一天，也不知道当天的计数累计到几。重置出来的 0
+        # 不是「今天没止损过」，只是「数字丢了」：写进状态让界面显示「—」、
+        # 让看板与邮件点名，而不是照旧沉默地报一句「未熔断」。
+        # 注意顺序：必须在跨日清零**之后**写，否则同一天里标记会被下一步的清零擦掉。
+        st[COMPROMISED_KEY] = True
+        st["day_counters_compromised_at"] = r["time_cst"]
+        st["day_counters_compromised_error"] = corrupt["error"]
+        # 坏文件留档了 —— 把「这里出过事」留在状态里（与 month_state 同一约定：
+        # 免得下次有人看到一份干净的 runtime.json 以为从没出过事）。
+        st["recovered_from"] = corrupt["archive"]
+        st["recovered_error"] = corrupt["error"]
     st["round_count"] = st.get("round_count", 0) + 1
     st["last_round_id"] = r["round_id"]
     st["last_run_cst"] = r["time_cst"]
@@ -179,7 +251,13 @@ def update_runtime(r: dict) -> dict:
     dse = st.get("day_start_equity") or r["equity_usdt"]
     st["day_pnl_usdt"] = round(r["equity_usdt"] - dse, 4)
     st["day_pnl_pct"] = round((r["equity_usdt"] / dse - 1) * 100, 4) if dse else 0.0
-    st["circuit_breaker"] = bool(st["day_sl_count"] >= 2 or st["day_pnl_pct"] <= -3.0)
+    if st.get(COMPROMISED_KEY):
+        # 「不知道熔没熔断」与「没熔断」是两件事。写 None（JSON null）而不是 False ——
+        # 消费方把 falsy 值读成「一切正常」正是本仓 `month_dd_pct ?? 0` 那个坑，
+        # 而这里的后果是看板与邮件齐声说「今日未熔断」，实际已经熔断过两次。
+        st["circuit_breaker"] = None
+    else:
+        st["circuit_breaker"] = bool(st["day_sl_count"] >= 2 or st["day_pnl_pct"] <= -3.0)
     st["open_positions"] = len(r.get("positions") or [])
     # ── 月度回撤：章程 L1-6「月度回撤 ≥12% → 强制停止开新仓」的判据 ──────────
     # 这个字段 src/main.ts 一直在读（`j.month_dd_pct ?? 0`），但**从来没有任何脚本写过**，

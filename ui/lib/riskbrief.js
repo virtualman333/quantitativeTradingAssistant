@@ -266,3 +266,33 @@ export function monthRiskView(rt) {
     summary,
   };
 }
+
+/**
+ * 本日计数视图模型。输入同样是 `status.runtime`（runtime.json 原样）。
+ *
+ * 为什么需要它：`day_sl_count` 与 `day_pnl_pct` 是「本日是否已熔断」的分子，而
+ * `state/runtime.json` 一旦被写坏，归档器会重建文件并**把计数从 0 重新开始累计**。
+ * 那个 0 与「今天没止损过」长得一模一样 —— 和月度回撤显示成 0.00% 是同一个形状的谎。
+ *
+ * 所以「该显示什么」收进这个纯函数：界面不自己判断、不自己拼文案，
+ * 测试也就能直接断言行为，而不是去断言 `.vue` 里出现过某个字符串
+ * （那种断言在模板里还有第二处同名片段时照样绿，本仓已经栽过）。
+ */
+export function dayCountersView(rt) {
+  const r = rt || {};
+  const sl = num(r.day_sl_count);
+  if (r.day_counters_compromised !== true) {
+    // 没有损坏记录时照旧显示计数。注意不要退回 `sl || 0` 那种写法 —— 0 是合法值。
+    return { compromised: false, slText: sl === null ? "0" : String(sl), note: "" };
+  }
+  const at = r.day_counters_compromised_at || "某轮";
+  const why = r.day_counters_compromised_error || "原因未记录";
+  return {
+    compromised: true,
+    slText: "—",
+    note:
+      "本日计数不可信：运行态文件曾在 " + at + " 损坏（" + why + "），" +
+      "止损次数与当日盈亏已从 0 重新累计。是否熔断需人工核对交易所账单 —— " +
+      "这里显示 0 不等于今天没止损过。",
+  };
+}

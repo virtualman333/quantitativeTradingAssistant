@@ -28,6 +28,7 @@ import os
 from datetime import datetime, timezone, timedelta
 
 import month_risk as _month_risk
+import jsonstore
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CST = timezone(timedelta(hours=8))
@@ -77,10 +78,13 @@ def load_last_round(round_id=None):
 
 
 def load_runtime():
-    if not os.path.exists(RUNTIME):
-        return {}
-    with open(RUNTIME, encoding="utf-8") as f:
-        return json.load(f)
+    """读运行态，返回 `(dict, error)`。**「没有文件」与「文件坏了」要分得开。**
+
+    这里原来直接 `json.load`（坏文件让整封报表抛异常、一封邮件都发不出），而看板那边
+    是静默 `{}`（一句告警都没有）—— 同一次损坏，两处表现完全相反，谁都没说清楚
+    「本日止损计数已经不可信」。统一走 `jsonstore.read_json_state`，由调用方决定怎么说。
+    """
+    return jsonstore.read_json_state(RUNTIME)
 
 
 def month_realized_pnl(year_month):
@@ -207,7 +211,7 @@ def fmt_live(lw):
     return out
 
 
-def render(rnd, runtime, month_state, tier_key, tier, mp):
+def render(rnd, runtime, month_state, tier_key, tier, mp, runtime_err=None):
     """mp: 月度进度字典"""
     now = _now()
     rid = rnd.get("round_id", "?")
@@ -347,7 +351,17 @@ def render(rnd, runtime, month_state, tier_key, tier, mp):
         if p.get("size_contracts"):
             if not p.get("sl") or str(p.get("sl")).strip() in ("", "-", "0"):
                 alerts.append("⚠ 裸仓告警：%s 无止损委托" % p.get("instrument"))
-    if runtime.get("circuit_breaker"):
+    if runtime_err:
+        alerts.append("⚠ 运行态文件损坏：本日熔断状态读不出来（%s）。下一轮归档会把坏文件留档为 "
+                      "state/runtime.json.corrupt-* 并按本轮权益重建；**在此之前以及重建后的本日"
+                      "剩余时间里，止损计数与当日盈亏都是「重置后的 0」而不是结论**，"
+                      "不能据此断定未熔断" % runtime_err)
+    elif runtime.get("day_counters_compromised"):
+        alerts.append("⚠ 本日计数不可信：运行态文件曾在 %s 损坏并被重建（%s）。本日止损计数与"
+                      "当日盈亏已从 0 重新累计，下面的数字不是本日实况，熔断与否需人工核对交易所账单"
+                      % (runtime.get("day_counters_compromised_at") or "某轮",
+                         runtime.get("day_counters_compromised_error") or "原因未记录"))
+    elif runtime.get("circuit_breaker"):
         alerts.append("⚠ 熔断中：当日已止损 %s 次，本轮起停止开新仓" % runtime.get("day_sl_count"))
     if mp.get("month_state_corrupt"):
         # 这条必须在最前：基准不可信时下面那句「月度回撤 x% 已触发降档」读的就是虚拟重置出来的 0，
@@ -392,7 +406,8 @@ def main():
     if not rnd:
         print("ERROR: 未找到轮次记录（logs/rounds.jsonl 为空或不存在）")
         return 1
-    runtime = load_runtime()
+    runtime, runtime_err = load_runtime()
+    runtime = runtime or {}
     equity = float(rnd.get("equity_usdt") or 0)
 
     now = _now()
@@ -425,7 +440,7 @@ def main():
     }
 
     tier_key, tier = pick_risk_tier(m["month_pnl_pct"], m["time_progress"], m["month_dd_pct"])
-    subject, body, alerts = render(rnd, runtime, mst, tier_key, tier, mp)
+    subject, body, alerts = render(rnd, runtime, mst, tier_key, tier, mp, runtime_err)
 
     payload = {
         "round_id": rnd.get("round_id"),

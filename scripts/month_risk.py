@@ -86,9 +86,6 @@ CST = timezone(timedelta(hours=8))
 
 MONTH_STATE = os.path.join(ROOT, "state", "month_state.json")
 
-# 坏文件的留档后缀（`month_state.json.corrupt-20260917-060000`）
-CORRUPT_SUFFIX = ".corrupt-"
-
 
 class MonthStateCorrupt(RuntimeError):
     """`state/month_state.json` 存在但读不出来（= 数据丢了，不是首次运行）。
@@ -134,14 +131,10 @@ def _load_state():
 def _quarantine_broken_state(now):
     """把读不出来的状态文件**原样留档**到 `.corrupt-<时间戳>`，返回目标路径。
 
-    用 `os.replace()`（同目录同分区，原子）而不是「复制 + 删除」：坏文件本身是排查线索，
-    必须完整留档。挪不动就干脆不写新状态并抛异常 —— 宁可这一轮算不出回撤
-    （会被 `guard.ts` 点名），也不能先覆盖证据再假装什么都没发生。
+    留档规则（含「同一秒内不覆盖前一份证据」）在 `jsonstore.quarantine_broken()` ——
+    本模块与 `archive_round.py` 的 `runtime.json` 是同一条要求，各写一份必然漂移。
     """
-    dest = MONTH_STATE + CORRUPT_SUFFIX + now.strftime("%Y%m%d-%H%M%S")
-    os.makedirs(os.path.dirname(MONTH_STATE), exist_ok=True)
-    os.replace(MONTH_STATE, dest)
-    return dest
+    return jsonstore.quarantine_broken(MONTH_STATE, now.strftime("%Y%m%d-%H%M%S"))
 
 
 def _reset_state(equity, now, note):
