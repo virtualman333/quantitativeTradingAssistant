@@ -856,14 +856,12 @@ print(json.dumps({
         .split(/\r?\n/)
         .filter((l) => !l.trim().startsWith("#"))
         .join("\n");
-    for (const f of ["scripts/month_risk.py", "scripts/archive_round.py"]) {
-      const src = codeOnly(read(f));
-      assert.ok(
-        !src.includes("json.dump("),
-        `${f} 里又出现了就地 json.dump —— 半截文件会让 L1-6 的分母被静默清零`
-      );
-      assert.ok(src.includes("jsonstore.atomic_write_json("), `${f} 没走原子写`);
-    }
+    // ⚠ 第 16 轮改：这条锁原来**写死两个文件名**（`month_risk.py` / `archive_round.py`），
+    // 标题却说「state/*.json 的写一律走 jsonstore」—— 一条覆盖全仓的规矩、一个只认两个名字的守卫。
+    // 后果是 `order_id.py`（幂等登记表）与 `review_trade.py`（复盘账本）两处「读 → 改 → 写」
+    // 一直用就地 `json.dump`，而它们恰是最要命的两处。
+    // 现在「哪些文件可以有裸写」由 `tests/statewriters.test.ts` 从 glob 现算 + 棘轮表管，
+    // 这里只留 jsonstore 自身与 L1-6 读方的落点断言（不是覆盖率清单）。
     const store = codeOnly(read("scripts/jsonstore.py"));
     assert.ok(store.includes("os.replace("), "jsonstore 的原子替换不见了");
     assert.ok(store.includes("os.fsync("), "jsonstore 少了 fsync —— 换名是原子的，内容有没有落盘是另一件事");
@@ -874,5 +872,12 @@ print(json.dumps({
       codeOnly(read("scripts/month_risk.py")).includes("jsonstore.read_json_state("),
       "month_risk 又自己 open+json.load 读状态了 —— 那条路分不出「首次运行」与「数据丢了」"
     );
+    // L1-6 的分母与熔断读数这两条最贵的数据，必须走原子写（覆盖率由 statewriters 的 glob 现算）
+    for (const f of ["scripts/month_risk.py", "scripts/archive_round.py"]) {
+      assert.ok(
+        codeOnly(read(f)).includes("jsonstore.atomic_write_json("),
+        `${f} 的写没走原子写`
+      );
+    }
   });
 });

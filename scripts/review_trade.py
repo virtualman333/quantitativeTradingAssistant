@@ -25,6 +25,10 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
+# 状态文件读写的唯一底座（原子写 + 分得开「还没有文件」与「文件坏了」）。
+# 复盘账本是 `state/` 下的 JSON，与 month_state / runtime 同一条规矩 —— 见 jsonstore 模块头。
+import jsonstore
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER = os.path.join(ROOT, "ledger", "trades.csv")
 STATE_DIR = os.path.join(ROOT, "state")
@@ -66,19 +70,35 @@ def _f(v, d=0.0):
 
 
 def load_reviewed():
-    if os.path.exists(REVIEWED):
-        try:
-            with open(REVIEWED, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"reviews": [], "proposals": []}
+    """读复盘账本（`state/reviewed_trades.json`）。**读不出来就抛 `StateUnreadable`**。
+
+    为什么不能返回空骨架：这本账是「哪几笔交易已经复盘过」与「哪条归因已提过案」的
+    唯一记录。返回 `{"reviews": [], "proposals": []}` 会让调用方以为**一笔都没复盘过**：
+
+    - `--prepare` 把已经复盘过的交易重新列成「待复盘」（`cmd_prepare` 里那句
+      「未全部完成前，不得开新仓」于是永远成立 → 开新仓被自己挡住）；
+    - `--commit` 的「重复提交」判据失效（同一笔可以反复写进 `EVOLUTION.md`）；
+    - `--stats` 打印「暂无复盘记录」，而归因计数是 0 → 提案阈值永远不触发。
+
+    三条路都不报错，只是各自说一个假数字。**「不知道」必须说出来，不许伪装成「没有」。**
+
+    文件不存在是另一回事（本机第一次跑），返回空骨架，允许初始化。
+    """
+    d = jsonstore.read_json_state_strict(REVIEWED)
+    if d is None:
+        return {"reviews": [], "proposals": []}
+    d.setdefault("reviews", [])
+    d.setdefault("proposals", [])
+    return d
 
 
 def save_reviewed(d):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(REVIEWED, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+    """原子写。与 `month_state.json` / `runtime.json` 同一条规矩：`state/` 下的 JSON 不是缓存。
+
+    就地 `open(..., "w") + json.dump` 正是半截文件的成因，而这本账一旦半截，
+    上面那条 `load_reviewed` 就会拒绝工作 —— 两个毛病合起来是「一次写到一半就丢掉全部复盘记录」。
+    """
+    jsonstore.atomic_write_json(REVIEWED, d)
 
 
 def trade_key(t):
@@ -360,6 +380,24 @@ def cmd_stats():
     return 0
 
 
+def _unreadable(e):
+    """复盘账本读不出来时的统一出口（三个子命令共用一份说法，别各写一遍）。
+
+    为什么不给 `--force` 之类的逃生门：一个能绕过守卫的开关，在真正着急复盘的那天
+    一定会被用掉；而这条守卫挡的正是「账本被清空之后继续往下走」——
+    那会让同一笔交易被反复复盘、提案被反复生成，账面上却一切正常。
+    """
+    print("=" * 74)
+    print("复盘账本读不出来：%s" % e.error)
+    print("文件：%s" % os.path.relpath(e.path, ROOT).replace("\\", "/"))
+    print("=" * 74)
+    print("原文件保持不动（它是唯一的排查与对账线索，不许覆盖）。请人工打开确认后：")
+    print("  - 修好它，或把它改名归档，然后重跑本命令。")
+    print("在此之前不会写入、也不会编辑 EVOLUTION.md / PLAYBOOK.md ——")
+    print("读不到账本就无法判断哪些交易已经复盘过、哪条归因已提过案。")
+    return 3
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prepare", action="store_true")
@@ -368,15 +406,20 @@ def main():
     ap.add_argument("--input", default="")
     args = ap.parse_args()
 
-    if args.prepare:
-        return cmd_prepare()
-    if args.commit:
-        if not args.input:
-            print("[review] --commit 需要 --input")
-            return 2
-        return cmd_commit(args.input)
-    if args.stats:
-        return cmd_stats()
+    # 三个子命令都要读这本账，所以统一在这里接 —— 守卫写在各子命令里，
+    # 就会出现「新加一个子命令时忘了接」的空白（本仓的规矩：一处兜住，不靠自觉）。
+    try:
+        if args.prepare:
+            return cmd_prepare()
+        if args.commit:
+            if not args.input:
+                print("[review] --commit 需要 --input")
+                return 2
+            return cmd_commit(args.input)
+        if args.stats:
+            return cmd_stats()
+    except jsonstore.StateUnreadable as e:
+        return _unreadable(e)
     ap.print_help()
     return 0
 

@@ -28,6 +28,14 @@ order_id.py — 订单幂等 ID 生成器（章程 §6.1，提案 P005 于 2026-
 幂等重试约定（章程 §6.1）：
     请求超时 / 网络异常时，必须用**同一个 clOrdId** 重试，不得改用新 ID，也不得直接放弃。
     重试后用 swap_get_orders 按 clOrdId 回查，确认实际成交笔数，避免重复建仓。
+
+登记表怎么读写（`state/order_idem_<轮次>.json`）：
+    这张表是「本轮哪几笔单已经发过」的**唯一记录**，也是事后按 clOrdId 对账的索引，
+    所以它与 `month_state.json` / `runtime.json` 走同一条规矩：
+
+    - **写**一律经 `jsonstore.atomic_write_json`（半截文件是「读不出来」的成因）；
+    - **读**一律经 `jsonstore.read_json_state_strict`：读不出来就**拒绝生成新 ID**
+      （既不猜「没发过」，也不猜「发过」），原文件保持不动交给人工处置。
 """
 import argparse
 import json
@@ -36,6 +44,10 @@ import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+
+# 状态文件读写的唯一底座（原子写 + 分得开「还没有文件」与「文件坏了」）。
+# 登记表是 `state/` 下的 JSON，与 month_state / runtime 同一条规矩 —— 见 jsonstore 模块头。
+import jsonstore
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "state")
@@ -67,20 +79,27 @@ def record_path(round_id):
 
 
 def load_rows(path):
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    """读本轮的登记表。**读不出来就抛 `jsonstore.StateUnreadable`**，绝不返回空表。
+
+    为什么不能「读坏了就当空的」：这张表是「本轮哪几笔单已经发过」的**唯一记录**，
+    而它管的是章程 §6.1 的幂等 —— 拿空表继续往下走，等于告诉调用方
+    「本轮一笔都没发过」，于是同一个 `--seq` 会被再生成一个新 `clOrdId`
+    （或反过来，事后按 clOrdId 对账时找不到那笔）。**「不知道」被伪装成「没有」**，
+    正是本仓在 `runtime.json` 上反复踩的那个形状。
+
+    文件不存在是另一回事（新轮次第一次发单），返回空表，允许初始化。
+    """
+    return jsonstore.read_json_state_strict(path, expect=list) or []
 
 
 def save_rows(path, rows):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
+    """原子写。登记表与 `month_state.json` 同一条规矩：`state/` 下的 JSON 不是缓存。
+
+    就地 `open(path, "w") + json.dump` 正是半截文件的成因，而半截文件在**读**那一侧
+    会变成「这张表坏了」—— 于是「写不原子」与「读坏了当空的」两个毛病合起来，
+    净效果是**一次写到一半就丢掉整轮的幂等记录**。
+    """
+    jsonstore.atomic_write_json(path, rows)
 
 
 def main():
@@ -118,7 +137,23 @@ def main():
         return 2
 
     path = record_path(a.round)
-    rows = load_rows(path)
+    rel = os.path.relpath(path, ROOT).replace("\\", "/")
+    try:
+        rows = load_rows(path)
+    except jsonstore.StateUnreadable as e:
+        # 登记表读不出来 = 「本轮发过哪几笔」无从得知。**一律拒绝**，包括 --list ——
+        # 此前这条路会打印 `ok:true, count:0`，等于告诉对账的人「本轮没有已登记的 ID」，
+        # 而真相是「不知道」。不知道就要说出来，代价是这一轮必须有人工介入（刻意不给
+        # 逃生门：一个 --force 就能绕过的守卫，在真正着急下单的那天一定会被用掉）。
+        print(json.dumps({
+            "ok": False,
+            "error": "幂等登记表读不出来：%s" % e.error,
+            "record_file": rel,
+            "action": "原文件保持不动（它是唯一的对账线索，不许覆盖）。请人工打开确认后，"
+                      "改好它、或改名归档再重跑；在此之前不会生成也不会列出任何 clOrdId —— "
+                      "读不到表就无法判断 --seq 是否已经发过（章程 §6.1 幂等）。",
+        }, ensure_ascii=False, indent=2))
+        return 3
 
     # 模式二：列出本轮已登记 ID
     if a.list:
