@@ -518,3 +518,166 @@ print(json.dumps({
     );
   });
 });
+
+// ── E. 第三个写者：trade_round.py（每轮取数时就跑，而且跑在归档**之前**） ────────
+
+describe("trade_round · 抢在归档之前碰同一个文件的那个写者", () => {
+  /**
+   * 为什么单列一组：`state/runtime.json` 有三个碰它的地方 ——
+   * `archive_round.py`（收尾归档，已修）、`dashboard.py` / `mail_report.py`（只读），
+   * 以及 **`trade_round.py`**（每轮取数时 `bump_runtime()` 写一次）。第三处当时没跟着修，
+   * 而它**跑在归档之前**：一旦它先把读不出来的文件覆盖成一份「只有三个字段的合法 JSON」，
+   * 归档那边就再也看不出出过事 —— 上面整组保护（留档 / `day_counters_compromised` /
+   * `circuit_breaker=null`）会被从旁边架空，看板与邮件照旧说「今日未熔断」。
+   * 同一份文件、同一个「读坏了当成首次运行」的毛病，两处写法就是两颗雷。
+   *
+   * 这一组刻意只用**行为**断言，不写「源码里出现过 jsonstore.read_json_state」这类结构锁：
+   * Python 的 docstring 是字符串字面量，`stripComments()` 剥不掉（它只剥注释），
+   * 那种断言会被函数自己的 docstring 满足 —— 那正是本仓连续多轮踩到的假锁。
+   */
+  const driver =
+    `
+import glob, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import archive_round, jsonstore, trade_round
+
+tmp = tempfile.mkdtemp(prefix="qta_trcorrupt_")
+trade_round.STATE = tmp
+trade_round.RUNTIME = os.path.join(tmp, "runtime.json")
+trade_round.LOGS = os.path.join(tmp, "logs")
+archive_round.RUNTIME = trade_round.RUNTIME          # 真实布局：两个脚本写的是同一个文件
+os.makedirs(trade_round.LOGS, exist_ok=True)
+
+HEALTHY = {
+    "round_no": 3, "current_day": "2026-09-17", "day_sl_count": 2,
+    "day_start_equity": 10000.0, "day_trade_count": 5, "circuit_breaker": True,
+    "month_dd_pct": 4.5, "inception_equity": 10000.0, "inception_date": "2026-09-01",
+}
+
+
+def write_raw(p, text):
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def read_text(p):
+    with open(p, "rb") as f:
+        return f.read().decode("utf-8")
+
+
+def disk():
+    return json.loads(read_text(trade_round.RUNTIME))
+
+
+def archives():
+    return sorted(glob.glob(trade_round.RUNTIME + jsonstore.CORRUPT_SUFFIX + "*"))
+
+
+# ① 对照组：健康文件下 bump_runtime 只补轮次号，安全判据一个都不许丢
+write_raw(trade_round.RUNTIME, json.dumps(HEALTHY))
+healthy_ret = trade_round.bump_runtime("R000004")
+healthy_disk = disk()
+
+# ①′ 写回必须经由 jsonstore 的原子写（假协作者：换掉它，看那条路还走不走）
+aw_calls = []
+_real_aw = jsonstore.atomic_write_json
+
+
+def _spy(path, data, **kw):
+    aw_calls.append(path)
+    return _real_aw(path, data, **kw)
+
+
+jsonstore.atomic_write_json = _spy
+write_raw(trade_round.RUNTIME, json.dumps(HEALTHY))
+trade_round.bump_runtime("R000004")
+jsonstore.atomic_write_json = _real_aw
+
+# ② 归档日志里有 7 轮 —— 运行态读不出来时的兜底来源
+with open(os.path.join(trade_round.LOGS, "rounds.jsonl"), "w", encoding="utf-8", newline="") as f:
+    for i in range(1, 8):
+        f.write(json.dumps({"round_id": "R%06d" % i}) + "\\n")
+
+# ③ 文件被写坏（真实成因：json.dump 写到一半被杀）
+BROKEN = '{"current_day": "2026-09-17", "day_sl_count": 2, "round_cou'
+write_raw(trade_round.RUNTIME, BROKEN)
+round_id_after_corrupt = trade_round.next_round_id()
+bump_ret = trade_round.bump_runtime("R000008")
+still_broken = read_text(trade_round.RUNTIME) == BROKEN
+archives_before_archive = [os.path.basename(p) for p in archives()]
+
+# ④ 收尾归档接手（这才是负责安全判据的那一步）
+st = archive_round.update_runtime({
+    "time_cst": "2026-09-17 10:00:00", "round_id": "R000008",
+    "equity_usdt": 9700.0, "sl_triggered": 0, "trades": [], "positions": [],
+})
+arcs = archives()
+print(json.dumps({
+    "healthy_disk": healthy_disk,
+    "atomic_write_calls": aw_calls,
+    "atomic_write_target": os.path.basename(aw_calls[0]) if aw_calls else None,
+    "round_id_after_corrupt": round_id_after_corrupt,
+    "bump_ret": bump_ret,
+    "still_broken": still_broken,
+    "archives_before_archive": archives_before_archive,
+    "archive_count": len(arcs),
+    "archive_text": read_text(arcs[0]) if arcs else None,
+    "broken_text": BROKEN,
+    "archive_name": os.path.basename(arcs[0]) if arcs else None,
+    "after_archive": {k: st.get(k) for k in ("day_sl_count", "circuit_breaker",
+                                             "day_counters_compromised", "recovered_from")},
+    "tmp_leftovers": sorted(os.path.basename(p) for p in glob.glob(os.path.join(tmp, "*.tmp"))),
+}, ensure_ascii=False))
+`;
+
+  it("坏文件下它一个字都不写：证据留给归档，轮次号不退回 1", (t) => {
+    const out = runDriver(t, "driver_trade_round", driver);
+    if (!out) return;
+
+    // ① 对照组：健康文件下行为不变（否则「不写」可能只是「什么都不做」的副作用）
+    const healthyDisk = out.healthy_disk as Record<string, unknown>;
+    assert.equal(healthyDisk.round_no, 4, "健康文件下轮次号没写进去");
+    assert.equal(healthyDisk.day_sl_count, 2, "健康文件下 bump_runtime 把本日止损计数弄丢了");
+    assert.equal(healthyDisk.circuit_breaker, true, "健康文件下熔断读数被改坏了");
+    assert.equal(healthyDisk.month_dd_pct, 4.5, "健康文件下月度回撤被弄丢了");
+    assert.equal(healthyDisk.inception_equity, 10000, "健康文件下基准权益被弄丢了");
+    assert.equal(healthyDisk.current_day, "2026-09-17", "健康文件下 current_day 被弄丢了");
+
+    // ①′ 写回走的是 jsonstore 的原子写（换掉它就不写 —— 断言的是调用真的发生，不是源码里出现过某个名字）
+    assert.equal(
+      (out.atomic_write_calls as unknown[]).length,
+      1,
+      "bump_runtime 不再经由 jsonstore.atomic_write_json 写运行态（回落成裸 open(w) 会留下半截文件）"
+    );
+    assert.equal(out.atomic_write_target, "runtime.json", "原子写写到了别的地方");
+
+    // ② 轮次号不许退回 1：它是 clOrdId 的组成部分（L1-8 唯一性），退回 1 就是与历史轮次重号
+    assert.equal(
+      out.round_id_after_corrupt,
+      "R000008",
+      `运行态读不出来时轮次号退回了 ${out.round_id_after_corrupt} —— 「不知道」被伪装成了「从头开始」（该由只追加的归档日志兜底）`
+    );
+
+    // ③ 读不出来就别写：一个字都不许落到磁盘上
+    assert.equal(out.bump_ret, null, "读不出来的运行态被 bump_runtime 写回去了");
+    assert.equal(out.still_broken, true, "坏文件被改动/覆盖了 —— 证据必须在归档接手前保持原样");
+    assert.deepEqual(
+      out.archives_before_archive,
+      [],
+      "bump_runtime 抢在归档之前留了档 —— 留档与「计数不可信」的判定是同一件事，只能有一个地方做"
+    );
+
+    // ④ 归档接手后，上一轮那套保护必须**照样生效**（这才是本组真正的对照物）
+    assert.equal(out.archive_count, 1, "归档没有留档坏文件 —— 说明它看到的是一份「干净的」运行态（被上一个写者洗白了）");
+    assert.equal(out.archive_text, out.broken_text, "留档不是逐字节原件");
+    const after = out.after_archive as Record<string, unknown>;
+    assert.equal(
+      after.day_counters_compromised,
+      true,
+      "计数被重置却没有标记 —— 看板与邮件会一起说「今日未熔断」"
+    );
+    assert.equal(after.circuit_breaker, null, "计数不可信时熔断读数是 false 而不是 null（未知）");
+    assert.equal(after.recovered_from, out.archive_name, "状态里没指向留档文件");
+    assert.deepEqual(out.tmp_leftovers, [], "留下了临时文件");
+  });
+});

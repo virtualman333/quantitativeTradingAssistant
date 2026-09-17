@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -43,6 +44,9 @@ import time
 if os.name != "nt":
     import fcntl
 from datetime import datetime, timedelta, timezone
+
+# 状态文件读写的唯一底座（原子写 + 分得开「还没有文件」与「文件坏了」）
+import jsonstore
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CST = timezone(timedelta(hours=8))
@@ -131,44 +135,73 @@ def _acquire_lock():
 # --------------------------------------------------------------------------- #
 # 轮次号 / 运行态
 # --------------------------------------------------------------------------- #
-def next_round_id() -> str:
+def _round_no_from_logs() -> int:
+    """从 `logs/rounds.jsonl` 推断「下一个可用的轮次号」（推断不出来时返回 1）。
+
+    这条来源**不依赖 `runtime.json`**，所以它能用在运行态读不出来的时候。
+    """
     n = 1
-    if os.path.exists(RUNTIME):
+    try:
+        with open(os.path.join(LOGS, "rounds.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                    m = re.search(r"(\d+)", d.get("round_id", ""))
+                    if m:
+                        n = max(n, int(m.group(1)) + 1)
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return n
+
+
+def next_round_id() -> str:
+    """下一个轮次号 = `max(runtime.round_no + 1, logs/rounds.jsonl 最大号 + 1)`。
+
+    为什么不是「读不出来就从 1 开始」：轮次号是 `order_id.py` 生成 clOrdId 的组成部分
+    （L1-8 的唯一性），退回 1 会与历史轮次**重号** —— 与「把熔断计数清零」同一个毛病：
+    读数不可信时猜一个最小的数，等于把「不知道」伪装成「从头开始」。
+    读数不可信就只信另一条来源（`logs/rounds.jsonl` 只追加，不依赖那个文件）。
+    """
+    st, err = jsonstore.read_json_state(RUNTIME)
+    n = 0
+    if err is None:
         try:
-            rt = json.load(open(RUNTIME, encoding="utf-8"))
-            n = int(rt.get("round_no", 0)) + 1
-        except Exception:
-            n = 1
+            n = int((st or {}).get("round_no", 0) or 0) + 1
+        except (TypeError, ValueError):
+            n = 0
     else:
-        # 从 logs/rounds.jsonl 推断
-        try:
-            with open(os.path.join(LOGS, "rounds.jsonl"), encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        d = json.loads(line)
-                        m = __import__("re").search(r"(\d+)", d.get("round_id", ""))
-                        if m:
-                            n = max(n, int(m.group(1)) + 1)
-                    except Exception:
-                        pass
-        except FileNotFoundError:
-            pass
-    return f"R{n:06d}"
+        log(f"⚠ state/runtime.json 读不出来（{err}）：轮次号改由 logs/rounds.jsonl 推断")
+    return f"R{max(n, _round_no_from_logs()):06d}"
 
 
 def bump_runtime(round_id: str):
-    n = int(__import__("re").search(r"(\d+)", round_id).group(1))
-    rt = {}
-    if os.path.exists(RUNTIME):
-        try:
-            rt = json.load(open(RUNTIME, encoding="utf-8"))
-        except Exception:
-            rt = {}
-    rt["round_no"] = n
-    rt["last_round_id"] = round_id
-    rt["last_run_cst"] = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
-    with open(RUNTIME, "w", encoding="utf-8") as f:
-        json.dump(rt, f, ensure_ascii=False, indent=2)
+    """把轮次号写进运行态。返回写进去的状态；**旧状态读不出来时一个字都不写**（返回 None）。
+
+    为什么读不出来就不写：`state/runtime.json` 是熔断与月度回撤两条 L1 的**判据载体**，
+    处置权在 `archive_round.py`（留档坏文件 + 写 `day_counters_compromised` +
+    `circuit_breaker` 写 `null`）。本函数只负责「轮次号」这一件事，如果抢在收尾之前
+    把读不出来的文件覆盖成一份「只有三个字段的合法 JSON」，收尾那边就再也看不出出过事：
+    它会读到一份干净的运行态，于是**留档不生成、不可信标记不写、熔断读数是 `false`
+    而不是 `null`** —— 看板与邮件照旧齐声说「今日未熔断」。上一轮刚补上的那套保护，
+    会被这一步从旁边架空。
+    """
+    st, err = jsonstore.read_json_state(RUNTIME)
+    if err is not None:
+        log(f"⚠ state/runtime.json 读不出来（{err}）：本轮不更新运行态，"
+            f"原文件保持不动，交由 archive_round.py 留档处置")
+        return None
+    m = re.search(r"(\d+)", round_id)
+    if not m:
+        log(f"⚠ 轮次号 {round_id!r} 里没有数字，运行态未更新")
+        return None
+    st = dict(st or {})
+    st["round_no"] = int(m.group(1))
+    st["last_round_id"] = round_id
+    st["last_run_cst"] = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    jsonstore.atomic_write_json(RUNTIME, st)
+    return st
 
 
 # --------------------------------------------------------------------------- #
@@ -518,7 +551,11 @@ def run_once(auto_trade: bool, dry_run: bool):
         # 说明：归档/面板/邮件的「最终版」应由 DSH agent 在决策执行后调用，
         # 但为保留每轮可追溯性，这里先以「待决策」状态落一版 round_input，
         # 真正的归档（archive_round.py）由决策执行脚本/agent 在收尾时调用。
-        bump_runtime(round_id)
+        # 运行态只在这里「补一个轮次号」；安全判据（日计数 / 熔断 / 月度回撤）由收尾的
+        # archive_round.py 负责。bump_runtime 返回 None 表示 runtime.json 读不出来、
+        # 本轮一个字都没写 —— 那是刻意留给 archive_round 处置的（见该函数 docstring）。
+        if bump_runtime(round_id) is None:
+            log("⚠ 运行态本轮未更新（runtime.json 读取失败，原文件已保留，交由收尾归档处置）")
         log(f"===== 轮次 {round_id} 取数完成，等待 DSH agent 决策 =====")
         # sentinel：供 DSH agent 的 job_output --wait 识别"新一轮就绪"
         print(f"ROUND_READY {round_id} {datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')}",
