@@ -1,6 +1,10 @@
 /**
  * tools/fs.ts —— 文件读写与检索
  * 全部经 resolveSafe 限制在仓库根内（见 paths.ts）。
+ *
+ * 注意写入口用的是 `resolveSafe(..., { forWrite: true })`：`state/` 与 `ledger/`
+ * 读得了、写不了 —— 那两处是风控判据与账本的载体，各有带风控语义的唯一写入口，
+ * 不接受模型手写覆盖（理由见 paths.ts 的 `DENY_WRITE_DIRS`）。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -51,7 +55,9 @@ export const writeFileTool: Tool = {
     required: ["path", "content"],
   },
   run: async (a, ctx) => {
-    const abs = resolveSafe(a.path);
+    // forWrite：state/ 与 ledger/ 在这里就被拒（见 paths.ts 的 DENY_WRITE_DIRS）。
+    // 放在确认对话框**之前**是刻意的 —— 一个注定会被拒的写入不该先让用户点一次确认。
+    const abs = resolveSafe(a.path, { forWrite: true });
     const content = String(a.content ?? "");
     const preview = content.length > 300 ? content.slice(0, 300) + "\n…（截断显示）" : content;
     const ok = (await ctx.confirm?.({

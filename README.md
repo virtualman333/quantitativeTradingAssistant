@@ -236,10 +236,13 @@ const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
 
 - 时间格式必须 `YYYY-MM-DD HH:MM:SS`（`archive_round.py` 严格解析，`toLocaleString` 会报 ValueError）。
 - 章程 §L1 的数值（杠杆 5x / 单笔风险 2.5%）**只在 `src/guard.ts` 定义一次**；要改上限必须先改 `AGENT_TRADING_RULES.md`，`tests/scalperguard.test.ts` 会比对两者。
-- `state/month_state.json` 是 **L1-6 的分母**（`month_peak_equity` 只增不减，**抬高一次不可逆**）：**只有 `scripts/archive_round.py` 会写它**（全仓唯一调用 `month_risk.update_month_state()` 的地方）。看板 / 邮件走 `month_risk.month_metrics()` 的**只读**口径 —— 展示路径一律不得改动基准与峰值，否则一份手填的账户快照就能把真实回撤算成熔断。`tests/monthguard.test.ts` 用真跑 + 哈希比对钉住这一点。
+- `state/month_state.json` 是 **L1-6 的分母**（`month_peak_equity` 只增不减，**抬高一次不可逆**）：**代码路径上只有 `scripts/archive_round.py` 会写它**（全仓唯一调用 `month_risk.update_month_state()` 的地方）。看板 / 邮件走 `month_risk.month_metrics()` 的**只读**口径 —— 展示路径一律不得改动基准与峰值，否则一份手填的账户快照就能把真实回撤算成熔断。`tests/monthguard.test.ts` 用真跑 + 哈希比对钉住这一点。
+  - 上面这句原先写成「**只有** `archive_round.py` 会写它」，而它只被源码断言扛着 —— 源码断言看不见**模型手里的通用写工具**：`write_file` 曾能把 `state/month_state.json` 覆盖成任意内容（抬高峰值 = 误熔断，清零 = 该熔断不熔断，两条都不可逆），唯一的拦阻是「危险工具要用户点一次确认」，而对话框里给出的正是这条路径与内容预览。**所以边界补在了工具层**：`state/` 与 `ledger/` **读得了、写不了**（`src/tools/paths.ts` 的 `DENY_WRITE_DIRS`，含 Windows 上的 `State/` 大小写变体），`tests/toolsguard.test.ts` 真调 `write_file` 钉住「被拒 + 磁盘逐字节不变」，并配了反向对照（守卫不许把正常写入堵死）。
+  - 残余缺口（刻意保留，不假装堵上）：`bash` 工具无法从命令文本上封死（`echo > state/...`、`python -c ...` 都在它能力范围内）。它同样是危险工具、逐次人工确认，属于用户明确授权后的最后手段。
 - `state/` 下的 JSON **不是缓存，是判据的载体**，读写一律走 `scripts/jsonstore.py`：写用 `atomic_write_json()`，读用 `read_json_state()`（`(data, error)` 两值，必须显式处理）或 `read_json_state_strict()`（读不出来直接抛 `StateUnreadable`）。
   - 两本「读 → 改 → 写」的账走**严格**那条：`state/order_idem_<轮次>.json`（本轮哪几笔单已经发过 → 章程 §6.1 幂等、L1-8 clOrdId 唯一性）与 `state/reviewed_trades.json`（哪几笔交易已经复盘过、哪条归因已提过案）。**账读不出来就拒绝本次写**（退出码 3），原文件保持不动交出题人处置 —— 「读坏了当空的然后再写回去」等于把整本账悄悄清空：登记表清空会重复发单，复盘账本清空会让已复盘的交易重新变成「待复盘」、提案反复生成。
   - `tests/statewriters.test.ts` 把这两条做成**真跑 CLI** 的行为断言（半截文件 → 拒绝 + 原文件逐字节不变；文件不存在 → 照常工作），并用 glob 现算盯住「`scripts/` 里谁还可以有裸 `json.dump`」（棘轮表，只减不增）。
+- 工具层边界（`src/tools/paths.ts`）：一切文件操作限制在仓库根内，`.git` / 密钥类文件不可访问，**另外 `state/` 与 `ledger/` 只读不写**（风控判据与账本的载体，各有带风控语义的写入口：`state/` 走 `jsonstore` 的原子写、轮次账本走 `archive_round.py` 的只追加）。越界一律拒绝且**报错里点名该走哪个入口**，否则模型会反复重试同一个被拒的写入。
 - 下单价格格式化（tickSz 网格）**只在 `src/price.ts` 定义一次**，两个下单入口共用一个 `snappedSlTp()`；`tests/price.test.ts` 会检查有没有人又自造一份。
 - 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。
 - 界面文案一律中文。
