@@ -259,6 +259,30 @@ const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
 - **存量非法配置不会被静默放行**：`data/store.json` 里若已存着 10x / 10%，页面顶部显示红色告警，开单时被拒，原因进本轮监测记录（`data/scalper_ticks.jsonl` → 战绩面板的「执行出错」桶）。
 - L2 提示（单笔风险 > 2% 需人工确认）不阻断，但会跟在当轮结论字符串后面 —— 超短线是无人值守的循环，监测记录是唯一能让用户看到它的地方。
 
+## 实盘账户只读（L1-3）的代码级闸门
+
+章程 §1 的十条 L1 里，**只有 L1-3 直接管着用户账户里的真钱**：
+
+> 严禁调用任何实盘下单/平仓/改单接口。`scripts/mcp_call.py --profile live` 为代码级拒写（返回 `REFUSED`、exit 2、**不产生网络请求**），不得以任何方式绕过
+
+这句话此前**一条断言都没有**（`tests/` 里对 `mcp_call` / `REFUSED` 的引用数 = 0）。实查暴露三处对不上：
+
+| 对不上的地方 | 后果 |
+|---|---|
+| `READ_TOOLS` 定义之后**从来没有被引用过**，注释却写着「用于 `--read-only` 之外的二次校验」 | 声称存在的第二道闸门其实不存在，只剩服务端 `--read-only` 一层 |
+| `WRITE_TOOLS` 里写的是 `swap_cancel_algo_order`（单数），而真实调用点（`src/okx.ts` 的 `cancelAlgoOrders()`）用的是 `swap_cancel_algo_orders`（复数） | 手抄的黑名单漂了，那个**撤单**工具在只读模式下**一路放行** |
+| 写工具的拒绝判在 `open_session()` **之后** | 被拒的请求仍会先起一个 MCP 服务端并完成 initialize 握手 —— 章程里「不产生网络请求」那半句是假的 |
+
+现在的形态（`tests/mcplive.test.ts` 逐条钉住）：
+
+- **准入是正向白名单**：未加 `--allow-write` 时工具名必须命中 `READ_TOOLS`，**不在名单里一律拒绝**。默认值反过来之后新工具默认安全；`WRITE_TOOLS` 退居二线，只负责把理由说得更准（「这是写操作，需要 `--allow-write`」比「不在白名单里」有用）。
+- **全部拒绝前置到 `precheck()`**，位置在 `open_session()` 之前 —— 「不产生网络请求」因此是结构性成立的，不靠服务端配合。
+- **两张表必须非空且互斥**，`assert_tool_tables()` 不满足直接抛；而且 `main()` 里真的调它（定义得再好，不接线等于没有 —— 这一条也有断言）。
+- **源码调用过的每个工具名都必须在两张表之一**（现算对账）：扫 `src/**/*.ts` 的 `mcpCall(...)` 与 `scripts/**/*.py` 的 `--tool`，少一个就红。单数/复数那处漂移正是它会红的场景。
+- 测试用**假 `okx-trade-mcp` 垫片**证明「服务端到底被起过没有」，全程不碰真 server、不发任何请求；另配一条反向对照（白名单内的只读工具**必须**真的起进程），否则「没被起进程」这条断言在任何实现下都会绿。
+
+**加新工具时的正确动作**：把它登记进 `scripts/mcp_call.py` 的 `READ_TOOLS` 或 `WRITE_TOOLS`。不登记的话它会被默认拒绝 —— 功能会哑掉，但不会出安全问题。
+
 ## 关键约定
 
 - 时间格式必须 `YYYY-MM-DD HH:MM:SS`（`archive_round.py` 严格解析，`toLocaleString` 会报 ValueError）。
@@ -273,7 +297,7 @@ const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(tickSz))));
   - `tests/statewriters.test.ts` 把这两条做成**真跑 CLI** 的行为断言（半截文件 → 拒绝 + 原文件逐字节不变；文件不存在 → 照常工作），并用 glob 现算盯住「`scripts/` 里谁还可以有裸 `json.dump`」（棘轮表，只减不增）。
 - 工具层边界（`src/tools/paths.ts`）：一切文件操作限制在仓库根内，`.git` / 密钥类文件不可访问，**另外判据与账本的载体目录只读不写**（`DENY_WRITE_DIRS` = `state/ ledger/ logs/ data/ news/`，各有带风控语义的写入口：`state/` 走 `jsonstore` 的原子写、轮次账本与 `logs/rounds.jsonl` 走 `archive_round.py` 的只追加、`news/news.jsonl` 走 `news_db.py`）。越界一律拒绝且**报错里点名该走哪个入口**，否则模型会反复重试同一个被拒的写入。**禁区清单与仓库实际的载体目录是否对得上由 `tests/pathguard.test.ts` 现算核对**，不靠人抄。
 - 下单价格格式化（tickSz 网格）**只在 `src/price.ts` 定义一次**，两个下单入口共用一个 `snappedSlTp()`；`tests/price.test.ts` 会检查有没有人又自造一份。
-- 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。
+- 写操作一律走 `okx.ts` 受控通道（守 L1-3 live 只读），不直接经 MCP 写。**L1-3 的代码级闸门在 `scripts/mcp_call.py` 的 `precheck()`，准入是正向白名单**（不在 `READ_TOOLS` 里就拒绝），拒绝一律早于起子进程；见「实盘账户只读（L1-3）的代码级闸门」。
 - 界面文案一律中文。
 - 专家经验库（`experts/<id>/knowledge/`）的**写入去向是校验过的**：`knowledgeDir()` / `knowledgeFilePath()` 只收白名单内的 id 与 `.md` 文件名，且解析后必须仍在 `experts/` 根之内。归属不明的教训进共享桶 `_shared`（所有专家都读），**不许造出没有对应专家的目录** —— 那等于把教训写进没人读的地方。
 - `data/store.json` 必须存在（多模块依赖）；`.codebuddy/` 为项目数据目录，勿删。

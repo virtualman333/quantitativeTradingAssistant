@@ -10,7 +10,10 @@ stdio）调用其工具，从而保证交易系统仍能拿到真实账户数据
 设计约束（安全）：
 - 默认启用服务端 `--read-only` 开关（禁用所有写操作），防止误下单。
 - 需要下单/平仓/挂单时必须显式传 --allow-write，且必须走 --profile demo。
-- live profile 强制只读，任何写操作一律拒绝（章程 §2：实盘账户只读）。
+- live profile 强制只读，任何写操作一律拒绝（章程 §2 / L1-3：实盘账户只读）。
+- **本脚本是 L1-3 的代码级闸门**，判据是 `precheck()`；所有的拒绝都发生在
+  `open_session()` **之前**，所以章程那句「返回 REFUSED、exit 2、不产生网络请求」
+  是结构性成立的，而不是「先起了服务端再拒绝」。
 
 用法：
   # 列出该 profile 暴露的全部工具
@@ -35,18 +38,72 @@ import subprocess
 import sys
 
 SERVER = "okx-trade-mcp"
+# 只读工具白名单 —— 未加 --allow-write 时**唯一**放行集合（正向，fail-closed）。
+#
+# 为什么必须是正向白名单：这张表是手抄的，而手抄的清单必然漂移 —— 实测漂过两次：
+#   ① `READ_TOOLS` 定义之后**从来没有被引用过**，注释却写着「用于 --read-only 之外的
+#      二次校验」：声称存在的第二道闸门其实不存在，只剩服务端 `--read-only` 一层；
+#   ② `WRITE_TOOLS` 里写的是 `swap_cancel_algo_order`（单数），而真实调用点
+#      （`src/okx.ts` 的 `cancelAlgoOrders()`）用的是 `swap_cancel_algo_orders`（复数）——
+#      于是那个写工具在只读模式下**一路放行**，连服务端都要靠 `--read-only` 兜。
+# 正向白名单把默认值反过来：**不在名单里 = 拒绝**，新工具默认安全，
+# 登记动作变成显式的（新增工具时把它加进下面任一张表）。
+# `tests/mcplive.test.ts` 会现算核对「源码里真正调用过的每个工具名都已被登记」。
 READ_TOOLS = {
-    # 明确只读的工具白名单（用于 --read-only 之外的二次校验）
     "account_get_balance", "account_get_positions", "account_get_account",
     "swap_get_positions", "swap_get_algo_orders", "swap_get_orders",
     "swap_get_fills", "swap_get_ticker", "swap_get_candles",
     "market_get_ticker", "market_get_candles",
+    "news_get_latest",
 }
+# 写工具名单：**不承担准入职责**（准入由上面那张正向白名单负责），
+# 只用来把拒绝理由说得更准确 ——「这是写操作，需要 --allow-write」
+# 比「不在只读白名单里」有用得多。
 WRITE_TOOLS = {
-    "swap_place_order", "swap_place_algo_order", "swap_cancel_algo_order",
+    "swap_place_order", "swap_place_algo_order", "swap_cancel_algo_orders",
     "swap_cancel_order", "swap_close_position", "swap_set_leverage",
     "swap_set_margin_mode", "swap_place_batch_orders",
 }
+
+
+def assert_tool_tables():
+    """两张表都不得为空、且必须互斥；不满足直接抛，不静默通过。
+
+    空集合会让判据恒真（「没有工具是写操作」于是全部放行），
+    同一个名字同时出现在两张表里说明登记时就没想清楚 ——
+    这是闸门的判据来源，不允许多种解释。
+    """
+    if not READ_TOOLS or not WRITE_TOOLS:
+        raise RuntimeError("工具白/黑名单不得为空（空集合会让准入判据恒真）")
+    both = sorted(READ_TOOLS & WRITE_TOOLS)
+    if both:
+        raise RuntimeError("同一工具同时登记在只读与写两张表里：%s" % both)
+
+
+def precheck(profile, allow_write, tool, list_tools):
+    """返回 (exit_code, payload) 表示拒绝；返回 None 表示放行。
+
+    **所有拒绝都在起子进程之前** —— 章程 L1-3 写的是「代码级拒写（返回 REFUSED、
+    exit 2、不产生网络请求）」，最后那半句只有在拒绝早于 `open_session()` 时才成立：
+    原先写工具的拒绝是在 `open_session()` 之后判的，被拒的请求仍会先起一个 MCP
+    服务端并完成 initialize 握手（实测已复现）。
+    """
+    if profile == "live" and allow_write:
+        return 2, {"ok": False, "error":
+                   "REFUSED: live 账户只读（章程 §2），本脚本拒绝一切实盘写操作"}
+    if list_tools or not tool:
+        return None
+    if allow_write:
+        return None          # 只有 demo 能走到这里（live + allow_write 上面已拒）
+    if tool in WRITE_TOOLS:
+        return 2, {"ok": False, "error":
+                   "REFUSED: %s 是写操作，需显式 --allow-write" % tool}
+    if tool not in READ_TOOLS:
+        return 2, {"ok": False, "error":
+                   "REFUSED: %s 不在只读白名单内 —— 未登记的工具默认按写操作处理"
+                   "（新增工具时请登记进 scripts/mcp_call.py 的 READ_TOOLS 或 WRITE_TOOLS）"
+                   % tool}
+    return None
 
 
 def resolve_server():
@@ -157,13 +214,19 @@ def main():
                     help="--list-tools 时跳过「隐藏写工具数量」探测（省一次子进程启动）")
     a = ap.parse_args()
 
-    if a.profile == "live" and a.allow_write:
-        print(json.dumps({"ok": False, "error":
-              "REFUSED: live 账户只读（章程 §2），本脚本拒绝一切实盘写操作"},
-              ensure_ascii=False))
+    assert_tool_tables()
+
+    refused = precheck(a.profile, a.allow_write, a.tool, a.list_tools)
+    if refused:
+        code, payload = refused
+        print(json.dumps(payload, ensure_ascii=False))
+        return code
+
+    if not a.list_tools and not a.tool:
+        print(json.dumps({"ok": False, "error": "需指定 --tool 或 --list-tools"},
+                         ensure_ascii=False))
         return 2
 
-    read_only = not a.allow_write
     proc = open_session(a.profile, a.allow_write)
     try:
         if a.list_tools:
@@ -209,17 +272,7 @@ def main():
                 print(payload["_notice"], file=sys.stderr)
             return 0
 
-        if not a.tool:
-            print(json.dumps({"ok": False, "error": "需指定 --tool 或 --list-tools"},
-                             ensure_ascii=False))
-            return 2
-
-        if a.tool in WRITE_TOOLS and not a.allow_write:
-            print(json.dumps({"ok": False, "error":
-                  f"REFUSED: {a.tool} 是写操作，需显式 --allow-write"},
-                  ensure_ascii=False))
-            return 2
-
+        # 准入与「缺参数」都已在 precheck() 里判过（早于 spawn），这里直接调用
         params = json.loads(a.args) if a.args else {}
         resp = rpc(proc, "tools/call", {"name": a.tool, "arguments": params})
         if "error" in resp:
