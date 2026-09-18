@@ -44,7 +44,7 @@ import { spawnSync } from "node:child_process";
 
 import { loadRunState } from "../src/runstate.ts";
 import { dayCountersView } from "../ui/lib/riskbrief.js";
-import { ROOT, read, stripComments } from "./_src.ts";
+import { ROOT, read, stripComments, stripPythonStrings } from "./_src.ts";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "qta-rtcorrupt-"));
 const tmpFile = (name: string) => path.join(tmpDir(), name);
@@ -52,12 +52,18 @@ const tmpFile = (name: string) => path.join(tmpDir(), name);
 const PYTHON = process.env.PYTHON || "python";
 const HAS_PYTHON = spawnSync(PYTHON, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
 
-/** Python 行注释是 `#`（_src.ts 的 stripComments 只认 C 风格），先按行剔掉再判结构。 */
-const codeOnly = (src: string) =>
-  src
-    .split(/\r?\n/)
-    .filter((l) => !l.trim().startsWith("#"))
-    .join("\n");
+/**
+ * 判「**代码里**有没有这段东西」时用的文本。
+ *
+ * 原先只是按行剔掉 `#` 开头的行。实测那样不够：`archive_round.py` 的模块 docstring 里
+ * 写着「**读**走 `jsonstore.read_json_state()`」、`month_risk.py` 的
+ * `_quarantine_broken_state` docstring 里带着 `jsonstore.quarantine_broken()` ——
+ * docstring 不是 `#` 开头的行，于是**散文把断言满足了**：把真调用改掉，锁照样绿。
+ *
+ * 现在连字符串字面量（含 docstring）一起剥（`stripPythonStrings`）。下面三条结构锁
+ * 因此在构造上只能由真正的代码满足，且各自都有一条反向对照钉着（见文件末尾那组）。
+ */
+const codeOnly = (src: string) => stripPythonStrings(src);
 
 function runDriver(t: { skip: (m?: string) => void }, name: string, driver: string): Record<string, unknown> | null {
   if (!HAS_PYTHON) {

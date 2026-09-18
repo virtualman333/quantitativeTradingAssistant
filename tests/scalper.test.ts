@@ -177,8 +177,22 @@ describe("防漂移：回测 argv 只能有一份实现", () => {
     }
   });
 
-  it("同样的入参两次调用结果完全一致（纯函数，无隐藏状态）", () => {
+  it("同样的入参两次调用结果完全一致，且那一串参数就是写死的预期（纯函数 + 真契约）", () => {
+    // 原先这条是 `deepEqual(backtestArgv(args), backtestArgv(args))` —— **自比较**：
+    // 只要函数是确定性的就恒过，漏掉一个 flag、或者把顺序改了，它照样绿。
+    // 纯函数这条性质要留，但不能只靠自比较，所以补一份**写死的字面量**当独立真值：
+    // 它锁的是「交给 `scripts/scalper_backtest.py` 的那串参数」，也就是用户真正依赖的东西。
     const args = { ...base, rr: 2, slippageBps: 3, maxHold: 20, bar: "5m" };
-    assert.deepEqual(backtestArgv(args), backtestArgv(args));
+    const first = backtestArgv(args);
+    const second = backtestArgv(args);
+    assert.deepEqual(second, first, "同样的入参两次调用结果不一致 —— 有了隐藏状态");
+    assert.deepEqual(first, [
+      "--inst", "BTC-USDT-SWAP",
+      "--start", "2026-09-01 00:00",
+      "--bar", "5m",
+      "--rr", "2",
+      "--slippage-bps", "3",
+      "--max-hold", "20",
+    ]);
   });
 });

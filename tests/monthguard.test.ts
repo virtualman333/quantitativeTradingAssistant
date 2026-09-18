@@ -35,7 +35,7 @@ import { spawnSync } from "node:child_process";
 import { MAX_MONTH_DD_PCT, guardMonthlyDrawdown } from "../src/guard.ts";
 import { loadRunState } from "../src/runstate.ts";
 import { monthRiskView } from "../ui/lib/riskbrief.js";
-import { ROOT, read, stripComments } from "./_src.ts";
+import { ROOT, assertCommentStripped, read, stripComments } from "./_src.ts";
 
 const tmpFile = (name: string) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "qta-month-")), name);
 
@@ -374,10 +374,19 @@ describe("loadRunState · 缺失字段不许被洗成 0", () => {
 
 describe("源码形态 · 两条下单路径都过 L1-6，且只有一份读数实现", () => {
   const MAIN_SRC = stripComments(read("src/main.ts"));
-  const SCALPER_SRC = stripComments(read("src/scalper.ts"));
+  const RAW_SCALPER_SRC = read("src/scalper.ts");
+  const SCALPER_SRC = stripComments(RAW_SCALPER_SRC);
 
   it("stripComments 可用（失败路径要先走过一次）", () => {
-    assert.ok(!SCALPER_SRC.includes("无人值守的独立循环，此前这条路径上连一次判断都没有"));
+    // ★ 两向自证：原文里有这段注释（对照面在）+ 剥过之后没有（真在剥）。
+    //   只判后一半是恒真的 —— 原先用的那句标记在 src/scalper.ts 里出现 **0 次**
+    //   （原文那里隔着一个换行），于是这条自证从来没证明过任何东西。
+    assertCommentStripped(
+      RAW_SCALPER_SRC,
+      SCALPER_SRC,
+      "MCP 返回是三层洋葱 result.data.data",
+      "monthguard · stripComments 自证"
+    );
   });
 
   it("主 Agent 路径调用闸门（闸门被删掉不会让任何行为断言变红）", () => {

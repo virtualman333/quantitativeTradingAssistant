@@ -31,9 +31,10 @@ import {
 } from "../src/guard.ts";
 import { DEFAULT_SCALPER } from "../src/store.ts";
 import type { TradeIntent } from "../src/types.ts";
-import { ROOT, read, stripComments } from "./_src.ts";
+import { ROOT, assertCommentStripped, read, stripComments } from "./_src.ts";
 
-const SCALPER_SRC = stripComments(read("src/scalper.ts"));
+const RAW_SCALPER_SRC = read("src/scalper.ts");
+const SCALPER_SRC = stripComments(RAW_SCALPER_SRC);
 
 /** 造一个开仓意图；refPrice 默认 0 = 显式跳过 L1-2 反推，隔离不相关维度。 */
 const intent = (over: Partial<TradeIntent> = {}): TradeIntent => ({
@@ -200,7 +201,14 @@ describe("章程即规格 · 代码里的硬约束数字必须等于章程里的
 describe("源码形态 · 闸门在调用点、上限只有一份", () => {
   it("剥注释的辅助函数本身可用（失败路径要先走过一次）", () => {
     assert.ok(SCALPER_SRC.includes("export async function scalpOnce"));
-    assert.ok(!SCALPER_SRC.includes("那个 20 是章程外的数"), "注释没被剥掉，后面的断言会失真");
+    // ★ 两向自证：只判「剥过之后没有」是恒真的 —— 那段注释被删掉时它照样绿，
+    //   而它存在的意义正是证明下面那些源码形态断言不是在未剥的原文上做的。
+    assertCommentStripped(
+      RAW_SCALPER_SRC,
+      SCALPER_SRC,
+      "那个 20 是章程外的数",
+      "scalperguard · stripComments 自证"
+    );
   });
 
   it("scalper.ts 的开单入口必须过 guardScalperConfig（闸门被删掉不会让任何行为断言变红）", () => {
