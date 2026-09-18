@@ -260,6 +260,21 @@ async function runRound() {
   const rt = loadRunState();
   const roundId = `R${String(rt.roundNo + 1).padStart(6, "0")}`;
   log(`===== 轮次 ${roundId} 开始 =====`);
+  // 运行态读不出来：本轮的止损计数与月度回撤**都不可信**。这一轮照常走（L1-4 止损、
+  // L1-5 硬顶各自独立生效），但必须有人知道 —— 否则「今天是第几次止损」这个数
+  // 会以一个干净的 0 出现在日志、提示词和总览页上，直到本轮结尾 archive_round 才可能发现。
+  if (rt.unreadable) {
+    log(`⚠ 运行态读数不可信：${rt.unreadable}（本日止损计数 / 月度回撤按「未知」处理）`);
+    await alert(
+      "OKX Agent：运行态读数不可信",
+      // 文件名不写在这里：`rt.unreadable` 由 runstate.ts 带出（它已经点名了是哪个文件与原因），
+      // 而「main.ts 里不许出现运行态文件名」是 monthguard.test.ts 的结构锁 ——
+      // 那条锁防的是「又有人在本文件里自己解析运行态」，不要为了一句文案把它放宽。
+      `${rt.unreadable}\n` +
+        "本轮的当日止损计数、当日盈亏与月度回撤一律按「未知」处理（不按 0）。\n" +
+        "请核对 state/ 下的 .corrupt-* 留档与磁盘状态；本轮归档会重建该文件。"
+    );
+  }
 
   // ① 取数（重点关注标的优先纳入候选池）
   const focusInsts = (getSettings().focusInsts ?? []).filter((s) => !!s && String(s).trim());
@@ -297,7 +312,13 @@ async function runRound() {
     // 免得模型把「不知道」读成「本月还没回撤」。
     // 本日止损 / 当日盈亏同理：状态文件坏过一次之后那两个数是从 0 重新开始的，
     // 照旧写「0 次」等于告诉模型「今天一次都没止损」—— 那种谎和 `?? 0` 是同一个。
-    `[Run State] day stop-loss ${rt.dayCountersCompromised ? "未知（本日计数曾因状态文件损坏被重置）" : rt.daySlCount}, ` +
+    `[Run State] day stop-loss ${
+      rt.dayCountersCompromised
+        ? rt.unreadable
+          ? "未知（运行态文件本轮读不出来）"
+          : "未知（本日计数曾因状态文件损坏被重置）"
+        : rt.daySlCount
+    }, ` +
       `day PnL ${rt.dayCountersCompromised ? "未知" : `${rt.dayPnlPct}%`}, ` +
       `month drawdown ${rt.monthDdPct === null ? "未知" : `${rt.monthDdPct}%`}`,
     ``,

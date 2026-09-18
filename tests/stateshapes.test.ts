@@ -213,13 +213,25 @@ describe("源码里 state/ 下的 .json 与注册表双向对账", () => {
    * 还有 `f"round_input_{round_id}.json"`），按调用形态逐个枚举就是本仓反复踩的
    * 「判据按已知形态枚举」（新形态不会有东西提醒）。行扫描一视同仁，代价是略宽 ——
    * 宽的那部分正是靠下面的**声明式例外表**收口。
+   *
+   * 扫两面：`scripts/**.py` 与 `src/**.ts`。README 那句「`state/` 下的 JSON 读写一律走
+   * `scripts/jsonstore.py`」原先只被 Python 那一面扛着，而 `src/alert.ts` 直接读写
+   * `state/mail_sent.json` / `state/mail_alert.json`、`src/runstate.ts` 与 `src/tools/project.ts`
+   * 直接读 `state/runtime.json` —— **一个都不在对账面里**。把面扩到 `src/` 当场就红，
+   * 这才是「那句话的落点」。（TS 侧不该走 Python 的 `jsonstore`：跨进程读一个小 JSON 不值得，
+   * 但**名字必须有人交代**，形状/去向要写清楚。）
    */
+  const isCommentLine = (line: string) => {
+    const s = line.trim();
+    return s.startsWith("#") || s.startsWith("//") || s.startsWith("/*") || s.startsWith("*");
+  };
+
   const jsonLiteralsOnStateLines = () => {
     const found = new Map<string, string[]>();
-    for (const f of walk("scripts", ".py")) {
+    for (const f of [...walk("scripts", ".py"), ...walk("src", ".ts")]) {
       const lines = read(f).split(/\r?\n/);
       lines.forEach((line, i) => {
-        if (line.trim().startsWith("#")) return; // 注释里的路径不是代码
+        if (isCommentLine(line)) return; // 注释里的路径不是代码
         if (!/state/i.test(line)) return;
         for (const m of line.matchAll(/["']([^"']*\.json)["']/g)) {
           // 归一成 basename：同一本账有两种写法（`os.path.join(STATE, "x.json")` 与
@@ -249,6 +261,13 @@ describe("源码里 state/ 下的 .json 与注册表双向对账", () => {
     "news_gate.json": "抓取闸门，每次全量重算的产物，无读回",
     "news_input.json": "候选消息，每次全量重算的产物，无读回",
     "news_verify.json": "验证结果，对同一批文本重算的产物，无读回",
+    // ── 以下两项由 TS 侧（`src/alert.ts`）读写，方向与上面那些正好相反：
+    //    坏了只会**多发一封告警邮件**（fail-open），不会让某条判据拿到一个假数字，
+    //    所以不进 `STATE_SHAPES`（那张表管的是「读出来的形状」，Python 从不读这两个文件）。
+    "mail_sent.json":
+      "告警邮件去重窗口（subject → 上次发送时刻，24h 后自然过期），由 src/alert.ts 读写；" +
+      "读坏了只是去重失效、多收一封告警邮件，方向是 fail-open",
+    "mail_alert.json": "告警邮件的一次性投递载荷（写完即交给 mail_send.py），无读回",
   };
 
   it("每个 state 下的 .json 要么在注册表里、要么在例外表里写明理由", () => {
@@ -257,6 +276,15 @@ describe("源码里 state/ 下的 .json 与注册表双向对账", () => {
     assert.ok(
       scanned.size >= 8,
       `只扫到 ${scanned.size} 个 state 下的 .json（${[...scanned.keys()].join(", ")}）—— 扫描面塌了，对账等于没做`
+    );
+    // 两面都要有 —— 只扫 Python 时这条会红，而「只扫一半」正是这次扩面的原因。
+    assert.ok(
+      [...scanned.values()].flat().some((w) => w.startsWith("src/")),
+      "扫描面里一个 src/ 的文件都没有 —— TS 侧又掉出对账面了"
+    );
+    assert.ok(
+      [...scanned.values()].flat().some((w) => w.startsWith("scripts/")),
+      "扫描面里一个 scripts/ 的文件都没有 —— Python 侧掉出对账面了"
     );
 
     const shapes = read("scripts/jsonstore.py");

@@ -235,9 +235,31 @@ function readJsonSafe(p: string): any {
   return null;
 }
 
+/**
+ * 运行态读数 —— **判据只有一份，在 `src/runstate.ts` 里**（编译后 `dist/src/runstate.js`）。
+ *
+ * 为什么不能在这里自己 `JSON.parse`：那样「文件存在但读不出来」会被 `catch` 成 `null`，
+ * 而 `null` 在界面上与「还没有运行态（跑一轮后产生）」长得一模一样 —— 于是文件坏掉期间
+ * 总览页显示的是「本日止损 0」这条干净的假话，而真值要等本轮结尾 `archive_round.py`
+ * 跑完才会写出来。agent 主路径、超短线路径与这里必须对同一份文件给出同一个答案，
+ * 所以三处都走 `normalizeRuntime()`（它遇到坏文件时写出的标记键与 archive_round 完全一致，
+ * 界面里那两条「不可信」分支因此不必知道 TS/Python 的区别）。
+ */
+async function readRuntimeForUi(): Promise<any> {
+  const modPath = path.join(AGENT_ROOT, "dist", "src", "runstate.js");
+  if (!fs.existsSync(modPath)) return null; // 开发态未构建：界面本就依赖 dist，如实返回空
+  try {
+    const mod: any = await import("file://" + modPath.replace(/\\/g, "/"));
+    return mod.normalizeRuntime(mod.readRuntimeFile(path.join(PROJECT_ROOT, "state", "runtime.json")));
+  } catch (e) {
+    pushLog(`运行态读取失败: ${String(e).slice(0, 160)}`);
+    return null;
+  }
+}
+
 async function getStatus() {
   const stateDir = path.join(PROJECT_ROOT, "state");
-  const runtime = readJsonSafe(path.join(stateDir, "runtime.json"));
+  const runtime = await readRuntimeForUi();
 
   let latestRound: any = null;
   try {

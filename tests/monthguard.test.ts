@@ -366,7 +366,11 @@ describe("loadRunState · 缺失字段不许被洗成 0", () => {
     fs.writeFileSync(f, "{ not json", "utf8");
     const st = loadRunState(f);
     assert.equal(st.monthDdPct, null);
-    assert.equal(st.daySlCount, 0);
+    // ⚠ 这里曾经只断言 `daySlCount === 0` —— 那正是缺陷本身：坏文件返回的是「今天没止损过」
+    // 这条干净的假话。现在要求它同时被标成「不可信」，并点名读不出来的原因。
+    assert.equal(st.daySlCount, 0, "计数从 0 重新开始是事实，但它必须带着「不可信」的标记");
+    assert.equal(st.dayCountersCompromised, true, "坏文件被读成了「今天一次止损都没有」");
+    assert.match(String(st.unreadable), /JSON/, "读不出来的原因没被带出来，日志里就只能说「未知」说不出为什么");
   });
 });
 

@@ -42,8 +42,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { loadRunState } from "../src/runstate.ts";
-import { dayCountersView } from "../ui/lib/riskbrief.js";
+import { loadRunState, normalizeRuntime, readRuntimeFile, runStateFrom } from "../src/runstate.ts";
+import { dayCountersView, monthRiskView } from "../ui/lib/riskbrief.js";
 import { ROOT, read, stripComments, stripPythonStrings } from "./_src.ts";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "qta-rtcorrupt-"));
@@ -336,6 +336,93 @@ describe("loadRunState · 带出「本日计数不可信」与三态熔断", () 
       fs.writeFileSync(f, JSON.stringify(bad), "utf8");
       assert.equal(loadRunState(f).circuitBreaker, null, `${JSON.stringify(bad)} 被当成了「未熔断」`);
     }
+  });
+});
+
+// ── C″. TS 侧自己遇到坏文件（本次新增，见下） ─────────────────────────────
+
+/**
+ * 为什么单独一组：上面 C 组喂的文件**已经带着标记键**（`day_counters_compromised` 等），
+ * 它证明的只是「标记键读得出来」。真正的缺口在另一条路上 —— `state/runtime.json` 坏掉之后、
+ * 本轮结尾 `archive_round.py` 重写之前（或它压根不会跑时），由 **TS 自己**读到那个文件。
+ *
+ * 旧实现 `catch { return def }` 把「文件坏了」与「文件不存在」返回成同一份默认值，
+ * 其中 `dayCountersCompromised: false`、`daySlCount: 0` —— 也就是
+ * **「今天一次止损都没触发过」**。这与第 13/14 轮在 `jsonstore` 上修掉的
+ * `except: 当作首次初始化` 是同一个形状，只是这次在 TS 侧：
+ * Python 侧一个字都没漏，TS 侧一个字都没改。
+ */
+describe("TS 自己读到坏文件：不许把「数据丢了」说成「今天没止损过」", () => {
+  const cases: Array<[string, string, RegExp]> = [
+    ["空文件（写了一半就没了）", "", /空/],
+    ["半截 JSON", '{"day_sl_count": 2, "circuit_br', /JSON/],
+    ["顶层是数组", "[1, 2, 3]", /顶层不是对象/],
+    ["顶层是标量", "12345", /顶层不是对象/],
+    ["顶层是 null", "null", /顶层不是对象/],
+  ];
+
+  for (const [name, text, why] of cases) {
+    it(`${name} → 计数标成不可信、熔断为 null（未知），并带出原因`, () => {
+      const f = tmpFile("runtime.json");
+      fs.writeFileSync(f, text, "utf8");
+      const rc = readRuntimeFile(f);
+      assert.equal(rc.absent, false, "文件明明在，却被判成「不存在」—— 两条路又并成一条了");
+      assert.ok(rc.error, `${name}：读不出来却没给出原因`);
+      assert.match(String(rc.error), why, `原因说得不清（${rc.error}）`);
+
+      const st = runStateFrom(rc);
+      assert.equal(st.dayCountersCompromised, true, `${name} 被当成了「今天没止损过」`);
+      assert.equal(st.circuitBreaker, null, `${name} 被当成了「未熔断」`);
+      assert.equal(st.monthDdPct, null);
+      assert.ok(st.unreadable, "读数不可信却没在 RunState 上点名");
+    });
+  }
+
+  it("文件不存在 ≠ 文件读不出来：前者是首次运行，后者是数据丢了", () => {
+    const rcA = readRuntimeFile(path.join(os.tmpdir(), "qta-rt-absent-77.json"));
+    assert.deepEqual(rcA, { raw: null, error: null, absent: true });
+    assert.equal(runStateFrom(rcA).dayCountersCompromised, false, "首次运行不该被标成「计数不可信」");
+
+    const f = tmpFile("runtime.json");
+    fs.writeFileSync(f, "", "utf8");
+    assert.equal(readRuntimeFile(f).absent, false, "空文件被判成了「不存在」—— 静默初始化就是这么来的");
+  });
+
+  it("读得出来的文件：一个标记都不许叠上去", () => {
+    const f = tmpFile("runtime.json");
+    fs.writeFileSync(f, JSON.stringify({ day_sl_count: 3, circuit_breaker: false, round_count: 8 }), "utf8");
+    const rc = readRuntimeFile(f);
+    assert.equal(rc.error, null);
+    assert.deepEqual(normalizeRuntime(rc), rc.raw, "健康数据被改写了 —— 下游会看到一个不存在的损坏");
+    const st = runStateFrom(rc);
+    assert.equal(st.dayCountersCompromised, false);
+    assert.equal(st.daySlCount, 3);
+    assert.equal(st.circuitBreaker, false);
+    assert.equal(st.unreadable, null);
+  });
+});
+
+// ── C‴. 归一化后的读数喂给界面：显示「—」而不是「0」 ──────────────────────
+
+describe("坏文件 → 总览页（同一份归一化输出，界面不必知道是 TS 还是 Python 发现的）", () => {
+  /** electron 的 getStatus() 交给界面的就是这一份（`normalizeRuntime(readRuntimeFile(...))`） */
+  const uiRuntime = (text: string) => {
+    const f = tmpFile("runtime.json");
+    fs.writeFileSync(f, text, "utf8");
+    return normalizeRuntime(readRuntimeFile(f));
+  };
+
+  it("本日止损显示「—」并说明原因，不再是一个干净的 0", () => {
+    const v = dayCountersView(uiRuntime("{ not json at all"));
+    assert.equal(v.compromised, true, "坏文件在总览页上没被标出来");
+    assert.equal(v.slText, "—", `坏文件显示成了「${v.slText}」—— 用户会以为今天一次都没止损`);
+    assert.match(String(v.note), /读不出来/, "说明文案没说清是「读不出来」");
+  });
+
+  it("月度风控说「读不出来」，而不是「暂无运行态（跑一轮后产生）」", () => {
+    const mv = monthRiskView(uiRuntime(""));
+    assert.equal(mv.level, "unknown");
+    assert.match(String(mv.reason), /读不出来/, `给用户的理由不对：${mv.reason}`);
   });
 });
 
