@@ -10,6 +10,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { AGENT_ROOT } from "./store.js";
+import { pendingStopsFor } from "./stopprotect.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -261,7 +262,13 @@ export async function setLeverage(inst: string, lever: number): Promise<boolean>
   return r.ok;
 }
 
-/** 回查 pending algo，确认某标的止损已挂（L1-4 同轮回查） */
+/**
+ * 回查 pending algo，确认某标的止损已挂（L1-4 同轮回查）。
+ *
+ * ⚠ 判据一律走 `stopprotect.pendingStopsFor()` —— 章程点名的这条回查同时是
+ * 「这笔持仓到底有没有止损」的唯一判据（`scalper.ts` 的裸仓自愈也读它）。
+ * 在这里再手写一遍 `a.instId === inst` 就是同一件事的第二份实现，两份必然漂移。
+ */
 export async function confirmAlgo(
   inst: string,
   timeoutMs = 20_000
@@ -270,10 +277,7 @@ export async function confirmAlgo(
   while (Date.now() < deadline) {
     const r = await mcpCall("demo", "swap_get_algo_orders", { status: "pending" });
     // MCP 返回是三层洋葱 result.data.data，用 unwrap 正确剥到数组（一层剥会永远空）
-    const arr = unwrap(r.data);
-    for (const a of arr) {
-      if (a.instId === inst) return true;
-    }
+    if (pendingStopsFor(unwrap(r.data), inst) > 0) return true;
     await new Promise((res) => setTimeout(res, 2000));
   }
   return false;

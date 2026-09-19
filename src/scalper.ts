@@ -5,6 +5,10 @@
  * 拉 1m 线信号（scalper.py 用最近 5 根 1m 收盘价斜率判趋势 + 凯利公式推止盈止损 + 手续费），
  * 市价开单后**同轮挂 OCO 止损止盈**（L1-4：每单必挂止损止盈）。
  *
+ * ⚠ L1-4 的后半句也在本模块：**挂不上就补挂一次，仍不确认就立即市价平仓**；
+ * 巡检时发现已有持仓却没有止损（裸仓）同样先补挂、挂不上再平仓。
+ * 这条链只有一份实现（`ensureStopProtection()`），决策在 `stopprotect.ts`。
+ *
  * 可选 LLM 介入（cfg.useLlm）：趋势方向交给 LLM 判断（喂最近 60 根 1m 收盘价，
  * 提示词明确要求用最近 5 根 1m 收盘价的斜率判趋势），
  * 止盈止损仍由凯利公式 + ATR 计算。false 时用规则（5 根 1m 斜率）判向。
@@ -18,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { runPy, fetchAccount, placeOrder, placeOco, genClOrdId, setLeverage, confirmAlgo, mcpCall, closePosition, cancelAlgoOrders, unwrap } from "./okx.js";
 import { guardScalperConfig, guardMonthlyDrawdown } from "./guard.js";
+import { decideStopProtection, pendingStopsFor } from "./stopprotect.js";
 import { loadRunState } from "./runstate.js";
 import { snappedSlTp } from "./price.js";
 import { DEFAULT_SCALPER, resolveModel, AGENT_ROOT, type ScalperConfig } from "./store.js";
@@ -88,6 +93,12 @@ export interface ScalperTrade {
    * 长得一模一样，汇总处一律按 0 兜底就把结果算错了（见 scalperstats.ts）。
    */
   pnlSynced?: boolean;
+  /**
+   * 这条记录上发生的、用户需要知道而数字答不出来的事（目前只有一类：L1-4 止损保护）。
+   * 例如「止损挂不上，已按 L1-4 市价平仓」—— 不写下来，战绩表上只会看到一笔小亏，
+   * 没人能知道那是保护性动作而不是策略失误。
+   */
+  note?: string;
 }
 
 export interface ScalperTick {
@@ -333,6 +344,97 @@ async function closeOpenRecords(inst: string): Promise<void> {
   writeTrades(trades);
 }
 
+/** 台账里该标的还开着的记录（裸仓补挂要拿它记着的 sl/tp —— 那才是这笔仓原本的计划止损位） */
+function openTradeOf(inst: string): ScalperTrade | undefined {
+  return readTrades()
+    .filter((t) => t.status === "open" && t.inst === inst)
+    .pop();
+}
+
+/**
+ * L1-4 的执行口：确认这笔持仓在交易所侧**真的有**止损；没有就补挂一次，
+ * 补挂仍不确认（或者这轮压根挂不出去）就立即市价平仓。
+ *
+ * 为什么必须是一个共用函数：这条链上有两个调用点 ——
+ * ① 开单成交后（章程 L1-4 第一句）；② 巡检发现已有持仓却是裸仓。
+ * 两处各写一遍「挂 OCO → 回查 → 失败平仓」，就是本仓反复踩的
+ * 「同一件事写两遍，其中一份必然没跟上」。
+ *
+ * @param pendingStops 调用方账快照里该标的当前 pending 算法单条数（同一次取数，不再打接口）
+ * @param clOrdId 传了就复用（开单那条链上要沿用主单的 ID，L1-8 的幂等约定）；
+ *                不传则现生成一个 —— 生成失败即视为「挂不出去」，走平仓。
+ */
+async function ensureStopProtection(p: {
+  inst: string;
+  /** 持仓方向；平仓方向与它相反 */
+  direction: "long" | "short";
+  size: number;
+  slPx?: string;
+  tpPx?: string;
+  clOrdId?: string;
+  pendingStops: number;
+}): Promise<{ protected: boolean; closed: boolean; note: string }> {
+  if (!(p.size > 0)) {
+    return { protected: false, closed: false, note: "张数为 0，无法补挂止损（不改动持仓）" };
+  }
+
+  let clOrdId = p.clOrdId;
+  // 「能挂」= 有取整好的价位 + 合规 clOrdId（L1-8）。缺哪个都补挂不出去。
+  if (!clOrdId && p.slPx && p.tpPx) {
+    const g = await genClOrdId(`H${Date.now()}`, 1, { instId: p.inst, sz: p.size });
+    clOrdId = g.clOrdId ? `${g.clOrdId}oc` : undefined;
+  }
+  const canRehang = !!(p.slPx && p.tpPx && clOrdId);
+
+  let decision = decideStopProtection({
+    pendingStops: p.pendingStops,
+    rehangTried: false,
+    canRehang,
+  });
+  if (decision.action === "none") {
+    return { protected: true, closed: false, note: decision.why };
+  }
+
+  if (decision.action === "rehang") {
+    const oco = await placeOco({
+      inst: p.inst,
+      side: p.direction === "long" ? "sell" : "buy",
+      size: p.size,
+      slPx: p.slPx as string,
+      tpPx: p.tpPx as string,
+      clOrdId: clOrdId as string,
+    });
+    if (oco.ok && (await confirmAlgo(p.inst))) {
+      return {
+        protected: true,
+        closed: false,
+        note: `已补挂 OCO 并回查确认（SL=${p.slPx} TP=${p.tpPx}）`,
+      };
+    }
+    // 补挂 + 回查都没成功 —— 这就是章程说的「重试无效」，下一步是平仓
+    decision = decideStopProtection({ pendingStops: 0, rehangTried: true, canRehang: true });
+  }
+
+  if (decision.action !== "close") {
+    // 理论上到不了这里（none 已在上面返回，rehang 也已处理）。留一条明确的话，
+    // 免得将来加了分支却没人改这里 —— 返回 protected:false 会被当成「没保护住」处理。
+    return { protected: false, closed: false, note: `止损保护未完成（${decision.action}）：${decision.why}` };
+  }
+
+  const cp = await closePosition({
+    inst: p.inst,
+    side: p.direction === "long" ? "sell" : "buy",
+    size: p.size,
+  });
+  return {
+    protected: false,
+    closed: cp.ok,
+    note: cp.ok
+      ? `${decision.why} —— 已市价平仓`
+      : `${decision.why} —— 市价平仓也失败了，裸仓仍在，需人工介入：${cp.raw.slice(0, 160)}`,
+  };
+}
+
 /**
  * 跑一次超短线：信号 → 方向（规则 or LLM）→ 止盈止损 → 开单 + OCO 同挂。
  * 已有该标的持仓时不重复开单（等止盈/止损触发后再开）。
@@ -424,8 +526,43 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
         return finish("skipped", `已有 ${cfg.inst} ${ps} 持仓，与趋势 ${direction} 相反（未勾选趋势反转平仓），跳过`, sig, judge);
       }
     } else {
-      // 方向一致，不重复开单
-      return finish("skipped", `已有 ${cfg.inst} ${ps ?? "?"} 持仓，方向与趋势一致，等止盈/止损触发`, sig, judge);
+      // 方向一致，不重复开单 —— 但「不重复开单」不等于「可以不管」。
+      // 这笔持仓到底有没有止损，此前这一支从来没判过：挂 OCO 失败留下的裸仓会在
+      // 这里被无限期 skipped 掉，理由还写着「等止盈/止损触发」（**在裸仓上是假的**）。
+      const pending = pendingStopsFor(acct.algoOrders, cfg.inst);
+      if (pending > 0) {
+        return finish("skipped", `已有 ${cfg.inst} ${ps ?? "?"} 持仓，方向与趋势一致，止损在挂（${pending} 条），等触发`, sig, judge);
+      }
+
+      // 裸仓：按 L1-4「裸仓必须立即补挂或平仓」先补挂。止损位优先取台账里这笔仓
+      // 原本记着的 sl/tp（那是开仓时的计划），取不到才退回「持仓均价 ± 本轮信号距离」。
+      const openTrade = openTradeOf(cfg.inst);
+      const avgPx = Number(pos.avgPx ?? 0);
+      const stopDist = Number(sig.sl_dist ?? 0) || Math.abs(Number(sig.sl ?? 0) - Number(sig.entry_ref ?? 0));
+      const tpDist = Number(sig.tp_dist ?? 0) || Math.abs(Number(sig.tp ?? 0) - Number(sig.entry_ref ?? 0));
+      const basePx = openTrade?.entry ?? (avgPx > 0 ? avgPx : Number(sig.entry_ref ?? 0));
+      const planSl = openTrade?.sl ?? (ps === "short" ? basePx + stopDist : basePx - stopDist);
+      const planTp = openTrade?.tp ?? (ps === "short" ? basePx - tpDist : basePx + tpDist);
+      const hedge = snappedSlTp(basePx, planSl, planTp, Number(sig.spec?.tickSz ?? 0));
+
+      const protect = await ensureStopProtection({
+        inst: cfg.inst,
+        direction: ps ?? "long",
+        size: sizeContracts,
+        slPx: hedge?.slStr,
+        tpPx: hedge?.tpStr,
+        pendingStops: 0,
+      });
+
+      if (protect.protected) {
+        return finish("skipped", `已有 ${cfg.inst} ${ps ?? "?"} 持仓但无止损（裸仓）→ ${protect.note}，本轮不开新仓`, sig, judge);
+      }
+      return finish(
+        "error",
+        `已有 ${cfg.inst} ${ps ?? "?"} 持仓且无止损（裸仓）→ ${protect.note}${protect.closed ? "" : "（⚠ 请人工检查持仓）"}`,
+        sig,
+        judge
+      );
     }
   }
 
@@ -470,25 +607,28 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const placed = await placeOrder({ inst: cfg.inst, side, size, clOrdId: cl });
   if (!placed.ok) return finish("error", `开单失败 ${placed.raw.slice(0, 180)}`, sig, judge);
 
-  // 止损止盈同挂（OCO，L1-4：每单必挂）
-  const oco = await placeOco({
+  // 止损止盈同挂（OCO，L1-4：每单必挂）+ **同一轮回查**；挂不上就补挂一次，
+  // 补挂仍不确认 → 立即市价平仓。
+  // 此前这里只有「挂一次 + 回查一次」，失败时既没重试也没平仓，只把
+  // `OCO=false 回查=false` 拼进日志 —— 结果是这条无人值守循环能留下永久裸仓
+  // （下一轮看到已有持仓就直接 skipped，止损永远不会再被挂上）。见 stopprotect.ts。
+  const protect = await ensureStopProtection({
     inst: cfg.inst,
-    side: side === "buy" ? "sell" : "buy",
+    direction,
     size,
     slPx,
     tpPx,
-    clOrdId: cl + "oc",
+    clOrdId: `${cl}oc`,
+    pendingStops: 0, // 刚成交，交易所侧还不存在属于这一笔的止损委托
   });
-  const confirmed = await confirmAlgo(cfg.inst);
 
-  const ok = oco.ok && confirmed;
   // 开新单前：关闭该标的此前的 open 记录（旧仓已平，避免堆积一直显示「持仓中」）
   await closeOpenRecords(cfg.inst);
   // 记录开单（补齐名义金额/保证金/手续费字段）
   const notionalUsdt = size * spec.ctVal * price;
   const marginUsdt = notionalUsdt / lever;
   const feeUsdt = notionalUsdt * (sig.fee_rate ?? cfg.feeRate) * 2;
-  appendTrade({
+  const trade: ScalperTrade = {
     ts: new Date().toISOString(),
     inst: cfg.inst,
     direction,
@@ -505,7 +645,18 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
     notional: notionalUsdt,
     margin: marginUsdt,
     fee: feeUsdt,
-  });
+  };
+  if (!protect.protected) {
+    // 止损没保住 —— 把「发生过什么」写进台账。只记一笔亏损的话，用户在战绩表上
+    // 分不出这是策略失误还是保护性动作。
+    trade.note = protect.note;
+    if (protect.closed) {
+      // 保护性平仓之后这笔仓已经不存在了，不许再记成「持仓中」（否则界面会显示
+      // 一笔永远不动的持仓，而台账里只有开仓那一行）。
+      settleTrade(trade, await fetchLastPrice(cfg.inst));
+    }
+  }
+  appendTrade(trade);
 
   // L2 提示（如「单笔风险 > 2% 需人工确认」）不阻断开单，但必须跟着这一轮的结论一起可见 ——
   // 超短线是无人值守的循环，写进日志/战绩上一轮记录是唯一能让用户看到它的地方。
@@ -513,8 +664,8 @@ export async function scalpOnce(cfg: ScalperConfig): Promise<ScalpResult> {
   const msg =
     `[超短线] ${cfg.inst} ${direction}(${judge}) ${side} ${size}张 @${price} ` +
     `杠杆${lever}x SL=${slPx} TP=${tpPx} RR=${sig.rr} 费${sig.fee_pct}% ` +
-    `OCO=${oco.ok} 回查=${confirmed}${warn}`;
-  return finish(ok ? "opened" : "error", msg, sig, judge);
+    `${protect.protected ? "OCO=已确认 回查=已确认" : `止损保护未完成：${protect.note}`}${warn}`;
+  return finish(protect.protected ? "opened" : "error", msg, sig, judge);
 }
 
 /** 汇总：开单记录 + 当前持仓 + 已实现/未实现收益（供界面展示） */
