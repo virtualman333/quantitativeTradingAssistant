@@ -46,7 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { ROOT, read, walk, stripComments } from "./_src.ts";
+import { ROOT, read, walk, stripComments, stripPythonCode } from "./_src.ts";
 
 const PYTHON = process.env.PYTHON || "python";
 const HAS_PYTHON = spawnSync(PYTHON, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
@@ -55,6 +55,12 @@ const SCRIPT = path.join(ROOT, "scripts", "mcp_call.py");
 // PATH 环境变量的键名在 Windows 上可能是 `Path` —— 必须原地覆盖，不能新增一个 `PATH`
 const PATH_KEY =
   Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+
+/** §D② 的 Python 侧扫描 —— 抽成函数，好让「用的是哪一种剥法」有活样例钉着。 */
+const TOOL_PAIR_RE = /["']--tool["']\s*,\s*["']([a-z][a-z0-9_]*)["']/g;
+function pythonToolNames(src: string): string[] {
+  return [...stripPythonCode(src, { dropStrings: false }).matchAll(TOOL_PAIR_RE)].map((m) => m[1]);
+}
 
 let shimDir = "";
 let sentinel = "";
@@ -250,11 +256,14 @@ describe("L1-3 · 两张工具表的不变量", { skip: !HAS_PYTHON }, () => {
       }
     }
     // Python 侧：["--tool", "<tool>"] 或 "--tool", "<tool>"
+    //
+    // ⚠ 这里必须用 Python 自己的剥法，而且要**保留字符串字面量**（`dropStrings: false`）：
+    //   ① `stripComments()` 只认 C 风格注释，对 `.py` 等于没剥（实测对 `scripts/mcp_call.py`
+    //      输出与输入一模一样，11404 → 11404），docstring 里引用的工具名会被当成真调用；
+    //   ② `stripPythonStrings()` 会把 `"--tool"` 与 `"<name>"` 两个操作数一起抹成 `""`，
+    //      这条正则再也匹配不到任何东西 —— 一条永远抓不到东西的锁。
     for (const f of walk("scripts", ".py")) {
-      const src = stripComments(read(f));
-      for (const m of src.matchAll(/["']--tool["']\s*,\s*["']([a-z][a-z0-9_]*)["']/g)) {
-        found.add(m[1]);
-      }
+      for (const n of pythonToolNames(read(f))) found.add(n);
     }
 
     // 解析面不许为空：解析器一旦失灵，「全部都登记了」会变成恒真
@@ -282,11 +291,27 @@ describe("L1-3 · 两张工具表的不变量", { skip: !HAS_PYTHON }, () => {
         "未登记的写工具在只读模式下会被默认拒绝，功能会哑掉"
     );
   });
+
+  // 上面那条对账的**扫描器**自己要有活样例。当前语料里恰好没有「docstring 里写了一份
+  // 工具名」的反例，所以只靠全仓扫描是抓不到「剥法被换回去」这件事的 ——
+  // 实测把 `pythonToolNames()` 换回 `stripComments()` / 换成默认档，全仓那三条断言
+  // **一条都不红**（D11 注入，红 0 条）。所以这里用一段合成样本把语义钉死。
+  it("§D③ `pythonToolNames()` 的剥法有活样例：散文里的名字不算，真实字符串对要留着", () => {
+    const sample =
+      'TOOLS = ["--tool", "real_tool"]\n' +
+      '# 说明：["--tool", "comment_tool"] 这种写法以前也出现过\n' +
+      '"""docstring 里引用了 ["--tool", "prose_tool"]"""\n';
+    assert.deepEqual(
+      pythonToolNames(sample),
+      ["real_tool"],
+      "剥法被换回去了：注释 / docstring 里的名字漏了进来，或真实字符串对被一起抹掉了"
+    );
+  });
 });
 
 describe("L1-3 · 结构锁：拒绝必须早于起子进程", { skip: !HAS_PYTHON }, () => {
   it("main() 里 precheck(...) 出现在 open_session(...) 之前", () => {
-    const src = stripComments(read("scripts/mcp_call.py"));
+    const src = stripPythonCode(read("scripts/mcp_call.py"), { dropStrings: false });
     const start = src.indexOf("def main(");
     assert.ok(start > 0, "找不到 main() —— 解析锚点没了，这条锁等于没写");
     const body = src.slice(start);
@@ -303,7 +328,7 @@ describe("L1-3 · 结构锁：拒绝必须早于起子进程", { skip: !HAS_PYTH
   });
 
   it("旧的「先起进程再判写工具」写法没有回来", () => {
-    const src = stripComments(read("scripts/mcp_call.py"));
+    const src = stripPythonCode(read("scripts/mcp_call.py"), { dropStrings: false });
     assert.equal(
       /open_session\([^)]*\)[\s\S]*?a\.tool in WRITE_TOOLS/.test(src),
       false,
@@ -320,7 +345,7 @@ describe("L1-3 · 结构锁：拒绝必须早于起子进程", { skip: !HAS_PYTH
     // 实测教训：把 main() 里那一行删掉，12 条用例**一条都不红** ——
     // 函数还在、测试也还在单独调它，于是「表为空/重叠」在真运行时根本没人管。
     // 定义得再好，不接线就等于没有。
-    const src = stripComments(read("scripts/mcp_call.py"));
+    const src = stripPythonCode(read("scripts/mcp_call.py"), { dropStrings: false });
     const start = src.indexOf("def main(");
     assert.ok(start > 0, "找不到 main()");
     assert.ok(
