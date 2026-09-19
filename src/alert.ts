@@ -10,7 +10,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { ROOT, runPy } from "./okx.js";
+import { ROOT, runPy } from "./okx.js";import { writeJsonAtomic } from "./atomicwrite.js";
 
 const ALERT_LOG = path.join(ROOT, "state", "alerts.jsonl");
 const MAIL_SENT = path.join(ROOT, "state", "mail_sent.json");
@@ -41,11 +41,12 @@ export async function alert(subject: string, body: string): Promise<void> {
   if (sent[subject] && now - sent[subject] < MAIL_DEDUP_MS) return;
   try {
     const outPath = path.join(ROOT, "state", "mail_alert.json");
-    fs.writeFileSync(outPath, JSON.stringify({ subject, body }), "utf8");
+    // 原子写：写完就交给 mail_send.py 去读，半截文件 = 这封告警邮件发不出去
+    writeJsonAtomic(outPath, { subject, body });
     const r = await runPy("mail_send.py", ["--in", "state/mail_alert.json"], 60_000);
     console.log(`[alert] ${subject}: ${r.trim()}`);
     sent[subject] = now;
-    fs.writeFileSync(MAIL_SENT, JSON.stringify(sent), "utf8");
+    writeJsonAtomic(MAIL_SENT, sent);
   } catch (e) {
     console.log(`[alert] 邮件发送失败（不影响交易）: ${String(e).slice(0, 160)}`);
   }

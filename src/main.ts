@@ -22,7 +22,7 @@ import { reflectExperts } from "./experts.js";
 import { reloadStore, getSettings } from "./store.js";
 import { checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
 import { guardMonthlyDrawdown } from "./guard.js";
-import { loadRunState } from "./runstate.js";
+import { loadRunState } from "./runstate.js";import { writeJsonAtomic } from "./atomicwrite.js";
 import { alert } from "./alert.js";
 import { snappedSlTp } from "./price.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
@@ -356,12 +356,7 @@ async function runRound() {
   // ③ 大额人工确认 → 挂起
   if (decision.needsApproval) {
     const file = path.join(STATE, `PENDING_APPROVAL_${roundId}.json`);
-    fs.mkdirSync(STATE, { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ roundId, reason: decision.approvalReason, decision, opinions: final.opinions }, null, 2),
-      "utf8"
-    );
+    writeJsonAtomic(file, { roundId, reason: decision.approvalReason, decision, opinions: final.opinions });
     log(`⏸ 需人工确认，已写入 ${file}`);
     return;
   }
@@ -455,8 +450,10 @@ async function runRound() {
       // 归档后复盘与界面都能直接读，不必再去日志里翻
       risk_brief: riskBrief,
     };
-    fs.mkdirSync(STATE, { recursive: true });
-    fs.writeFileSync(path.join(STATE, `round_input_${roundId}.json`), JSON.stringify(payload, null, 2), "utf8");
+    // 原子写：这份文件**紧接着**就交给 archive_round 归档（归档会更新 runtime.json，
+    // 那是 L1-6 熔断与当日止损计数的读数）。半截 JSON 在这里的代价不是「少一份输出」，
+    // 而是整轮归档失败 —— 而失败只留一行日志（catch 在下面）。
+    writeJsonAtomic(path.join(STATE, `round_input_${roundId}.json`), payload);
     await runPy("archive_round.py", ["--in", `state/round_input_${roundId}.json`]);
     log(`归档完成 ${roundId}`);
 

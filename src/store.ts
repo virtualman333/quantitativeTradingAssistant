@@ -13,7 +13,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";import { writeJsonAtomic } from "./atomicwrite.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const AGENT_ROOT = (() => {
@@ -277,24 +277,9 @@ export function reloadStore(): void {
 
 export function saveStore(data?: StoreData): void {
   const d = data ?? cache ?? defaults();
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const json = JSON.stringify(d, null, 2);
-  // 原子写：先写临时文件再重命名，防写入中断导致配置损坏。
-  // 但 Windows 下 rename 覆盖已存在文件时，若目标文件正被其他进程打开（哪怕只读），
-  // 会报 EPERM（实测复现）；此时退回直接写，writeFileSync 覆盖只读打开的文件没问题。
-  const tmp = STORE_PATH + ".tmp";
-  fs.writeFileSync(tmp, json, "utf8");
-  try {
-    fs.renameSync(tmp, STORE_PATH);
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EPERM" || code === "EEXIST" || code === "EBUSY" || code === "EACCES") {
-      fs.writeFileSync(STORE_PATH, json, "utf8");
-      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    } else {
-      throw e;
-    }
-  }
+  // 原子写搬到了 atomicwrite.ts —— 那段「tmp + rename + Windows EPERM 退回」原先只长在
+  // 本函数体内，别处需要原子写的地方只好各自再抄一份（state/ 下那几处就是这么漏掉的）。
+  writeJsonAtomic(STORE_PATH, d);
   cache = d;
 }
 

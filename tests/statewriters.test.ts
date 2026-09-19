@@ -39,7 +39,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { ROOT, read, walk } from "./_src.ts";
+import { ROOT, read, stripComments, walk } from "./_src.ts";
 
 const PYTHON = process.env.PYTHON || "python";
 const HAS_PYTHON = spawnSync(PYTHON, ["-c", "print(1)"], { encoding: "utf8" }).status === 0;
@@ -360,5 +360,146 @@ describe("结构锁：state/ 下 JSON 的写一律走 jsonstore（清单从 glob
       "严格入口没有复用 read_json_state —— 一份判据变两份必然漂移"
     );
     assert.ok(store.includes("class StateUnreadable("), "StateUnreadable 不见了");
+  });
+});
+
+/**
+ * 同一个约定的另一面：**TS 侧写 `state/` 的地方此前一处都不在账上。**
+ *
+ * 上面那个 `JSON_WRITE_EXEMPT` 扫的是 Python 的 `json.dump(`，glob 是 `scripts/**.py`
+ * —— 而 `src/main.ts` 那两处 `fs.writeFileSync(path.join(STATE, ...))` 直接写
+ * `state/round_input_<轮次>.json` 与 `state/PENDING_APPROVAL_<轮次>.json`，
+ * `src/alert.ts` 还写三处。它们**一个都不在对账面里**，于是「state/ 下的写一律走原子写」
+ * 这句话在 TS 侧等于没写。
+ *
+ * 两侧分别扫，是因为「直写」的写法本身就是两套（Python 是 `json.dump(`，
+ * TS 是 `fs.writeFile*`）—— 这不是「同一件事写两遍」，而是同一个约定的两个语言面，
+ * 所以下面额外有一条**总闸**：两面都必须有扫描面、且都必须解析得出东西。
+ */
+describe("state/ 下的直写：TS 侧也在账上（此前只有 scripts/**.py 有人管）", () => {
+  /** TS/JS 里能直接落盘的四种写法 */
+  const WRITE_APIS = ["fs.writeFileSync(", "fs.writeFile(", "fs.appendFileSync(", "fs.appendFile("];
+
+  /**
+   * 「绑到 state 路径上的标识符」：`const ALERT_LOG = path.join(ROOT, "state", "alerts.jsonl")`。
+   *
+   * 为什么非要有这一步：只按「调用那一行长什么样」扫会**一个都扫不到** ——
+   * `fs.appendFileSync(ALERT_LOG, …)` 的调用点里根本没有 `state` 这个词
+   * （实测过：第一版扫描器就这么瞎了，判出来的「零处直写」是假的）。
+   */
+  const STATE_BINDING =
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(path\.join\([^)]*(?:\bSTATE\b|"state"|'state')[^)]*\)|"[^"]*state\/[^"]*"|'[^']*state\/[^']*'|`[^`]*state\/[^`]*`)/;
+
+  /** 一个文件里出现的直写行号（按行报，方便人去改） */
+  function directStateWrites(src: string): number[] {
+    const code = stripComments(src);
+    const bound = new Set([...code.matchAll(new RegExp(STATE_BINDING, "g"))].map((m) => m[1]));
+    const lines: number[] = [];
+    for (const api of WRITE_APIS) {
+      let at = code.indexOf(api);
+      while (at >= 0) {
+        const win = code.slice(at, at + 260); // 调用可能跨行，窗口开大一点
+        const byName = [...bound].some((v) => new RegExp(`\\b${v}\\b`).test(win));
+        if (byName || /\bSTATE\b|state\//.test(win)) lines.push(code.slice(0, at).split("\n").length);
+        at = code.indexOf(api, at + api.length);
+      }
+    }
+    return lines.sort((a, b) => a - b);
+  }
+
+  const SCAN_DIRS = ["src", "electron", "ui", "scripts"];
+  const scanned = () =>
+    SCAN_DIRS.flatMap((d) => [".ts", ".js", ".mjs"].flatMap((x) => walk(d, x))).filter(
+      (f) => !f.endsWith("atomicwrite.ts") // 底座自己就是那个被允许的实现
+    );
+
+  /**
+   * 豁免表：判据与 `JSON_WRITE_EXEMPT` 一致 —— 这处写**坏了不会让人读到假数字**。
+   * `count` 是棘轮：多一处要显式来改数字，少一处也要显式收紧。
+   */
+  const DIRECT_WRITE_EXEMPT: Record<string, { count: number; why: string }> = {
+    "src/alert.ts": {
+      count: 1,
+      why:
+        "state/alerts.jsonl 是**只追加**的审计日志（`appendFileSync`），不是「读改写」的账；" +
+        "逐行追加不存在「半截 JSON」这一态（坏行只影响那一行），且告警记录失败不影响交易",
+    },
+  };
+
+  it("自证：合成出来的裸写必须被认出来，非 state 的写不许误伤", () => {
+    const sample = [
+      'const P = path.join(ROOT, "state", "x.json");',
+      "fs.writeFileSync(P, JSON.stringify({}));",
+      'fs.writeFileSync(path.join(STATE, `round_input_${id}.json`), s);',
+      'fs.writeFileSync(path.join(dir, "y.json"), s);',
+      "fs.appendFileSync(LOG_DIR, line);",
+    ].join("\n");
+    assert.deepEqual(
+      directStateWrites(sample),
+      [2, 3],
+      "自证失败：扫描器认不出合成出来的直写（或把非 state 的写也算了进去）—— 那它在真仓库上的结论没有意义"
+    );
+  });
+
+  it("凡直写 state/ 的 TS/JS 文件都在豁免表里，条数与棘轮一致", () => {
+    const offenders: string[] = [];
+    let seen = 0;
+    for (const f of scanned()) {
+      const n = directStateWrites(read(f)).length;
+      seen += n;
+      const exempt = DIRECT_WRITE_EXEMPT[f];
+      if (n > 0 && !exempt) offenders.push(`${f}（${n} 处直写 state/）`);
+      else if (exempt && n !== exempt.count) {
+        offenders.push(
+          `${f} 的棘轮是 ${exempt.count}，实际 ${n} —— ${
+            n > exempt.count ? "又加了一处直写（请走 writeJsonAtomic）" : "少了一处，请把数字收紧"
+          }`
+        );
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "state/ 下的写必须走 src/atomicwrite.ts 的 writeJsonAtomic（裸 writeFileSync 正是半截文件的成因）"
+    );
+    assert.ok(seen >= 1, `只扫到 ${seen} 处直写 —— 扫描面塌了，上面那条就成了恒真`);
+  });
+
+  it("扫描面自证：两面都在，且「绑定到 state 路径的标识符」真被解析出来了", () => {
+    const files = scanned();
+    assert.ok(files.length >= 20, `只扫到 ${files.length} 个 TS/JS 文件，扫描面塌了`);
+    assert.ok(files.some((f) => f.startsWith("src/")), "src/ 掉出扫描面了");
+    assert.ok(files.some((f) => f.startsWith("scripts/")), "scripts/ 掉出扫描面了");
+
+    // 只按「调用行里有没有 state 这个词」扫会一个都扫不到（实测踩过），
+    // 所以「绑定解析在工作」必须自己是一条断言。**而且必须是行为断言**：
+    // 只断言「正则能在源码里匹配到 ≥2 个文件」是不够的 —— 把 directStateWrites
+    // 里的 bound 换成空集，那一版断言照样绿（实测过，Q5 注入漏网）。
+    // 这条只通过绑定标识符关联 state 的合成样本，必须被认出来。
+    assert.deepEqual(
+      directStateWrites(
+        ['const PENDING = path.join(STATE, "pending.json");', "fs.writeFileSync(PENDING, JSON.stringify(x));"].join("\n")
+      ),
+      [2],
+      "扫描器没真的吃绑定解析 —— 只认「调用行里带 state 字样」的话这里会返回 []"
+    );
+    const withBinding = files.filter((f) =>
+      new RegExp(STATE_BINDING).test(stripComments(read(f)))
+    );
+    assert.ok(
+      withBinding.length >= 2,
+      `只解析出 ${withBinding.length} 个文件把 state 路径绑到了标识符上（${withBinding.join(", ")}）—— 绑定解析瞎了`
+    );
+  });
+
+  it("反向：豁免表里没有已不存在、或已经不再直写的文件（表会腐烂）", () => {
+    const files = scanned();
+    for (const f of Object.keys(DIRECT_WRITE_EXEMPT)) {
+      assert.ok(files.includes(f), `豁免表里的 ${f} 已经不在扫描面里了`);
+      assert.ok(
+        directStateWrites(read(f)).length > 0,
+        `豁免表里的 ${f} 已经不再直写 state/ 了，请把它从表里删掉`
+      );
+    }
   });
 });
