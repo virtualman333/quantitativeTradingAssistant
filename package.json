@@ -1,6 +1,6 @@
 {
   "name": "okx-trader-agent",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "private": true,
   "description": "OKX 自主交易专用 Agent（TS 常驻进程，5 分钟自驱决策，不依赖聊天会话）",
   "type": "module",
