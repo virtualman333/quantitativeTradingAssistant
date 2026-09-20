@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.electron.json && tsc -p tsconfig.preload.json && node scripts/postbuild.mjs && vite build",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "check:package": "node scripts/check-package.mjs",
     "dev": "tsx src/main.ts",
     "start": "node dist/src/main.js",
     "once": "tsx src/main.ts --once",
@@ -49,17 +50,12 @@
       "dist/**/*",
       "ui/**/*",
       "src/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "scripts",
-        "to": "scripts"
-      },
-      {
-        "from": "AGENT_TRADING_RULES.md",
-        "to": "AGENT_TRADING_RULES.md"
-      }
+      "package.json",
+      "skills/**/*",
+      "experts/**/*",
+      "scripts/**/*",
+      "strategies/**/*",
+      "AGENT_TRADING_RULES.md"
     ],
     "win": {
       "target": "nsis",

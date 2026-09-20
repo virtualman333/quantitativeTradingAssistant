@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld("api", {
   // Skill
   skillsList: () => safeInvoke("skills:list"),
   skillsSetEnabled: (id: string, on: boolean) => safeInvoke("skills:setEnabled", id, on),
+  /** 注册表自检（登记 ⇄ 实现两向对账的结果），界面「Skill」页顶部显示 */
+  skillsDiagnostics: () => safeInvoke("skills:diagnostics"),
 
   // 专家经验库（只认 bucket id + 文件名，不接受路径）
   knowledgeList: () => safeInvoke("knowledge:list"),

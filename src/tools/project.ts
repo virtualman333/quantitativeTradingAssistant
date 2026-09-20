@@ -8,12 +8,24 @@ import { spawn } from "node:child_process";
 import type { Tool } from "./types.js";
 import { PROJECT_ROOT, AGENT_ROOT, relOf } from "./paths.js";
 import { isSkillEnabled } from "../store.js";
+import { skillMenu } from "../skills.js";
 
-/** 调用项目 Skill（行情扫描 / 消息采集 / 双源验证 / clOrdId / 查章程） */
+/**
+ * 调用项目 Skill（行情扫描 / 消息采集 / 双源验证 / clOrdId / 查章程 …）
+ *
+ * ⚠ 描述里的能力清单**必须由注册表现算**，不许手抄。
+ * 原实现手抄了 6 个技能名（market_scan / news_fetch / news_verify / news_log /
+ * order_id / read_charter），而注册表里已经有 15 个 —— 模型只按描述挑工具，
+ * 于是回测 / 因子 / 跨市场 / 复盘 / 报告 / 新闻查询 / 情绪 这 9 个技能
+ * **在对话里等于不存在**（工具本身接受任意 id，但没人会去猜）。
+ * 手抄的清单不会响；skillMenu() 跟着 skills/ 目录一起变。
+ */
 export const runSkillTool: Tool = {
   name: "run_skill",
   description:
-    "Call a project Skill: market_scan(market scan), news_fetch(news collection), news_verify(dual-source verification), news_log(persist news), order_id(generate compliant clOrdId), read_charter(read trading charter).",
+    `Call a project Skill by id. Available ids: ${skillMenu()}. ` +
+    `Pass {"id":"<skill id>","args":{...}} — args 见各技能的说明；` +
+    `在界面被停用的 Skill 会被拒绝执行。`,
   parameters: {
     type: "object",
     properties: {

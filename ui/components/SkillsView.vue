@@ -27,6 +27,16 @@ async function toggle(s, on) {
   <div class="panel">
     <h2>技能（Skill）</h2>
     <div class="body">
+      <!-- 注册表自检：登记（skills/<id>/skill.json）与实现（src/skills.ts 的 RUNNERS）必须成对。
+           这类问题不报错、不打日志，只会让技能「少几个」—— 所以必须摆在人眼前。 -->
+      <div v-if="store.skillIssues.length" class="alert err">
+        <span class="spacer">
+          ⚠ 技能注册表有 {{ store.skillIssues.length }} 处问题（这些技能不会报错，只会从清单里消失）：
+          <span v-for="(it, i) in store.skillIssues" :key="i" style="display:block">
+            · [{{ it.kind }}] {{ it.where }} —— {{ it.detail }}
+          </span>
+        </span>
+      </div>
       <table v-if="store.skills.length">
         <thead>
           <tr><th>名称</th><th>参数</th><th>说明</th><th>权限</th><th>启用</th></tr>

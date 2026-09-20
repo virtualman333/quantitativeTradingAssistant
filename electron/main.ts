@@ -576,6 +576,26 @@ ipcMain.handle("skills:setEnabled", (_e, id: string, on: boolean) =>
   withStore((s) => s.setSkillEnabled(id, on))
 );
 
+/**
+ * 技能注册表自检（界面「Skill」页顶部用）。
+ *
+ * 扫描期有四处会**静默丢弃**：登记了元数据却没有 run 实现（该技能凭空消失）、
+ * 有实现却没登记、skill.json 坏了、skills/ 目录压根不在（安装版被打包漏掉时就是这样）。
+ * 任何一处都不会报错，界面上只会「少几个技能」—— 所以这里必须把它摆到人眼前。
+ */
+ipcMain.handle("skills:diagnostics", async () => {
+  const mod: any = await import(
+    "file://" + path.join(AGENT_ROOT, "dist", "src", "skills.js").replace(/\\/g, "/")
+  );
+  const issues: Array<{ kind: string; where: string; detail: string }> =
+    typeof mod.skillRegistryIssues === "function" ? mod.skillRegistryIssues() : [];
+  if (issues.length) {
+    pushLog(`⚠ 技能注册表有 ${issues.length} 处问题（详见「Skill」页）：`);
+    for (const i of issues) pushLog(`   · [${i.kind}] ${i.where} —— ${i.detail}`);
+  }
+  return issues;
+});
+
 function withStoreSync(): any {
   try {
     const p = path.join(AGENT_ROOT, "data", "store.json");

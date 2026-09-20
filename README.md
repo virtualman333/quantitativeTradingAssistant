@@ -76,6 +76,23 @@ quantitativeTradingAssistant/
 | `sentiment` | 市场情绪与持仓结构专家 | |
 | `execution` | 执行与滑点专家 | |
 
+### 定义一个技能（**两步必须成对**）
+
+技能 = `skills/<id>/skill.json`（元数据）+ `src/skills.ts` 的 `RUNNERS` 同名键（执行逻辑）。
+只写一半**不会报错**，只会让这个技能静默消失：
+
+| 只做了一半 | 后果（都不报错） |
+|---|---|
+| 有 `skill.json`、没有 `RUNNERS[id]` | 该技能被 `filter` 掉：专家 prompt、界面清单、`run_skill` 全看不见它 |
+| 有 `RUNNERS[id]`、没有 `skill.json` | 死代码，永远走不到 |
+| `skill.json` 的 `id` ≠ 所在目录名 | 按目录名找它的人找不到 |
+| 整个 `skills/` 目录不在（安装版被打包漏掉） | 注册表为空，技能页显示「暂无 Skill」 |
+
+扫描期发现的问题由 `skillRegistryIssues()` 收起来：界面**「Skill」页顶部直接列出来**，启动时也打日志；
+`tests/skillregistry.test.ts` 拿**磁盘** `skill.json` 与**源码** `RUNNERS` 两份独立真值做两向对账。
+`run_skill` 的能力清单同样从注册表现算（此前手抄了 6 个技能名，而注册表里有 15 个 ——
+剩下 9 个在对话里等于不存在）。
+
 ### 定义一个专家
 
 ```json
@@ -150,7 +167,25 @@ pnpm run ui:dev    # Vite dev server + Electron（热更新）
 
 # 自测（L1 硬约束回归，零额外依赖）
 pnpm test
+
+# 打包内容校验（运行期资源有没有进 app.asar）
+pnpm run check:package
 ```
+
+### 打包与安装版（**先看这条**）
+
+`pnpm run dist` 打的是安装包，而**安装版和 dev 模式读的不是同一批文件**：dev 模式下 `AGENT_ROOT` 就是仓库根，
+`skills / experts / scripts / strategies / AGENT_TRADING_RULES.md` 都在手边；安装版里 `AGENT_ROOT` 指向
+`app.asar`，**只有 `build.files` 里声明过的路径才在包里**（2026-09-20 实测：修复前包内顶层只有
+`node_modules / dist / package.json / src / ui`，上述资源一个都没有 → 技能页「暂无 Skill」、8 个专家全空、
+所有 Python 能力找不到脚本，全程不报错）。
+
+改完 `build.files` 之后跑 `pnpm run check:package` 复验：它现算磁盘上全部运行期只读资源，
+先对 `build.files` 规则做静态匹配，若已打好包则再读 asar 头部做实证（缺一个就退出码非 0）。
+
+⚠️ **安装版还差一步（尚未做）**：`state / data / logs / reports` 是运行期要**写**的目录，
+而 asar 是只读的 —— 安装版需要一个可写根（如 `app.getPath("userData")`）。
+dev 模式不受影响，所以本地怎么跑都是好的。
 
 ### 测试
 
