@@ -58,3 +58,6 @@ Thumbs.db
 
 # 专家自动进化产物（每轮 LLM 复盘追加，运行时生成）
 experts/*/knowledge/lessons.md
+
+# Vite 运行期临时文件（每次 vite 启动生成，会一直挂在 git status 里）
+*.timestamp-*.mjs
