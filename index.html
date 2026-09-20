@@ -162,20 +162,20 @@ footer{border-top:1px solid var(--border);padding:34px 0 46px;margin-top:24px}
 
 <main>
   <div class="wrap hero">
-    <span class="eyebrow">●  OKX 自主交易 Agent · v0.5.0</span>
+    <span class="eyebrow">●  OKX 自主交易 Agent · v0.6.0</span>
     <h1>每 5 分钟自驱完成一轮决策，不依赖人工聊天会话</h1>
     <p class="lead">一个 TypeScript 常驻进程：取数 → 调度专家 → 汇总拍板 → 执行 → 归档，全流程自动跑。L1 风控硬约束写死在类型与执行层，裁量交给多专家 + 主 Agent。专家沉淀下来的经验库在界面里可见、可改、可删。运行态读数一旦不可信（v0.4.0），日志、看板与告警会同时说清「是未知、不是零」，并把读不出来的原因带出来 —— 不会再把「数据丢了」显示成「今天一次止损都没触发」。</p>
     <div class="cta"><a class="btn btn-primary" href="https://github.com/virtualman333/quantitativeTradingAssistant">在 GitHub 上查看 →</a><a class="btn btn-ghost" href="https://github.com/virtualman333/quantitativeTradingAssistant/releases">Releases</a></div>
-    <div class="stats"><div class="stat"><b>5 分钟</b><span>一轮决策闭环</span></div><div class="stat"><b>8 个</b><span>内置专家</span></div><div class="stat"><b>353</b><span>单元测试</span></div></div>
+    <div class="stats"><div class="stat"><b>5 分钟</b><span>一轮决策闭环</span></div><div class="stat"><b>8 个</b><span>内置专家</span></div><div class="stat"><b>442</b><span>单元测试</span></div></div>
   </div>
 
   <section id="features"><div class="wrap">
     <div class="sec-head"><h2>核心能力</h2><p>从实际使用出发，而不是从功能清单出发</p></div>
-    <div class="grid"><div class="card"><span class="ico">🔄</span><h3>常驻自驱</h3><p>不依赖聊天会话。进程活着就按节奏跑完整闭环，无人在场也照常决策与归档。</p></div><div class="card"><span class="ico">🧠</span><h3>多专家并行</h3><p>LangGraph 扇出并行给观点，主 Agent 汇总冲突后拍板；专家定义外置，增删专家 = 增删目录。</p></div><div class="card"><span class="ico">🛡️</span><h3>L1 硬约束在代码里</h3><p>杠杆上限、止损、仓位红线由类型与执行层守住，不交给模型自由裁量；月度回撤熔断（≥12% 停新仓）主 Agent 与超短线循环共用同一道闸门。</p></div><div class="card"><span class="ico">📊</span><h3>超短线策略库</h3><p>内置 + 自定义策略，支持多周期批量回测：胜率 / 盈亏比 / 期望 / 最大回撤，规则单与 LLM 单分开对比。</p></div><div class="card"><span class="ico">🕶️</span><h3>提示词混淆层</h3><p>发给模型提供方之前先混淆，降低策略与上下文被记录的风险。</p></div><div class="card"><span class="ico">🖥️</span><h3>桌面端多窗口</h3><p>Electron + Vue3：行情 / 持仓 / 日志 / 报告 / 回测 / 设置，各自独立窗口。</p></div></div>
+    <div class="grid"><div class="card"><span class="ico">🔄</span><h3>常驻自驱</h3><p>不依赖聊天会话。进程活着就按节奏跑完整闭环，无人在场也照常决策与归档。</p></div><div class="card"><span class="ico">🧠</span><h3>多专家并行</h3><p>LangGraph 扇出并行给观点，主 Agent 汇总冲突后拍板；专家定义外置，增删专家 = 增删目录。</p></div><div class="card"><span class="ico">🛡️</span><h3>L1 硬约束在代码里</h3><p>杠杆上限、止损、仓位红线由类型与执行层守住，不交给模型自由裁量；月度回撤熔断（≥12% 停新仓）主 Agent 与超短线循环共用同一道闸门。「这笔有没有止损」的判据只有一份，且只认带止损触发价的委托 —— 一条只有止盈的单不算止损；裸仓按每笔持仓逐笔巡检，不是只看账户里有没有挂单。</p></div><div class="card"><span class="ico">📊</span><h3>超短线策略库</h3><p>内置 + 自定义策略，支持多周期批量回测：胜率 / 盈亏比 / 期望 / 最大回撤，规则单与 LLM 单分开对比。</p></div><div class="card"><span class="ico">🕶️</span><h3>提示词混淆层</h3><p>发给模型提供方之前先混淆，降低策略与上下文被记录的风险。</p></div><div class="card"><span class="ico">🖥️</span><h3>桌面端多窗口</h3><p>Electron + Vue3：行情 / 持仓 / 日志 / 报告 / 回测 / 设置，各自独立窗口。</p></div></div>
   </div></section>
 
   <section id="stack"><div class="wrap">
-    <div class="sec-head"><h2>技术栈</h2><p>最新版本：v0.5.0</p></div>
+    <div class="sec-head"><h2>技术栈</h2><p>最新版本：v0.6.0</p></div>
     <div class="pills"><span class="pill">TypeScript</span><span class="pill">Node.js</span><span class="pill">LangGraph.js</span><span class="pill">Electron</span><span class="pill">Vue 3</span><span class="pill">Vite</span><span class="pill">Python</span><span class="pill">OKX API</span><span class="pill">pnpm</span></div>
   </div></section>
 
@@ -183,7 +183,7 @@ footer{border-top:1px solid var(--border);padding:34px 0 46px;margin-top:24px}
     <div class="sec-head"><h2>快速开始</h2><p>复制即可跑，不需要先读完整文档</p></div>
     <div class="steps"><div class="step"><div class="step-head"><span class="dot"></span>克隆并安装<button class="copy" type="button">复制</button></div><pre><code>git clone https://github.com/virtualman333/quantitativeTradingAssistant.git
 cd quantitativeTradingAssistant
-pnpm install</code></pre></div><div class="step"><div class="step-head"><span class="dot"></span>跑测试与构建<button class="copy" type="button">复制</button></div><pre><code>pnpm test     <span class="cmt"># 353 例：风控闸门 / 月度回撤熔断 / 运行态读数 / 战绩统计 / 区间判定</span>
+pnpm install</code></pre></div><div class="step"><div class="step-head"><span class="dot"></span>跑测试与构建<button class="copy" type="button">复制</button></div><pre><code>pnpm test     <span class="cmt"># 442 例：风控闸门 / 止损存在性 / 月度回撤熔断 / 运行态读数 / 战绩统计 / 区间判定</span>
 pnpm build    <span class="cmt"># 三套 tsc + postbuild + vite</span></code></pre></div><div class="step"><div class="step-head"><span class="dot"></span>启动<button class="copy" type="button">复制</button></div><pre><code>pnpm electron:dev</code></pre></div></div>
   </div></section>
 </main>
