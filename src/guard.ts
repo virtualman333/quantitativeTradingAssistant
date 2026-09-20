@@ -37,6 +37,23 @@ export const MAX_LEVERAGE = 5;          // L1-2 杠杆 ≤5x
 export const MAX_MONTH_DD_PCT = -12;
 
 /**
+ * L2 敞口软约束（章程 §5「敞口上限」表，三条都是「L2 建议」）。
+ *
+ * 为什么放在这里：这三条**曾经在 `scripts/trade_round.py` 里各写了一份**
+ * （`SOFT_MAX_NOTIONAL_X` / `SOFT_MAX_TOTAL_X`，注释写着「仅告警」），
+ * 而全仓没有任何一处读它们 —— 那句「告警」从来没响过；
+ * `ALLOWED_INSTS`（写着「合规标的（L1-1）」）同理，且它与章程 v2.1
+ * 「任意 USDT 永续」直接冲突。口径收到这里，与上面三道 L1 硬顶同处一地。
+ *
+ * 性质是**建议、不是闸门** —— 超限只产生 warnings（留痕 + 界面可见），
+ * 不进 `violations`、也不进 `needsApproval`（那条 L2 基准只属于「单笔风险 >2%」）。
+ * 是否改成真闸门属策略层决定，不在这里顺手改掉。
+ */
+export const SOFT_MAX_NOTIONAL_X = 3.0;  // L2 单标的名义敞口 ≤ 总权益 × 3.0
+export const SOFT_MAX_TOTAL_X = 5.0;     // L2 全账户总名义敞口 ≤ 总权益 × 5.0
+export const MAX_CONCURRENT_INSTS = 5;   // L2 同时持仓标的数 ≤ 5（同板块须合并计敞口）
+
+/**
  * 由「风险比例 + 止损距离 + 现价」反推隐含杠杆（口径即 L1-2）：
  *   名义仓位占权益 = 风险比例 ÷ (止损距离 ÷ 现价)
  * 三个参数任一非正时返回 null —— 缺数据就不要猜。

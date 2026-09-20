@@ -60,13 +60,19 @@ DECISION_DIR = STATE
 LOCK = os.path.join(STATE, ".trade_round.lock")
 
 # 合规标的（L1-1）
-ALLOWED_INSTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+# ⚠ 这里**没有**白名单常量 —— 曾经有过一个 `ALLOWED_INSTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]`
+#   （注释写着「合规标的（L1-1）」），但全仓没有任何一处读它；而章程 v2.1 已把 L1-1
+#   改成「任意 USDT 计价永续」，它连内容都是错的。现在标的是否合规由两处判定，
+#   且都有真实调用方：`market_scan.py` 的 USDT 永续筛选 + `src/guard.ts` 的
+#   `USDT_RE` × 本轮 `knownInsts`（交易所实际支持的标的）双校验。
 # 风险硬顶（L1-5 / L1-2）
 MAX_RISK_PCT = 0.025      # 单笔风险 ≤ 2.5%
 MAX_LEVERAGE = 5          # 杠杆 ≤ 5x
-# 单标的名义敞口 ≤ 3.0x 权益；总敞口 ≤ 5.0x 权益（L2 软约束，仅告警）
-SOFT_MAX_NOTIONAL_X = 3.0
-SOFT_MAX_TOTAL_X = 5.0
+# L2 敞口软约束（单标的名义敞口 ≤3.0× 权益 / 总敞口 ≤5.0× 权益 / 同时持仓 ≤5 个标的）
+# ⚠ 口径**不在这里**：本脚本曾各写一份 `SOFT_MAX_NOTIONAL_X` / `SOFT_MAX_TOTAL_X`，
+#   注释写着「仅告警」，而全仓没有任何一处读它们 —— 那句告警从来没响过。
+#   它现在由 `src/guard.ts` 定义、`src/riskbrief.ts` 的 checkExposure() 每轮真算，
+#   并进归档（risk_brief.exposure）与总览界面。要改上限改 guard.ts，别在这里补第二份。
 # OCO 回查超时
 ALGO_CONFIRM_TIMEOUT = 20.0
 

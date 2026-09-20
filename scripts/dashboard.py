@@ -69,6 +69,37 @@ def charter_version():
     return "未知（章程解析失败，请检查 AGENT_TRADING_RULES.md）"
 
 
+def charter_l1_rule(l1_id):
+    """从章程的 L1 表里取某一条的「规则」列（第 2 列）原文，去掉加粗标记。
+
+    为什么不硬编码：这块表格写着「当前生效规则速查」，用户是拿它当**事实**看的。
+    `标的范围` 那一行此前手抄成「BTC-USDT-SWAP / ETH-USDT-SWAP 永续」，
+    而章程 v2.1 早已把 L1-1 改成「任意 USDT 计价永续」—— 手抄的那份过期了，
+    与之成对的 `trade_round.py:ALLOWED_INSTS` 同样是过期且没人读的。
+    现在这一格直接摘自章程，章程改了就跟着改，改不动才需要动这里。
+
+    解析失败时返回一句**说得出口**的话，不返回旧值 —— 静默显示过期规则
+    比显示「解析失败」危险得多。
+    """
+    import re
+    want = l1_id.replace("*", "").strip()
+    try:
+        with open(CHARTER, encoding="utf-8") as f:
+            for line in f:
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(cells) < 3:
+                    continue
+                head = cells[0].replace("*", "").strip()
+                if head == want:
+                    rule = cells[1].replace("*", "").strip()
+                    if rule:
+                        return rule
+                    break
+    except OSError:
+        return "未知（章程读不到，请检查 AGENT_TRADING_RULES.md）"
+    return "未知（章程里找不到 %s，请检查章程 L1 表格式）" % want
+
+
 def now():
     return datetime.now(CST)
 
@@ -406,7 +437,7 @@ def build(args):
     A("| 月度目标 | **≥ +10%（年化 213.8%）** |")
     A("| 路径 A 趋势共振 | ✅ **生效**（共振 ≥28、量比 ≥0.8、盈亏比 ≥1.6）|")
     A("| 路径 B 区间均值回归 | ✅ **已生效**（2026-09-01 用户批准）|")
-    A("| 标的范围 | BTC-USDT-SWAP / ETH-USDT-SWAP 永续 |")
+    A("| 标的范围 | %s |" % charter_l1_rule("L1-1"))
     A("| 杠杆上限 | 5x（红线，永不放宽）|")
     A("| 单笔风险 | 档位基准 1.5%（进攻 2.0% / 防守 0.5%）× 信号系数，**硬顶 2.0%** |")
     A("| 风险档位 | DEFEND 0.5% / REDUCE 1.0% / LOCK 0.8% / BASE 1.5% / ATTACK 2.0% |")

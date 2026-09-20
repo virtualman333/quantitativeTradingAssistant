@@ -31,6 +31,10 @@ import {
   barWidth,
   capOf,
   ddUsage,
+  exposureCapText,
+  exposureLevel,
+  exposureNote,
+  instCountText,
   leverageText,
   maxUsage,
   monthRiskView,
@@ -379,5 +383,118 @@ describe("riskbrief-ui · 月度风控（L1-6）", () => {
     assert.ok(vue.includes("month.ddText"), "回撤数值没渲染");
     assert.ok(vue.includes("month.capText"), "熔断线没渲染");
     assert.ok(vue.includes("month.tagText"), "熔断状态标签没渲染");
+  });
+});
+
+// ── 敞口（章程 §5 的三条 L2 建议）────────────────────────────────────────
+
+describe("riskbrief-ui · 敞口展示层", () => {
+  const exp = (over: Record<string, unknown> = {}) =>
+    ({
+      equityUsdt: 10_000,
+      insts: 0,
+      unpriced: [],
+      perInst: [],
+      totalUsdt: null,
+      totalX: null,
+      totalUsagePct: null,
+      instUsagePct: 0,
+      partial: false,
+      overInsts: [],
+      overTotal: false,
+      overCount: false,
+      warnings: [],
+      ...over,
+    }) as never;
+
+  it("上限由 payload 反推，界面不抄常量（3 个标的 / 上限 5 → 60%）", () => {
+    const e = exp({ insts: 3, instUsagePct: 60, totalX: 2.5, totalUsagePct: 50 });
+    assert.equal(instCountText(e), "3 / 5 个", "分母必须反推出来");
+    assert.equal(exposureCapText(e), "≤5.0× 权益", "总敞口上限必须反推出来");
+    assert.equal(exposureLevel(e), "ok");
+  });
+
+  it("超限与接近上限是两档，取总量/标的数里更重的那一档", () => {
+    // 总量充裕但标的数超限 → 整体判超限（任一条软上限破了都该红）
+    const byCount = exp({ insts: 6, instUsagePct: 120, totalX: 1, totalUsagePct: 20 });
+    assert.equal(exposureLevel(byCount), "over");
+    // 标的数充裕但总量接近上限
+    const near = exp({ insts: 2, instUsagePct: 40, totalX: 4.2, totalUsagePct: 84 });
+    assert.equal(exposureLevel(near), "near");
+  });
+
+  it("无数据返回「—」，不返回 0（0 会被读成「没有敞口」）", () => {
+    assert.equal(exposureCapText(exp()), "—");
+    assert.equal(exposureCapText(undefined), "—");
+    assert.equal(instCountText(exp()), "0 个", "零持仓时没有分母，就说「0 个」");
+    // 整块缺失（旧版归档）→ none，不会装成「充裕」
+    assert.equal(exposureLevel(undefined), "none");
+    // 有 exposure 但零持仓 → 标的数用量 0%，是真正的「充裕」，与「算不出来」不是一回事
+    assert.equal(exposureLevel(exp()), "ok");
+  });
+
+  it("三种备注各说各的：无持仓 / 点名算不出的标的 / 全部算得出就不写废话", () => {
+    assert.match(exposureNote(exp()), /当前无持仓/);
+    assert.equal(exposureNote(exp({ perInst: [{ inst: "BTC-USDT-SWAP", notionalUsdt: 1 }] })), "");
+    const partial = exposureNote(
+      exp({
+        insts: 2,
+        perInst: [{ inst: "BTC-USDT-SWAP", notionalUsdt: 1 }, { inst: "SOL-USDT-SWAP", notionalUsdt: null }],
+        unpriced: ["SOL-USDT-SWAP"],
+        partial: true,
+      })
+    );
+    assert.match(partial, /SOL-USDT-SWAP/);
+    assert.match(partial, /下界/, "必须说清上面的数字只是已定价部分 —— 否则会被读成全部持仓");
+  });
+
+  it("真实 brief 喂进来零 NaN / 零 undefined（字段名对不上会在这里露出来）", async () => {
+    const { buildRiskBrief } = await import("../src/riskbrief.ts");
+    const brief = buildRiskBrief(
+      [],
+      {
+        equityUsdt: 10_000,
+        availableUsdt: 10_000,
+        algoOrders: [],
+        positions: [{ inst: "BTC-USDT-SWAP", side: "long", sizeContracts: 200, entry: 100, mark: 100, leverage: 3, upl: 0 }],
+      } as never,
+      () => 100,
+      undefined,
+      (inst: string) => (inst === "BTC-USDT-SWAP" ? { ctVal: 1 } : null)
+    );
+    const v = {
+      total: String(brief.exposure.totalX),
+      bar: String(barWidth(brief.exposure.totalUsagePct)),
+      cap: exposureCapText(brief.exposure),
+      cnt: instCountText(brief.exposure),
+      note: exposureNote(brief.exposure),
+    };
+    for (const [k, s] of Object.entries(v)) {
+      assert.ok(!s.includes("NaN"), `${k} 出现 NaN：${s}`);
+      assert.ok(!s.includes("undefined"), `${k} 出现 undefined：${s}`);
+    }
+    assert.equal(v.total, "2", "200 张 × ctVal1 × 100 = 20000 → 2.0× 权益（权益 10000）");
+    assert.equal(v.cnt, "1 / 5 个");
+  });
+
+  it("展示层不许抄一份敞口上限", () => {
+    const src = stripComments(read("ui/lib/riskbrief.js"));
+    assert.ok(!/\b3\.0\b/.test(src), "ui/lib/riskbrief.js 里出现了单标的软上限的字面量");
+    assert.ok(!/\b5\.0\b/.test(src), "ui/lib/riskbrief.js 里出现了总敞口软上限的字面量");
+  });
+
+  it("总览页把它渲染出来了，且旧归档说清「为什么看不到」", () => {
+    const vue = stripComments(read("ui/components/DashboardView.vue"));
+    // 只看**模板**（</script> 之后）—— 只判 `vue.includes(x)` 的话，光 import 进来就够了，
+    // 「算完放那儿没人看」照样能通过（本仓栽过这种恒真写法）。
+    const tpl = vue.slice(vue.indexOf("</script>"));
+    assert.ok(tpl.includes("exposureTotalText"), "总敞口数值没渲染");
+    assert.ok(tpl.includes("exposureCapText"), "总敞口软上限没渲染");
+    assert.ok(tpl.includes("instCountText"), "持仓标的数没渲染");
+    assert.ok(tpl.includes("exposureWarnings"), "敞口告警没渲染");
+    assert.ok(
+      tpl.includes("不含敞口体检"),
+      "归档里没有 exposure 时必须说清为什么看不到，而不是留白"
+    );
   });
 });

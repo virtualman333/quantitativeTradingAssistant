@@ -113,6 +113,56 @@ export function leverageText(c) {
   return cap === null ? `${v.toFixed(1)}x` : `${v.toFixed(1)}x / ${cap.toFixed(1)}x`;
 }
 
+// ── 敞口（章程 §5「敞口上限」表的三条 L2 建议）──────────────────────────
+//
+// 与上面两条预算条同源：算在 src/riskbrief.ts 的 checkExposure()，这里只摆放。
+// 上限一律用 capOf 从 payload 反推，界面**不复制** 3.0× / 5.0× / 5 个标的
+// —— 与「不抄 guard 常量」同一条理由。
+//
+// 「算不出来」必须与「没有敞口」分开显示：checkExposure 在缺 ctVal / 标记价时
+// 给的是 null 并把标的列进 unpriced，界面若把 null 当 0，用户会看到一条绿色的
+// 「充裕」，而真相是这笔持仓根本没被算进去。
+
+/** 总敞口软上限文本：≤5.0× 权益（由 value + usagePct 反推）；无数据返回 "—" */
+export function exposureCapText(e) {
+  const src = e || {};
+  const cap = capOf(src.totalX, src.totalUsagePct);
+  return cap === null ? "—" : `≤${cap.toFixed(1)}× 权益`;
+}
+
+/** 持仓标的数文本：3 / 5 个（分母同样反推，不抄常量） */
+export function instCountText(e) {
+  const src = e || {};
+  const n = num(src.insts);
+  if (n === null) return "—";
+  const cap = capOf(n, src.instUsagePct);
+  return cap === null ? `${n} 个` : `${n} / ${cap.toFixed(0)} 个`;
+}
+
+/**
+ * 敞口备注。三种状态各不相同，必须分开说：
+ *   - 无持仓                      → "当前无持仓"
+ *   - 有标的算不出（partial）      → 点名是哪几个、并明说这是下界
+ *   - 全部算得出                   → 空串（不写废话）
+ */
+export function exposureNote(e) {
+  const src = e || {};
+  const list = src.perInst || [];
+  if (!list.length) return "当前无持仓";
+  const bad = src.unpriced || [];
+  if (!bad.length) return "";
+  return `${bad.join(" / ")} 缺合约规格或标记价，敞口未计入 —— 上面的数字是已定价部分的下界`;
+}
+
+/** 敞口级别：总量与标的数取更重的那一档，超限才算 over */
+export function exposureLevel(e) {
+  const src = e || {};
+  const a = usageLevel(src.totalUsagePct);
+  const b = usageLevel(src.instUsagePct);
+  const rank = { over: 3, near: 2, ok: 1, none: 0 };
+  return (rank[b] || 0) > (rank[a] || 0) ? b : a;
+}
+
 // ── 月度风控（章程 L1-6：月度回撤 ≥12% → 强制停止开新仓）──────────────────
 //
 // 这条 L1 在加固之前**从未触发过**（判据字段全仓没人写）；现在它真的会拦下开新仓，

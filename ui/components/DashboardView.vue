@@ -12,6 +12,10 @@ import {
   barWidth,
   capOf,
   dayCountersView,
+  exposureCapText,
+  exposureLevel,
+  exposureNote,
+  instCountText,
   leverageText,
   maxUsage,
   monthRiskView,
@@ -56,6 +60,23 @@ const capRiskText = computed(() => (riskCap.value === null ? "—" : pctText(ris
 const leverLevel = computed(() => usageLevel(maxLeverUsage.value));
 const riskLevel = computed(() => usageLevel(maxRiskUsage.value));
 const approvalReasons = computed(() => brief.value?.approval_reasons || brief.value?.approvalReasons || []);
+
+// ── 敞口（章程 §5「敞口上限」表的三条 L2 建议）─────────────────
+// 逐笔那两条条回答「这一笔会不会越线」，这一条回答「连起来看会不会越线」：
+// 单笔各自合规、三笔同向叠起来照样能到 6× 权益。三条软上限此前只躺在
+// scripts/trade_round.py 的常量里、没有任何读取方 —— 而这块表格的「当前生效规则」
+// 却把「总敞口 ≤5.0× 权益」当生效规则印给用户看。现在它真的会被算出来。
+// 上限一律由 capOf 反推（界面不抄 3.0× / 5.0× 常量）。
+const exposure = computed(() => brief.value?.exposure || null);
+const hasExposure = computed(() => !!exposure.value);
+const expLevel = computed(() => exposureLevel(exposure.value));
+const exposureWarnings = computed(() => exposure.value?.warnings || []);
+const exposureNoteText = computed(() => (hasExposure.value ? exposureNote(exposure.value) : ""));
+const exposureTotalText = computed(() => {
+  const e = exposure.value;
+  if (!e || e.totalX === null || e.totalX === undefined) return "—";
+  return `${Number(e.totalX).toFixed(2)}×`;
+});
 
 // ── 月度风控（章程 L1-6）───────────────────────────────────
 // 本月还能不能开新仓，是全部硬约束里后果最重的一条（不是这笔亏了，是没有下一笔了）。
@@ -324,9 +345,35 @@ onUnmounted(stopTick);
               {{ usageText(maxRiskUsage) }} · {{ LEVEL_TEXT[riskLevel] }}
             </div>
           </div>
+          <div v-if="hasExposure" class="rb-item">
+            <div class="rb-k">总名义敞口</div>
+            <div class="rb-v">
+              <b>{{ exposureTotalText }}</b>
+              <span class="rb-sub">/ 软上限 {{ exposureCapText(exposure) }}</span>
+            </div>
+            <div class="rb-track">
+              <i :class="['rb-fill', 'lv-' + expLevel]" :style="{ width: barWidth(exposure.totalUsagePct) + '%' }"></i>
+            </div>
+            <div :class="['rb-tip', 'lv-' + expLevel]">
+              {{ usageText(exposure.totalUsagePct) }} · {{ LEVEL_TEXT[expLevel] }} ·
+              持仓 {{ instCountText(exposure) }} 标的
+            </div>
+          </div>
         </div>
 
         <div class="rb-sum">{{ brief.summary }}</div>
+
+        <div v-if="exposureWarnings.length" class="alert" style="margin:10px 0 0">
+          <div>
+            <b>章程 §5 · L2 敞口软约束（建议，非闸门）</b>
+            <div v-for="(r, i) in exposureWarnings" :key="i">{{ r }}</div>
+            <div class="hint">超限只留痕提示，不阻断执行；是否改成真闸门属策略层决定。</div>
+          </div>
+        </div>
+        <div v-else-if="exposureNoteText" class="hint" style="margin-top:6px">{{ exposureNoteText }}</div>
+        <div v-else class="hint" style="margin-top:6px">
+          本轮归档不含敞口体检（该字段由新版本 agent 在归档时写入，重跑一轮即可看到）
+        </div>
 
         <div v-if="brief.needsApproval && approvalReasons.length" class="alert" style="margin:10px 0 0">
           <div>

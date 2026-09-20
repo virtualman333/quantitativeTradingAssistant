@@ -20,7 +20,7 @@ import { ROOT, fetchAccount, fetchMarket, genClOrdId, placeOco, placeOrder, conf
 import { AgentState, buildGraphWithMcp, makeStoreLlmProvider } from "./graph.js";
 import { reflectExperts } from "./experts.js";
 import { reloadStore, getSettings } from "./store.js";
-import { checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
+import { checkExposure, checkIntent, summarizeRiskBrief, type IntentCheck } from "./riskbrief.js";
 import { guardMonthlyDrawdown } from "./guard.js";
 import { loadRunState } from "./runstate.js";import { writeJsonAtomic } from "./atomicwrite.js";
 import { alert } from "./alert.js";
@@ -414,8 +414,16 @@ async function runRound() {
   for (const r of execResults) log(`执行 ${r}`);
 
   // 本轮风控体检：一行摘要进日志，需要人工确认时留一条告警（同标题 24h 去重）
-  const riskBrief = summarizeRiskBrief(riskChecks);
+  // 敞口（L2 三条软上限）在这一步算：它看的是**当前持仓连起来**，与逐笔意图无关，
+  // 所以放在循环外、用最终快照算，不受本轮开了几笔影响。
+  const riskBrief = summarizeRiskBrief(
+    riskChecks,
+    checkExposure(snap.positions, snap.equityUsdt, (inst) => specOf(mkt.data, inst))
+  );
   log(riskBrief.summary);
+  // 敞口超限是 L2 **建议**：只留痕（日志 + 归档 + 界面），不进 needsApproval ——
+  // 那条闸门专管「单笔风险 >2%」，两者混在一起会让敞口超限也去敲人工确认。
+  for (const w of riskBrief.exposure.warnings) log(`⚠ ${w}`);
   if (riskBrief.needsApproval) {
     await alert(
       "风控人工确认提示（L2）",
