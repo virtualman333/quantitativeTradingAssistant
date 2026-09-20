@@ -266,8 +266,13 @@ export async function setLeverage(inst: string, lever: number): Promise<boolean>
  * 回查 pending algo，确认某标的止损已挂（L1-4 同轮回查）。
  *
  * ⚠ 判据一律走 `stopprotect.pendingStopsFor()` —— 章程点名的这条回查同时是
- * 「这笔持仓到底有没有止损」的唯一判据（`scalper.ts` 的裸仓自愈也读它）。
- * 在这里再手写一遍 `a.instId === inst` 就是同一件事的第二份实现，两份必然漂移。
+ * 「这笔持仓到底有没有止损」的唯一判据（`scalper.ts` 的裸仓自愈与 `main.ts` 的
+ * 裸仓巡检都读它）。在这里再手写一遍 `a.instId === inst` 就是同一件事的第二份实现，
+ * 两份必然漂移。
+ *
+ * ⚠ 这条判据的语义是「有几条**带止损触发价**的 pending 委托」，不是「有几条挂单」：
+ * 一条只有止盈的 OCO/条件单不算止损。此前它只数条数，于是那种委托能让本函数返回
+ * true —— 回查「通过」，而交易所侧没有止损。
  */
 export async function confirmAlgo(
   inst: string,

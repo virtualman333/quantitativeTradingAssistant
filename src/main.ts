@@ -25,6 +25,7 @@ import { guardMonthlyDrawdown } from "./guard.js";
 import { loadRunState } from "./runstate.js";import { writeJsonAtomic } from "./atomicwrite.js";
 import { alert } from "./alert.js";
 import { snappedSlTp } from "./price.js";
+import { findNakedPositions } from "./stopprotect.js";
 import { generateRoundReport, generateAllReports } from "./report.js";
 import type { AccountSnapshot, Position, TradeIntent } from "./types.js";
 
@@ -287,12 +288,24 @@ async function runRound() {
     return;
   }
 
-  const algoInsts = new Set(snap.algoOrders.map((a) => a.inst));
-  for (const p of snap.positions) {
-    if (!algoInsts.has(p.inst)) {
-      log(`⚠ 裸仓 ${p.inst} 无止损挂单`);
-      await alert(`裸仓告警：${p.inst}`, `持仓 ${p.inst}（${p.side} ${p.sizeContracts} 张）无止损挂单，违反 L1-4。请立即补挂止损。`);
-    }
+  // 裸仓巡检：判据一律走 `stopprotect.findNakedPositions()`（章程 L1-4「每笔持仓必须存在止损」）。
+  //
+  // 这里此前自己写了一份：把算法单 `.map()` 成标的名、再 `Set.has()` 问「该标的有挂单吗」。
+  // 两处都不对：
+  //   ① 它是同一个判据的**第二个主场**（`okx.confirmAlgo` / `scalper` 走的是
+  //      `stopprotect.pendingStopsFor`），而 `okx.ts` 那句注释明写着「判据一律走
+  //      pendingStopsFor，在这里再手写一遍就是同一件事的第二份实现」；
+  //   ② 它比要回答的问题**窄**：只问「有没有挂单」，不问「挂单里有没有止损触发价」——
+  //      一条只有止盈的委托（`slTriggerPx` 为空）就能让它一声不响，而交易所侧根本没有止损。
+  // 现有结构锁也没兜住：`tests/stopprotect.test.ts` 的反面扫描只认 `a.instId ===` 这种写法，
+  // `.map(a => a.inst)` + `Set.has` 是同一件事的另一种形状（锁看着在管，那一格走不到）。
+  for (const n of findNakedPositions(snap.positions, snap.algoOrders)) {
+    log(`⚠ 裸仓 ${n.inst} 无止损挂单（${n.reason}）`);
+    await alert(
+      `裸仓告警：${n.inst}`,
+      `持仓 ${n.inst}（${n.side} ${n.sizeContracts} 张）没有止损挂单，违反 L1-4。\n` +
+        `${n.reason}。请立即补挂止损，或按 L1-4 平掉这笔。`
+    );
   }
 
   const marketDigest = buildMarketDigest(mkt.data);

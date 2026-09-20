@@ -18,10 +18,145 @@
  *   - `rehang` —— 没有 → 先补挂（章程的「重试」）；
  *   - `close`  —— 补挂走不通（已经试过一次仍失败，或这轮压根挂不出去）→ 立即市价平仓。
  *
- * 判据只有一份：**该标的的 pending 算法单条数**。它与 `okx.confirmAlgo()` 用的是同一个
- * 口径（章程点名的就是这条回查），所以 `confirmAlgo` 也改成调这里的 `pendingStopsFor()` ——
- * 否则「止损存在性」很快会变成两处判据（本仓已经栽过六次的那类坑）。
+ * 判据只有一份：**该标的带止损触发价的 pending 算法单条数**。它与 `okx.confirmAlgo()`
+ * 用的是同一个口径（章程点名的就是这条回查），所以 `confirmAlgo` 也改成调这里的
+ * `pendingStopsFor()` —— 否则「止损存在性」很快会变成两处判据（本仓已经栽过六次的那类坑）。
+ *
+ * 判据的第二层：**「有挂单」不等于「有止损」**。
+ *
+ * 这条判据早先只数「该标的的 pending 算法单条数」，**不看到底有没有止损触发价**。于是
+ * 一条只有止盈的算法单（或任何 `slTriggerPx` 为空的委托）就让「这笔有没有止损」的答案
+ * 变成「有」：`confirmAlgo` 回查通过、`scalper` 的巡检把 `skipped` 的理由写成「止损在挂」、
+ * `main.ts` 的裸仓告警一声不响 —— 而交易所侧根本没有止损。这正是文件开头描述的那个静默，
+ * 只是换了一层皮：**判据比它要回答的问题窄，缩掉的那一格恰好是最要命的那一格。**
+ * 现在只认带止损触发价的委托，两种拼写都认（见 `stopTriggerPxOf`）。
+ *
+ * 判据的第三层：**`main.ts` 里还藏着一份手写的**。
+ *
+ * 它把算法单先 `.map()` 成标的名再 `Set.has()` —— 与 `a.instId === inst` 是同一件事，
+ * 只是形状不同，而 `tests/stopprotect.test.ts` 的反面扫描当时只认后者，**这条锁因此
+ * 漏了它**（锁看着在管这件事，其实那一格走不到）。现在 `main.ts` 改调
+ * `findNakedPositions()`，反面扫描也补上了这一族形状。
  */
+
+/**
+ * 从一条算法单里取「止损触发价」。
+ *
+ * 两种拼写都要认，这不是兼容性洁癖 —— **同一个事实在仓里本来就有两种拼写**：交易所
+ * 原始返回是 `slTriggerPx`，而账户快照 `main.buildSnapshot()` 会把它重命名成 `slTrigger`
+ * （见 `types.AlgoOrder`）。只认一个的话，另一种形态喂进来会**恒返回「没有止损」**，
+ * 而「没有止损」是这条链上唯一会触发补挂/平仓的答案 —— 认错一个键，要么凭空多出一个
+ * 裸仓去平仓，要么把真裸仓看漏。同理标的键也要认 `instId` 与 `inst` 两种。
+ *
+ * 只读**触发价**，不读执行价：OCO 的执行价写作 `slOrdPx=-1`（市价执行），那是
+ * 「怎么执行」，不是「有没有止损」。
+ *
+ * 取不到 / 非正数 / 非数字一律 null —— 包括 `""`（`Number("")` 是 0，必须显式挡）。
+ */
+function stopTriggerPxOf(order: unknown): number | null {
+  const o = order as Record<string, unknown> | null | undefined;
+  if (!o || typeof o !== "object") return null;
+  const raw = o.slTriggerPx ?? o.slTrigger;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** 一条算法单是不是「挂在 inst 上的止损单」 */
+function isStopOrderFor(order: unknown, inst: string): boolean {
+  const o = order as Record<string, unknown> | null | undefined;
+  if (!o || typeof o !== "object") return false;
+  return String(o.instId ?? o.inst ?? "") === inst && stopTriggerPxOf(o) !== null;
+}
+
+/** 标的键的两种拼写（见 `stopTriggerPxOf` 的说明） */
+function instOfOrder(order: unknown): string {
+  const o = order as Record<string, unknown> | null | undefined;
+  if (!o || typeof o !== "object") return "";
+  return String(o.instId ?? o.inst ?? "");
+}
+
+/**
+ * 止损存在性判据：账户快照里该标的有几条**带止损触发价**的 pending 算法单。
+ *
+ * ⚠ 必须传**数组**（`fetchAccount().algoOrders` 或 `unwrap(...)` 后的结果）。
+ * MCP 返回是三层洋葱 `result.data.data`，少剥一层就是个空数组 —— 空数组会让
+ * 「没有止损」这条判据**在止损明明挂着的时候也成立**，于是每轮都去补挂一份。
+ * 所以这里对非数组输入返回 0 之外，调用方还要自己保证剥对了（见 okx.unwrap）。
+ *
+ * ⚠ 调用方负责只喂 `status=pending` 的单（`okx.fetchAccount` 与 `confirmAlgo` 都是这么
+ * 取的）。这里**刻意不看 `state` 字段**：自己凭想象多一道过滤，就多一种「止损明明挂着
+ * 却判成没有」的路径，而这条链判错的代价是平仓 —— 需要它时应当先有实测证据。
+ */
+export function pendingStopsFor(algoOrders: unknown, inst: string): number {
+  if (!Array.isArray(algoOrders)) return 0;
+  if (!inst) return 0;
+  return algoOrders.filter((a) => isStopOrderFor(a, inst)).length;
+}
+
+/**
+ * 该标的 pending 算法单**总**条数（不分类型）。
+ *
+ * 与 `pendingStopsFor` 的差额就是「挂了单，但没有一条带止损触发价」。单看一个 0
+ * 说不清是「一条都没挂」还是「挂了止盈忘了止损」，而这两种现场要人做的事不一样。
+ */
+export function pendingAlgoFor(algoOrders: unknown, inst: string): number {
+  if (!Array.isArray(algoOrders)) return 0;
+  if (!inst) return 0;
+  return algoOrders.filter((a) => instOfOrder(a) === inst).length;
+}
+
+/** 一个裸仓的现场（字段都是调用方已经拿在手上的，不额外打接口） */
+export interface NakedPosition {
+  inst: string;
+  side: string;
+  sizeContracts: number;
+  /** 该标的的 pending 算法单总条数 */
+  algoOrders: number;
+  /** 其中带止损触发价的条数（恒为 0 —— 否则它不会出现在这张表里） */
+  stopOrders: number;
+  /** 中文说明，直接进日志/告警 —— 用户要能读懂「凭什么说它没有止损」 */
+  reason: string;
+}
+
+/**
+ * 全仓裸仓巡检（纯函数）：找出「有持仓、但没有一条带止损触发价的挂单」的标的。
+ *
+ * 章程 L1-4 的判据是「**每笔持仓**必须存在止损」，所以这条巡检必须**逐持仓**做，
+ * 不能只看「账户里有没有算法单」这个全局面：A 标的挂了止盈、B 标的连单都没有，
+ * 按全局面看是「有单」，按持仓面看是两笔裸仓。
+ *
+ * 张数为 0 的持仓不算裸仓 —— 那是「没有持仓」，不是「有持仓没止损」。
+ *
+ * 持仓侧同时认 `inst`/`instId` 与 `sizeContracts`/`pos`（账户快照给前者，
+ * `fetchAccount` 的原始行给后者），理由与 `stopTriggerPxOf` 里写的一样。
+ */
+export function findNakedPositions(positions: unknown, algoOrders: unknown): NakedPosition[] {
+  if (!Array.isArray(positions)) return [];
+  const out: NakedPosition[] = [];
+  for (const raw of positions) {
+    const p = raw as Record<string, unknown> | null | undefined;
+    if (!p || typeof p !== "object") continue;
+    const inst = String(p.inst ?? p.instId ?? "");
+    if (!inst) continue;
+    const size = Math.abs(Number(p.sizeContracts ?? p.pos ?? 0));
+    if (!Number.isFinite(size) || size === 0) continue;
+    const stops = pendingStopsFor(algoOrders, inst);
+    if (stops > 0) continue;
+    const algo = pendingAlgoFor(algoOrders, inst);
+    out.push({
+      inst,
+      side: String(p.side ?? ""),
+      sizeContracts: size,
+      algoOrders: algo,
+      stopOrders: stops,
+      reason: algo
+        ? `该标的挂着 ${algo} 条 pending 算法单，但没有一条带止损触发价（例如只挂了止盈）`
+        : "该标的没有任何 pending 算法单",
+    });
+  }
+  return out;
+}
 
 /** 决策输入。字段都来自调用方已经拿在手上的现场，不额外打接口。 */
 export interface StopContext {
@@ -47,21 +182,6 @@ export interface StopDecision {
   action: StopAction;
   /** 中文说明，直接进 tick / 台账 / 界面 —— 用户要能读懂发生了什么 */
   why: string;
-}
-
-/**
- * 止损存在性判据：账户快照里该标的有几条 pending 算法单。
- *
- * ⚠ 必须传**数组**（`fetchAccount().algoOrders` 或 `unwrap(...)` 后的结果）。
- * MCP 返回是三层洋葱 `result.data.data`，少剥一层就是个空数组 —— 空数组会让
- * 「没有止损」这条判据**在止损明明挂着的时候也成立**，于是每轮都去补挂一份。
- * 所以这里对非数组输入返回 0 之外，调用方还要自己保证剥对了（见 okx.unwrap）。
- */
-export function pendingStopsFor(algoOrders: unknown, inst: string): number {
-  if (!Array.isArray(algoOrders)) return 0;
-  if (!inst) return 0;
-  return algoOrders.filter((a) => String((a as Record<string, unknown>)?.instId ?? "") === inst)
-    .length;
 }
 
 /**
